@@ -1,3 +1,7 @@
+export function say(locale, english, russian, ukrainian) {
+  return locale === "ru" ? russian : locale === "uk" ? ukrainian : english;
+}
+
 export function botAliasPrefix(aliases, { requireAddress = false } = {}) {
   const names = [...new Set(aliases.map(alias => alias.trim()).filter(Boolean))]
     .sort((a, b) => b.length - a.length);

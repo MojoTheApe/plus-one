@@ -11,6 +11,7 @@ import { MemberRoster, mentionChunks, activeMember } from "./assemble-members.js
 import { StickerRouter, isStickerPackText } from "./stickers.js";
 import { duelReply } from "./duel.js";
 import { flappyReply } from "./flappy.js";
+import { say } from "./helpers.js";
 import { occupiersReply } from "./occupiers.js";
 import { RoomRegistry } from "./occupiers/registry.js";
 import { FlappyNotices } from "./flappy-notices.js";
@@ -250,6 +251,7 @@ function profileBehavior(profile) {
     addressPrefix: aliases ? botAliasPrefix(aliases, { requireAddress: true }) : undefined,
     preserveLanguageGate: profile?.language.accept !== "all",
     replyLanguage: profileReplyLanguage(profile),
+    locale: profile?.language.reply === "match-request" ? profile.language.fallback || "en" : profile?.language.reply || "uk",
   };
 }
 const defaultBehavior = profileBehavior(botProfile);
@@ -307,6 +309,14 @@ const setup = setupStore ? createSetup({
   games: assembleGames,
   telegram: (method, payload) => telegram(method, payload, { record: false }),
   featureMode: setupFeatureMode,
+  classifyTurn: async input => {
+    await telegram("sendChatAction", { chat_id: setupStore.ownerId, action: "typing" }).catch(() => {});
+    return codexBackend.classify({
+      prompt: JSON.stringify(input),
+      schemaFile: path.join(rootDir, "src", "setup-turn.schema.json"),
+      instructionsFile: path.join(rootDir, "src", "setup-turn.md"),
+    });
+  },
 }) : null;
 function setupGroupSetting(chatId, feature) {
   const group = setupStore.group(chatId);
@@ -318,13 +328,15 @@ function groupMode(chatId, feature) {
   return group?.modes?.[feature];
 }
 function setupFeatureMode(chatId, feature) {
+  if (feature === "search") return answerBackend === "claude" ? "unavailable" : "on";
   const available = {
     memory: memoryEnabled && memoryPrivacyMode !== "off",
     voice: voiceTranscriptionEnabled,
-    analysis: visualSummaryEnabled,
+    analysis: visualSummaryEnabled && answerBackend !== "claude",
     download: socialVideoEnabled,
     minigames: Boolean(duelUrl || flappyBirdUrl || (occupiersUrl && occupiersRegistry)),
   }[feature];
+  if (available === undefined) return undefined;
   if (!available) return "unavailable";
   const selected = groupMode(chatId, feature);
   if (selected) return selected;
@@ -605,6 +617,14 @@ async function handleScopedUpdate(update) {
   const message = update.message;
   if (!message || !message.chat || !message.from) return;
   if (message.from.is_bot) return;
+  const plainStart = message.chat.type === "private" && parseBotCommandText(message.text, botInfo.username);
+  if (!setup && plainStart?.name === "start" && !plainStart.args && !message.forward_origin && !message.forward_date && !message.forward_from && !message.via_bot) {
+    await telegram("sendMessage", { chat_id: message.chat.id, text: say(behavior().locale,
+      "The bot owner is not configured yet. Ask your installation agent to set BOT_OWNER_ID to the owner's numeric Telegram user ID and restart this installation. Then open /start from that account.",
+      "Владелец бота ещё не настроен. Попроси агента установки записать числовой Telegram ID владельца в BOT_OWNER_ID и перезапустить эту установку. Затем открой /start с указанного аккаунта.",
+      "Власника бота ще не налаштовано. Попроси агента встановлення записати числовий Telegram ID власника в BOT_OWNER_ID і перезапустити цю інсталяцію. Потім відкрий /start з указаного акаунта.") });
+    return;
+  }
   const rule = matchMessageRule(setupStore && !setupStore.group(message.chat.id)?.disabled?.reaction
     ? setupStore.group(message.chat.id)?.rules : null, message);
   if (rule) {
@@ -637,13 +657,13 @@ async function handleScopedUpdate(update) {
     }
   }
 
-  const duel = minigamesAllowed && duelReply(message, botInfo, duelUrl);
+  const duel = minigamesAllowed && duelReply(message, botInfo, duelUrl, behavior().locale);
   if (duel) {
     await telegram("sendMessage", { ...assembleReplyTarget(message), ...duel });
     return;
   }
 
-  const gameReply = minigamesAllowed && flappyReply(message, botInfo, flappyBirdUrl, behavior().aliasPrefix);
+  const gameReply = minigamesAllowed && flappyReply(message, botInfo, flappyBirdUrl, behavior().aliasPrefix, behavior().locale);
   if (gameReply) {
     const button = gameReply.reply_markup?.inline_keyboard?.[0]?.[0];
     if (flappyNotices && button?.url) {
@@ -656,7 +676,7 @@ async function handleScopedUpdate(update) {
     return;
   }
 
-  if (await stickerRouter.handleMessage(message, botInfo, behavior().aliasPrefix)) return;
+  if (await stickerRouter.handleMessage(message, botInfo, behavior().aliasPrefix, behavior().locale)) return;
 
   if (await maybeHandleMediaRetry(message)) return;
 
@@ -3482,6 +3502,7 @@ async function answerWithConversationAgent(message, question) {
     `${languageRoutingInstruction ? `${languageRoutingInstruction}\n\n` : ""}` +
     `<transport_policy>\n${resolution.instruction}\n</transport_policy>\n\n` +
     `Recent Telegram context:\n${recentContext || "(no prior context)"}\n\n` +
+    (message._setupConversationContext ? `The owner has paused a configuration draft to chat. Its pending question is quoted context: ${JSON.stringify(message._setupConversationContext)}. Answer the current request normally. Do not claim settings were changed or saved. The owner can say “continue setup” to return to that draft.\n\n` : "") +
     `${memoryContext ? `${memoryContext}\n\n` : ""}` +
     `${replyContext ? `${replyContext}\n\n` : ""}` +
     `${referencedMessageContext ? `${referencedMessageContext}\n\n` : ""}` +

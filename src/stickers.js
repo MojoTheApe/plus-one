@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { actionableAssembleText } from "./assemble.js";
-import { parseBotCommandText } from "./helpers.js";
+import { parseBotCommandText, say } from "./helpers.js";
 
 const noun = /(?:ст[іи]кер|sticker|\bpack\b|(?:^|[^\p{L}])пак(?:у|а)?(?:$|[^\p{L}]))/iu;
 const wholePack = /(?:^|[^\p{L}])(?:весь|все|всі|усі|цілий|whole|entire|all)\s+(?:(?:the|our|наші|ці|эти)\s+)?(?:(?:ст[іи]кер\p{L}*|stickers?)\s*[- ]?\s*(?:пак\p{L}*|pack)|(?:пак\p{L}*|pack|ст[іи]кер\p{L}*|stickers?))/iu;
@@ -101,60 +101,61 @@ export class StickerRouter {
       ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}), disable_web_page_preview: true });
   }
 
-  async handleMessage(message, bot, aliasPrefix = this.aliasPrefix) {
+  async handleMessage(message, bot, aliasPrefix = this.aliasPrefix, locale = "uk") {
     const intent = stickerIntent(message, bot, aliasPrefix);
     if (!intent) return false;
-    const run = this.queue.then(() => this.process(message, bot, intent));
+    const run = this.queue.then(() => this.process(message, bot, intent, locale));
     this.queue = run.catch(() => {});
     try { await run; }
     catch (error) {
       this.log("sticker_action_failed", error, { chat: message.chat.id, messageId: message.message_id, action: intent.action });
-      await this.reply(message, "Не вдалося змінити стікерпак. Перевір права бота й спробуй ще раз.").catch(() => {});
+      await this.reply(message, say(locale, "Couldn’t update the sticker pack. Check the bot’s permissions and try again.", "Не удалось изменить стикерпак. Проверь права бота и попробуй ещё раз.", "Не вдалося змінити стікерпак. Перевір права бота й спробуй ще раз.")).catch(() => {});
     }
     return true;
   }
 
-  async process(message, bot, intent) {
+  async process(message, bot, intent, locale) {
+    const reply = (en, ru, uk) => this.reply(message, say(locale, en, ru, uk));
     if (intent.action === "unsupported") {
-      await this.reply(message, "Працюю з окремими стікерами: відповідай на зображення з /stickeradd або на стікер із нашого пака з /stickerdel. Змінювати чи видаляти весь пак цими командами не можна."); return;
+      await reply("Reply to an image with /stickeradd or to a sticker from the connected pack with /stickerdel. These commands manage individual stickers, not the entire pack.", "Ответь на картинку командой /stickeradd или на стикер из подключённого пака командой /stickerdel. Эти команды работают с отдельными стикерами, а не со всем паком.", "Працюю з окремими стікерами: відповідай на зображення з /stickeradd або на стікер із нашого пака з /stickerdel. Змінювати чи видаляти весь пак цими командами не можна."); return;
     }
     if (!["group", "supergroup"].includes(message.chat.type)) {
-      await this.reply(message, "Керування стікерами працює в групі, до якої прив'язаний пак."); return;
+      await reply("Manage stickers in the group linked to the pack. The owner can connect it through /setup.", "Управление стикерами работает в группе, к которой привязан пак. Владелец может подключить его через /setup.", "Керування стікерами працює в групі, до якої прив'язаний пак. Власник може підключити його через /setup."); return;
     }
     const binding = (await this.bindings())[String(message.chat.id)];
-    if (!binding) { await this.reply(message, "Для цієї групи ще не підключено стікерпак."); return; }
+    if (!binding) { await reply("No sticker pack is connected to this group. Ask the owner to connect one through /setup.", "Для этой группы стикерпак не подключён. Попроси владельца подключить его через /setup.", "Для цієї групи ще не підключено стікерпак. Попроси власника підключити його через /setup."); return; }
     if (!binding.packName.toLowerCase().endsWith(`_by_${bot.username.toLowerCase()}`)) throw new Error("Sticker pack belongs to another bot");
     const link = `https://t.me/addstickers/${binding.packName}`;
     if (intent.action === "help") {
-      await this.reply(message, `${link}\nАдміністратор може відповісти на зображення: @${bot.username} додай у стікери.\nДля видалення відповідай на стікер із цього пака: @${bot.username} видали цей стікер.\nКоманди: /stickeradd, /stickerdel. Фото й PNG/JPEG/WebP перетворюються на статичний стікер.`); return;
+      await reply(`${link}\nGroup admins can reply to an image with /stickeradd, or to a sticker from this pack with /stickerdel. Photos and PNG/JPEG/WebP become static stickers.`, `${link}\nАдминистраторы группы могут ответить на картинку командой /stickeradd, а на стикер из этого пака — /stickerdel. Фото и PNG/JPEG/WebP преобразуются в статический стикер.`, `${link}\nАдміністратор може відповісти на зображення: @${bot.username} додай у стікери.\nДля видалення відповідай на стікер із цього пака: @${bot.username} видали цей стікер.\nКоманди: /stickeradd, /stickerdel. Фото й PNG/JPEG/WebP перетворюються на статичний стікер.`); return;
     }
     if (message.sender_chat || !Number.isSafeInteger(message.from?.id)) {
-      await this.reply(message, "Для зміни пака напиши від свого акаунта, без анонімного режиму адміністратора."); return;
+      await reply("Use your own account without anonymous administrator mode to change the pack.", "Для изменения пака напиши со своего аккаунта, без анонимного режима администратора.", "Для зміни пака напиши від свого акаунта, без анонімного режиму адміністратора."); return;
     }
     const member = await this.telegram("getChatMember", { chat_id: message.chat.id, user_id: message.from.id });
     if (!["creator", "administrator"].includes(member.status)) {
-      await this.reply(message, "Додавати й видаляти стікери можуть лише адміністратори цієї групи."); return;
+      await reply("Only this group’s admins can add or remove stickers.", "Добавлять и удалять стикеры могут только администраторы этой группы.", "Додавати й видаляти стікери можуть лише адміністратори цієї групи."); return;
     }
     const media = stickerMedia(message);
     if (!media || (intent.action === "delete" && media.kind !== "sticker")) {
-      await this.reply(message, intent.action === "add" ? "Прикріпи фото або PNG/JPEG/WebP, або відповідай на зображення чи готовий стікер." : "Відповідай на конкретний стікер із нашого нового пака, який треба видалити."); return;
+      await reply(intent.action === "add" ? "Attach a photo or PNG/JPEG/WebP, or reply to an image or sticker." : "Reply to the sticker from the connected pack that you want to remove.", intent.action === "add" ? "Прикрепи фото или PNG/JPEG/WebP либо ответь на картинку или стикер." : "Ответь на конкретный стикер из подключённого пака, который нужно удалить.", intent.action === "add" ? "Прикріпи фото або PNG/JPEG/WebP, або відповідай на зображення чи готовий стікер." : "Відповідай на конкретний стікер із нашого нового пака, який треба видалити."); return;
     }
     if (intent.action === "delete" && media.set_name !== binding.packName) {
-      await this.reply(message, "Цей стікер належить іншому паку. Надішли його саме з нашого нового пака."); return;
+      await reply("That sticker belongs to another pack. Choose one from the connected pack.", "Этот стикер из другого пака. Выбери стикер из подключённого пака.", "Цей стікер належить іншому паку. Надішли його саме з нашого нового пака."); return;
     }
     const state = await this.loadState();
     const key = `${message.chat.id}:${message.message_id}:${intent.action}`;
     let job = state.jobs[key];
     if (job && (job.packName !== binding.packName || job.ownerId !== binding.ownerId || job.userId !== message.from.id)) throw new Error("Sticker action binding changed");
-    if (job?.status === "done") { await this.reply(message, `Цей запит уже виконано.\n${link}`); return; }
+    if (job?.status === "done") { await reply(`This request is already complete.\n${link}`, `Этот запрос уже выполнен.\n${link}`, `Цей запит уже виконано.\n${link}`); return; }
     const pack = await this.telegram("getStickerSet", { name: binding.packName });
     if (pack.sticker_type !== "regular") throw new Error("Only regular group sticker packs are supported");
     if (intent.action === "add") {
       if (!job) {
-        if (media.kind === "sticker" && media.set_name === binding.packName) { await this.reply(message, `Цей стікер уже є в нашому паку.\n${link}`); return; }
-        if (pack.stickers.length >= 120) { await this.reply(message, "У паку вже 120 стікерів. Спершу видали непотрібний."); return; }
+        if (media.kind === "sticker" && media.set_name === binding.packName) { await reply(`That sticker is already in the pack.\n${link}`, `Этот стикер уже есть в паке.\n${link}`, `Цей стікер уже є в нашому паку.\n${link}`); return; }
+        if (pack.stickers.length >= 120) { await reply("The pack already has 120 stickers. Remove one first.", "В паке уже 120 стикеров. Сначала удали ненужный.", "У паку вже 120 стікерів. Спершу видали непотрібний."); return; }
         const previous = Object.values(state.jobs).find(j => j.status === "done" && j.action === "add" && j.packName === binding.packName && j.sourceUniqueId === media.file_unique_id && j.resultFileId && pack.stickers.some(s => s.file_id === j.resultFileId));
-        if (previous) { await this.reply(message, `Це зображення вже додано.\n${link}`); return; }
+        if (previous) { await reply(`This image is already added.\n${link}`, `Это изображение уже добавлено.\n${link}`, `Це зображення вже додано.\n${link}`); return; }
         let fileId = media.file_id;
         if (media.kind === "image") {
           const image = await this.prepareImage(media);
@@ -177,16 +178,16 @@ export class StickerRouter {
       job.resultFileId = added.length === 1 ? added[0].file_id : null;
       job.status = "done"; job.updatedAt = Date.now();
       await this.saveState(state);
-      await this.reply(message, `${added.length ? "Додано стікер" : "Стікер уже є в паку"}. У паку ${after.stickers.length} стікерів.\n${link}`);
+      await reply(`${added.length ? "Sticker added" : "Sticker already in the pack"}. Stickers: ${after.stickers.length}.\n${link}`, `${added.length ? "Стикер добавлен" : "Стикер уже есть в паке"}. Стикеров в паке: ${after.stickers.length}.\n${link}`, `${added.length ? "Додано стікер" : "Стікер уже є в паку"}. У паку ${after.stickers.length} стікерів.\n${link}`);
       if (job.resultFileId) await this.telegram("sendSticker", { chat_id: message.chat.id, sticker: job.resultFileId,
         reply_to_message_id: message.message_id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}) }).catch(error => this.log("sticker_preview_failed", error));
     } else {
       const existing = pack.stickers.find(s => s.file_unique_id === media.file_unique_id);
       if (!existing) {
         if (job) { job.status = "done"; job.updatedAt = Date.now(); await this.saveState(state); }
-        await this.reply(message, `Цього стікера вже немає в паку.\n${link}`); return;
+        await reply(`That sticker is no longer in the pack.\n${link}`, `Этого стикера уже нет в паке.\n${link}`, `Цього стікера вже немає в паку.\n${link}`); return;
       }
-      if (pack.stickers.length <= 1) { await this.reply(message, "Не видалятиму останній стікер, щоб зберегти пак. Спершу додай інший."); return; }
+      if (pack.stickers.length <= 1) { await reply("Add another sticker before removing the last one, to keep the pack.", "Сначала добавь другой стикер: удаление последнего может привести к потере пака.", "Не видалятиму останній стікер, щоб зберегти пак. Спершу додай інший."); return; }
       if (!job) {
         job = state.jobs[key] = { action: "delete", status: "prepared", packName: binding.packName, ownerId: binding.ownerId,
           userId: message.from.id, fileId: existing.file_id, updatedAt: Date.now() };
@@ -196,7 +197,7 @@ export class StickerRouter {
       const after = await this.telegram("getStickerSet", { name: binding.packName });
       if (after.stickers.some(s => s.file_unique_id === media.file_unique_id)) throw new Error("Sticker deletion was not applied");
       job.status = "done"; job.updatedAt = Date.now(); await this.saveState(state);
-      await this.reply(message, `Стікер видалено. У паку ${after.stickers.length} стікерів.\n${link}`);
+      await reply(`Sticker removed. Stickers: ${after.stickers.length}.\n${link}`, `Стикер удалён. Стикеров в паке: ${after.stickers.length}.\n${link}`, `Стікер видалено. У паку ${after.stickers.length} стікерів.\n${link}`);
     }
   }
 }
