@@ -5,10 +5,10 @@ import { say } from "./setup-copy.js";
 
 export const ruleListRequest = /(?:list|show|список|покажи|выведи|перечисли).*(?:rule|trigger|правил|триггер|тригер)/iu;
 
-export function createRuleEditor({ store, games, targetPrompt, resolveTarget }) {
-  const settings = draft => draft.profileId ? store.state.profiles[draft.profileId]?.settings : store.group(draft.group);
-  const title = draft => draft.profileId ? profileTitle(store.state.profiles[draft.profileId]) : store.group(draft.group)?.title;
-  const saveDraft = draft => store.change(state => { state.session = draft; });
+export function createRuleEditor({ store, games, targetPrompt, resolveTarget, onDraft }) {
+  const settings = draft => draft.profileId ? null : store.group(draft.group);
+  const title = draft => store.group(draft.group)?.title;
+  const saveDraft = onDraft ?? (draft => store.change(state => { state.session = draft; }));
   const label = (action, locale) => ({
     judge: say(locale, "review the dispute", "разобрать спор", "розібрати суперечку"),
     assemble: say(locale, "call players", "собрать игроков", "зібрати гравців"),
@@ -120,11 +120,12 @@ export function createRuleEditor({ store, games, targetPrompt, resolveTarget }) 
         "This target already has 32 rules. Cancel this draft and delete a rule first.",
         "Здесь уже 32 правила. Отмени черновик и сначала удали одно из правил.",
         "Тут уже 32 правила. Скасуй чернетку й спочатку видали одне з правил.");
-      const rule = { id: existing?.id ?? randomUUID(), phrase: draft.phrase, action: draft.action, access: draft.access, announcement: draft.announcement, createdAt: new Date().toISOString() };
+      const rule = { id: existing?.id ?? randomUUID(), phrase: draft.phrase, action: draft.action, access: draft.access,
+        enabled: existing?.enabled ?? true, announcement: draft.announcement, createdAt: new Date().toISOString() };
       rules = validateMessageRules([...rules.filter(item => item.id !== existing?.id), rule]);
     }
     store.change(state => {
-      const target = draft.profileId ? state.profiles[draft.profileId].settings : state.groups[draft.group];
+      const target = state.groups[draft.group];
       target.rules = rules;
       target.disabled ??= {};
       if (draft.operation !== "delete") target.disabled.reaction = false;
@@ -132,7 +133,7 @@ export function createRuleEditor({ store, games, targetPrompt, resolveTarget }) 
         if (!target.configured) target.modes = { memory: "off", voice: "off", analysis: "off", download: "off", minigames: "off" };
         target.configured = true;
       }
-      state.session = draft.resume ?? { kind: "menu", group: draft.group, profileId: draft.profileId };
+      state.session = { kind: "menu", group: draft.group, resume: draft.resume };
     });
     return say(locale, "Message rules saved.", "Правила сохранены.", "Правила збережено.");
   }

@@ -1,0 +1,41 @@
+# Separate optional services. Never load the bot's credential env_file here.
+services:
+  mini-entry:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.flappy
+    restart: unless-stopped
+    environment:
+      FLAPPY_BOT_ID: ${GAME_BOT_ID:?Set the public numeric bot ID}
+      FLAPPY_RECORD_FILE: /data/shared-record-v4.json
+    ports: ["127.0.0.1:18080:8080"]
+    volumes:
+      - ${BOT_INSTANCE_DIR:?Set the private instance directory}/state/games/flappy:/data
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  duel:
+    profiles: [duel]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.duel
+    restart: unless-stopped
+    environment:
+      DUEL_BOT_USERNAME: ${GAME_BOT_USERNAME:?Set the public bot username}
+    ports: ["127.0.0.1:18091:8091"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  occupiers:
+    profiles: [occupiers]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.occupiers
+    restart: unless-stopped
+    environment:
+      OCCUPIERS_BOT_ID: ${GAME_BOT_ID:?Set the public numeric bot ID}
+      OCCUPIERS_ORIGIN: ${GAME_ORIGIN:?Set the public HTTPS origin}
+      OCCUPIERS_ROOMS_FILE: /data/rooms.json
+    ports: ["127.0.0.1:18090:8090"]
+    volumes:
+      - ${BOT_INSTANCE_DIR:?Set the private instance directory}/state/games/occupiers:/data:ro
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]

@@ -1,16 +1,15 @@
-# Install your own Telegram bot
+# Install your own Plus One
 
-Use a Linux VPS with Git, Docker Engine and the Docker Compose plugin, or a local
-computer with Git and Docker Desktop. The commands below use a Unix shell. The
-repository builds the image. Each bot uses a unique Compose project and a private
-directory outside the checkout. The instructions below use the example project
-name `nightbot`. Run them from the repository root.
+## 1. Choose the environment, then install
 
-## Prepare the instance
+The installation agent must first ask **where** (this computer or your VPS) and
+**how** (Docker, or the native path below). Docker Desktop is the standard local
+option; a Linux VPS needs Git, Docker Engine and the Compose plugin. A VPS is a
+location, not an alternative to Docker. Run commands from the repository root.
+Do not start the bot or ask for its Telegram token yet.
 
-Create a Telegram bot with BotFather and keep its token on the server. Get the
-owner's numeric Telegram user ID from a trusted Telegram client or a Telegram
-update from the owner. The ID identifies the human account that can run setup.
+Choose a unique project name and private directory for each installation. These
+examples use `nightbot`:
 
 ```sh
 export BOT_INSTANCE_DIR="$HOME/.local/share/tg-bot/nightbot"
@@ -20,109 +19,153 @@ sudo install -d -o 1000 -g 1000 -m 700 \
   "$BOT_INSTANCE_DIR/state" "$BOT_INSTANCE_DIR/state/home" \
   "$BOT_INSTANCE_DIR/state/codex" "$BOT_INSTANCE_DIR/state/agent" \
   "$BOT_INSTANCE_DIR/state/runtime"
-
 docker compose -p nightbot -f deploy/compose.portable.yaml build
 ```
 
-In the private `bot.env` set `TELEGRAM_BOT_TOKEN` and `BOT_OWNER_ID`. Keep
-`BOT_PROFILE=neutral` for a new installation. `AI_MODELS=default` lets the Codex CLI select its default. You can also
-list models available to your account. The instance directory contains
-credentials and private state, so preserve its restricted permissions.
+Leave Telegram token and owner ID empty for now. Never overwrite an existing
+private environment file while preparing or updating an instance.
 
-## Connect Codex and verify
+## 2. Choose AI and verify it before Telegram
+
+The agent now asks: **Codex CLI or Anthropic API?** Connect only the selected
+method, using the user's own account. Verify AI independently so authentication
+problems are resolved before Telegram is introduced.
+
+### Codex CLI
+
+Complete device login privately in your own browser. `AI_MODELS=default` uses the
+CLI default; alternatively select models available to your account.
 
 ```sh
 docker compose -p nightbot -f deploy/compose.portable.yaml run --rm --entrypoint codex bot login --device-auth
-docker compose -p nightbot -f deploy/compose.portable.yaml run --rm bot node scripts/check-portable.mjs
+docker compose -p nightbot -f deploy/compose.portable.yaml run --rm bot node scripts/check-portable.mjs --ai-only
 ```
 
-Complete the login in your own browser. The check looks up the bot's Telegram
-identity and asks Codex for a test answer. It does not start polling or send any
-messages. If the check reports a problem, correct the named connection before
-starting the service.
+### Anthropic API
+
+The supported API-key connection uses the existing Claude Code CLI adapter.
+Set your `ANTHROPIC_API_KEY` privately in `bot.env`. Optionally select available
+`CLAUDE_MODEL` and `CLAUDE_CLASSIFY_MODEL` values. Add the Claude overlay to **every**
+Compose operation for this instance, including checks, start, stop and updates:
 
 ```sh
+docker compose -p nightbot -f deploy/compose.portable.yaml -f deploy/compose.claude.yaml run --rm bot node scripts/check-portable.mjs --ai-only
+```
+
+This adapter supports text conversation, profiles and intent classification.
+Images, live web search and the scoped history tool are not connected to it yet.
+Voice transcription and link downloads use their separate installed tools.
+
+### Prepare speech and media tools
+
+After AI passes, load the local speech model and check the downloader/FFmpeg:
+
+```sh
+docker compose -p nightbot -f deploy/compose.portable.yaml run --rm bot node scripts/check-portable.mjs --media-only
+```
+
+Include the Claude overlay when selected. The first speech-model download needs
+network access and a writable instance cache; it may take several minutes. This
+check verifies model loading and executables, not a physical Telegram interaction.
+It neither polls nor sends Telegram messages. Correct the reported problem before
+continuing. No Telegram token or owner is needed for AI/media-only checks.
+
+## 3. Create the Telegram bot and configure group reception
+
+Only after AI works, open the official BotFather and create your own bot with
+`/newbot`. Keep its token private. Configure these settings immediately:
+
+- `/setjoingroups`: Enable, so the bot can be added to groups.
+- `/setprivacy`: Disable, so it can receive ordinary participants' group messages.
+
+The same settings are available through `/mybots`. See
+[Telegram's settings reference](https://core.telegram.org/bots/features#edit-settings).
+If changing privacy for a bot already in a group, follow BotFather's instructions
+about re-adding it. Later make it an administrator in each target group. Give
+restriction permission only when configuring moderation; other optional actions
+must have their actual required rights.
+
+## 4. Identify the owner, verify, then start
+
+The agent asks **who owns this installation**. Get that human account's numeric
+Telegram user ID through a trusted client or verified update. A username is not
+an ownership credential. Set `TELEGRAM_BOT_TOKEN` and `BOT_OWNER_ID` in private
+`bot.env`. Keep `BOT_PROFILE=neutral` for a new installation.
+Portable Compose refuses to start without a numeric owner ID. Keep
+`BOT_REQUIRE_OWNER=true` from the portable example for native installations too.
+
+```sh
+docker compose -p nightbot -f deploy/compose.portable.yaml run --rm bot node scripts/check-portable.mjs --telegram-only
+docker compose -p nightbot -f deploy/compose.portable.yaml run --rm bot node scripts/check-portable.mjs
 docker compose -p nightbot -f deploy/compose.portable.yaml up -d
 docker compose -p nightbot -f deploy/compose.portable.yaml ps
 ```
 
-Open the bot link from the check using the configured owner's Telegram account.
-Press **Start** in its private chat. Answer in ordinary messages and confirm the
-profile when it looks right. You can write “create a new profile” or “show all
-available profiles” at any time. A profile can have its own label and can be
-prepared before the bot joins any group. For example, “configure game calls in
-profile Gaming” edits that saved profile's feature settings.
+Use the Claude overlay on these commands when selected. The full check verifies
+AI, local media readiness, Telegram identity/group settings and owner/runtime
+configuration without polling. Never start two processes with one token.
 
-The first private Start should ask what to call the bot. If it reports that the
-owner is missing or incorrect, verify the numeric `BOT_OWNER_ID` in this instance's
-private environment file and restart that instance. Use the matching Telegram
-account; the bot never assigns ownership to the first person who writes.
+The installer finishes by giving the bot link. Open it **as the configured owner**
+and press **Start**. A missing/incorrect owner notice is an installation problem:
+correct the numeric ID and restart that instance, rather than assigning ownership
+to the first person who writes.
 
-AI must be connected for conversational setup. You can discuss another topic
-without losing the draft, then say “continue setup” or use `/setup` to return.
-A plain yes during side conversation cannot save an older preview. If the AI
-turn check fails, the bot keeps the draft and reports the connection problem.
-The catalogue shows descriptions and whether a feature needs setup or connection;
-asking about one opens its detailed requirements and supported configuration steps.
-Supported public-link downloads default on in new profiles after group assignment.
-The bot still needs administrator rights and the downloader enabled. Updates
-preserve previously saved off modes; private/restricted posts may be unavailable.
+## 5. Continue in Telegram
 
-When the bot joins a group, it privately asks the owner which profile to use.
-Reply to that message to select the group, review the preview and confirm.
-The owner can also ask “use profile Gaming” inside a group. The confirmation is
-sent privately. Profile lists and internal configuration are private to the owner.
-Applying a profile copies its personality and feature settings to the group.
-Editing a saved profile prepares its next application. Reapply it to the selected
-group when you want those changes there. Group history and game results are
-separate from configuration. Use `/setup` for the catalogue and group settings.
+Create the first personality: name, character, language, preview, save. Accept or
+skip the short introduction. Profiles are reusable personalities; features belong
+to specific groups. You can ask about features before joining any groups, but
+cannot configure them in a saved profile.
 
-Say “create a rule” to connect a whole phrase to judging, player calls, an
-animation or a personality change. Choose the group/saved profile and confirm
-the complete private preview. “Show rules” and “delete a rule” manage rules.
-Personality rules are owner-only and preserve feature settings/memory. Full
-profile assignments clear a separate character selection. Quoted/forwarded
-messages cannot trigger rules. A replay does not repeat the attempt; send a new
-message to retry after an uncertain external failure.
+Add the bot to a group and make it an administrator. It privately asks the owner
+which profile to use. Select it, confirm the named group and choose Configure or
+Later. Several joining notifications retain their own group. Failed notification
+delivery does not erase a discovery; use My groups in `/setup`.
 
+New groups enable conversation/search/judging, seven-day received history,
+explicit-command long-term memory, requested photo/video analysis, automatic
+public-link downloads and all received eligible voice transcription. Ordinary
+voices are context, not automatic replies. Commands/rules and addressed requests
+retain their permissions. Existing saved disables survive updates and personality
+changes. Transcripts are not automatically permanent memory facts.
 
-Check Telegram bot privacy and group permissions if the group does not appear.
-The owner can send a message that the bot receives in that group as a fallback
-for discovery. If private notification delivery fails, setup still lists the group.
+Buttons choose sections, modes and switches; messages provide custom data.
+Complex settings have preview/save, Back, Cancel and optional Skip. Open menus do
+not intercept ordinary voice/chat. Unrelated conversation pauses rather than
+silently saves an old draft. Return with `/setup` or “continue setup”. Disabling
+retains parameters. `/status` reports dependencies but does not prove physical-client
+success. See [the product guide](../../src/bot-guide.md) and
+[Mini App connection instructions](MINI_APPS.md).
 
-## Use Claude instead of Codex
+## Native installation (explicit alternative)
 
-The existing Claude connection uses Claude Code CLI with your own API key.
-Set `ANTHROPIC_API_KEY` in the instance's private `bot.env`. Optionally set
-`CLAUDE_MODEL` and `CLAUDE_CLASSIFY_MODEL` to models available to your account.
-It does not use the Codex login. Keep the instance directories and owner setup
-above, and add the Claude overlay to **every** Compose operation for that instance,
-including checking, starting, stopping, backups and updates:
+Use only if the user explicitly selects it and the agent prepares the equivalent
+isolated runtime. Install Node 24.20+, Git, Python 3 with venv, FFmpeg/FFprobe and
+the selected Codex CLI or Claude CLI. Run `npm ci --ignore-scripts`; install
+`requirements.txt` and `yt-dlp` in a private Python venv. Set `WHISPER_PYTHON` and
+`SOCIAL_VIDEO_DOWNLOADER` to its executables.
 
-```sh
-docker compose -p nightbot -f deploy/compose.portable.yaml -f deploy/compose.claude.yaml build
-docker compose -p nightbot -f deploy/compose.portable.yaml -f deploy/compose.claude.yaml run --rm bot node scripts/check-portable.mjs
-docker compose -p nightbot -f deploy/compose.portable.yaml -f deploy/compose.claude.yaml up -d
-```
+Use absolute private `CODEX_HOME` (Codex), `AI_AGENT_DIR`, `AI_SESSION_MAP`,
+`BOT_LOCK_FILE`, `BOT_STATUS_FILE`, `BOT_SETUP_FILE`, `CONVERSATION_HISTORY_DIR`,
+`MEMORY_DIR`, `XDG_CACHE_HOME` and `HF_HOME` paths equivalent to the portable Compose
+file. Create writable directories first. Set `ANSWER_BACKEND=codex` or `claude`;
+use the selected account's private CLI authentication.
 
-The current Claude adapter supports conversation, profiles and intent classification,
-including interrupted setup. Its image input, web search and scoped history tool
-are not connected yet; the catalogue marks search and image analysis accordingly.
-This is not full capability parity with Codex. Non-AI functions such as game calls
-and public-link downloads keep their existing Telegram/server requirements.
+Read private environment values with Node's `--env-file` option, for example
+`node --env-file=/absolute/private/bot.env scripts/check-portable.mjs --ai-only`.
+Follow the same AI → media → Telegram/owner → full-check order. Only after checks
+pass, run `node --env-file=/absolute/private/bot.env src/bot.js` under the user's
+chosen process manager. No second poller, private root `.env`, or credentials from
+another bot may be introduced.
 
-## Add another bot
+## Updates, backup and another bot
 
-Repeat the steps with a distinct instance directory, Compose project name and
-Telegram token. Both projects can use the same checkout. Use the corresponding
-project name and `BOT_INSTANCE_DIR` for every operation. Stop a project with
-`docker compose -p nightbot -f deploy/compose.portable.yaml stop`. Its saved
-profile, group settings and history remain in the private directory.
-
-For a backup, stop that project's bot, copy its private directory into protected
-backup storage, then start the project again. Restore it to a stopped project
-with the same token and file ownership. For source updates, pin the selected
-revision, back up the private directory, build and run the check against that
-revision, then recreate that project's bot. The portable project uses its own
-state and credentials. Additional Mini Apps require separate HTTPS services and
-BotFather registration for that account.
+Use a distinct instance directory, project name and token for another bot.
+Always use its matching `BOT_INSTANCE_DIR`, project name and selected overlay.
+Stop with `docker compose -p nightbot -f deploy/compose.portable.yaml stop` (plus
+overlay if needed). Stop the selected instance before copying its private directory
+into protected backup storage; then restart it. Backups include profiles, drafts,
+group state, history, memory, auth and game data. Restore to a stopped instance
+with matching identity and ownership. For source updates, pin the revision, back
+up private state, rebuild, run the non-polling full check, then recreate only that
+instance. Source merge is not an installed runtime upgrade.

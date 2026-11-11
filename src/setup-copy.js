@@ -1,131 +1,111 @@
-import { say } from "./helpers.js";
-export { say } from "./helpers.js";
+import { say } from './helpers.js';
+export { say } from './helpers.js';
 
-// Each feature has one owner-facing description and a scope. Only the group
-// features with a live editor offer a "configure" instruction.
 const features = [
-  ["chat", /conversation|chatting|talk|общени|разговор|спілкуван/i, ["Questions and conversation","Ответы и общение","Відповіді та спілкування"]],
-  ["profile", /profil|persona|personality|характер|личност|особист|профил|профіл/i, ["Bot personality","Личность бота","Особистість бота"]],
-  ["search", /search|research|web|поиск|интернет|пошук|інтернет/i, ["Web search","Поиск в интернете","Пошук в інтернеті"]],
-  ["judge", /judge|dispute|debat|разбор спор|розбір супереч|спор|супереч|вердикт/i, ["Debates","Разбор споров","Розбір суперечок"]],
-  ["history", /history|истори|переписк|історі|листуван/i, ["Chat history","История чата","Історія чату"]],
-  ["memory", /memory|пам[я’ʼ]|запомин|запам/i, ["Memory","Память","Пам’ять"]],
-  ["voice", /voice|audio|голос|аудио|аудіо/i, ["Voice messages","Голосовые","Голосові"]],
-  ["download", /download|скач|загруз|завантаж/i, ["Media downloads","Скачивание по ссылкам","Завантаження за посиланнями"]],
-  ["analysis", /analy[sz]|photo|video|анализ|аналіз|фото|видео|відео/i, ["Photo and video analysis","Анализ фото и видео","Аналіз фото й відео"]],
-  ["assemble", /assembl|gather|game calls|players|сбор|соб(ери|рать)|игрок|гравц|зб[іо]р|зібр/i, ["Game calls","Сборы игроков","Збори гравців"]],
-  ["minigames", /mini.?games?|mini apps|мини.?игр|міні.?ігор|міні.?ігр|flappy|occupiers|duel/i, ["Telegram Mini Apps","Мини-игры в Telegram","Мініігри в Telegram"]],
-  ["reaction", /react|phrase|реакц|фраз/i, ["Phrase reactions","Реакции на фразы","Реакції на фрази"]],
-  ["sticker", /sticker|ст[иі]кер/i, ["Sticker pack","Стикерпак","Стікерпак"]],
-  ["moderation", /moderat|kick|модерац|видал.*учас|удал.*участ/i, ["Moderation","Модерация","Модерація"]],
-  ["status", /status|health|статус|стан бота|диагност|діагност/i, ["Status","Статус бота","Стан бота"]],
+  ['chat', /conversation|chatting|talk|общени|разговор|спілкуван/i, ['Questions and conversation','Ответы и общение','Відповіді та спілкування']],
+  ['profile', /profil|persona|personality|характер|личност|особист|профил|профіл/i, ['Bot personality','Личность бота','Особистість бота']],
+  ['search', /search|research|web|поиск|интернет|пошук|інтернет/i, ['Web search','Поиск в интернете','Пошук в інтернеті']],
+  ['judge', /judge|dispute|debat|разбор спор|розбір супереч|спор|супереч|вердикт/i, ['Debates','Разбор споров','Розбір суперечок']],
+  ['history', /history|истори|переписк|історі|листуван/i, ['Chat history','История чата','Історія чату']],
+  ['memory', /memory|пам[я’ʼ]|запомин|запам/i, ['Memory','Память','Пам’ять']],
+  ['voice', /voice|audio|голос|аудио|аудіо/i, ['Voice messages','Голосовые','Голосові']],
+  ['download', /download|скач|загруз|завантаж/i, ['Media downloads','Скачивание по ссылкам','Завантаження за посиланнями']],
+  ['analysis', /analy[sz]|photo|video|анализ|аналіз|фото|видео|відео/i, ['Photo and video analysis','Анализ фото и видео','Аналіз фото й відео']],
+  ['assemble', /assembl|gather|game calls|players|сбор|соб(ери|рать)|игрок|гравц|зб[іо]р|зібр/i, ['Game calls','Сборы игроков','Збори гравців']],
+  ['minigames', /mini.?games?|mini apps|мини.?игр|міні.?ігор|міні.?ігр|flappy|occupiers|duel/i, ['Telegram Mini Apps','Мини-игры в Telegram','Мініігри в Telegram']],
+  ['reaction', /react|phrase|реакц|фраз/i, ['Phrase reactions','Реакции на фразы','Реакції на фрази']],
+  ['sticker', /sticker|ст[иі]кер/i, ['Sticker pack','Стикерпак','Стікерпак']],
+  ['moderation', /moderat|kick|модерац|видал.*учас|удал.*участ/i, ['Moderation','Модерация','Модерація']],
+  ['status', /status|health|статус|стан бота|диагност|діагност/i, ['Status','Статус бота','Стан бота']],
 ];
-
-const sections = [
-  [["Conversation", "Общение", "Спілкування"], ["chat", "profile", "judge", "search"]],
-  [["History and memory", "История и память", "Історія й пам’ять"], ["history", "memory"]],
-  [["Voice and media", "Голос, фото и видео", "Голос, фото й відео"], ["voice", "analysis", "download"]],
-  [["Games", "Сборы и игры", "Збори й ігри"], ["assemble", "minigames"]],
-  [["Reactions and stickers", "Реакции и стикеры", "Реакції та стікери"], ["reaction", "sticker"]],
-  [["Management", "Управление", "Керування"], ["moderation", "status"]],
+export const setupSections = [
+  ['conversation', ['Conversation and memory','Общение и память','Спілкування й пам’ять'], ['chat','search','judge','history','memory']],
+  ['media', ['Voice and media','Голос и медиа','Голос і медіа'], ['voice','analysis','download']],
+  ['games', ['Games','Игры','Ігри'], ['assemble','minigames']],
+  ['reactions', ['Reactions and stickers','Реакции и стикеры','Реакції та стікери'], ['reaction','sticker']],
+  ['management', ['Management','Управление','Керування'], ['moderation','status']],
 ];
+export const modeFeatures = ['chat','search','judge','history','memory','voice','analysis','download','minigames'];
+export const editableGroupFeature = id => modeFeatures.includes(id) || ['assemble','reaction','sticker','moderation'].includes(id);
 
-const featureScope = { profile: "profile", assemble: "group", reaction: "group", sticker: "group",
-  memory: "group", voice: "group", analysis: "group", download: "group", minigames: "group", moderation: "server" };
-
-// Catalogue summaries and setup instructions share the feature IDs used by the
-// existing editors. They describe defaults, not a live AI-connection guarantee.
 const help = {
-  chat: { kind: "default", summary: ["Answers, explanations and ordinary conversation.", "Ответы на вопросы, объяснения и обычный разговор.", "Відповіді на запитання, пояснення й звичайна розмова."],
-    steps: ["Needs a connected AI. Ask a question; no separate setup is required.", "Нужен подключённый AI. Просто задай вопрос — отдельная настройка не нужна.", "Потрібен підключений AI. Просто постав запитання — окреме налаштування не потрібне."] },
-  profile: { kind: "optional", summary: ["My name, character, language and reusable profiles.", "Моё имя, характер, язык и сохранённые профили.", "Моє ім’я, характер, мова та збережені профілі."],
-    steps: ["Describe my name, character and reply language. Review and confirm. You can prepare profiles before adding any groups. Example: “create a new profile”. To edit one: “edit profile [name]”. Assigning a full profile also applies its feature settings; a personality rule changes only the character and language.", "Задай имя, опиши характер и выбери язык. Проверь итог и подтверди. Профили можно подготовить ещё до добавления в группы. Пример: «создай новый профиль». Для правки: «измени профиль [название]». Назначение полного профиля применяет и его настройки функций; правило смены личности меняет только характер и язык.", "Задай ім’я, опиши характер і вибери мову. Перевір підсумок і підтвердь. Профілі можна підготувати ще до додавання в групи. Приклад: «створи новий профіль». Для редагування: «зміни профіль [назва]». Призначення повного профілю застосовує і його налаштування функцій; правило зміни особистості змінює лише характер і мову."] },
-  judge: { kind: "default", summary: ["Reviews a dispute using the available discussion.", "Разбираю спор по доступной переписке.", "Розбираю суперечку за доступним листуванням."],
-    steps: ["Needs a connected AI and access to the discussion. Reply to a disputed message with /judge; /judge all reviews separate disputes. No feature setup is required.", "Нужны подключённый AI и доступ к переписке. Ответь на спорную реплику командой /judge; /judge all разбирает отдельные споры. Отдельно настраивать функцию не нужно.", "Потрібні підключений AI і доступ до листування. Відповідай на спірну репліку командою /judge; /judge all розбирає окремі суперечки. Окреме налаштування не потрібне."] },
-  search: { kind: "default", summary: ["Checks current facts and finds sources.", "Проверяю актуальные факты и ищу источники.", "Перевіряю актуальні факти й шукаю джерела."],
-    steps: ["Needs a connected AI with web search. When using the current Claude adapter, web search is not connected yet. Example: “check the latest news about this”. Results must include supporting sources; an unavailable search is reported rather than guessed.", "Нужен подключённый AI с поиском в интернете. При использовании текущего адаптера Claude веб-поиск пока недоступен. Пример: «проверь последние новости об этом». Для ответа нужны подтверждающие источники; если поиск недоступен, я сообщу об этом.", "Потрібен підключений AI з пошуком в інтернеті. Якщо використовується поточний адаптер Claude, вебпошук поки недоступний. Приклад: «перевір останні новини про це». Для відповіді потрібні джерела; якщо пошук недоступний, я повідомлю про це."] },
-  history: { kind: "default", summary: ["Finds messages and summarizes available chat history.", "Нахожу сообщения и делаю сводки доступной переписки.", "Знаходжу повідомлення й підсумовую доступне листування."],
-    steps: ["Only history available to this chat is used. Ask for a time period or message number. Example: “summarize this morning”. Summaries need the connected AI.", "Используется только доступная история этого чата. Укажи период или номер сообщения. Пример: «подведи итоги сегодняшнего утра». Для сводки нужен подключённый AI.", "Використовується лише доступна історія цього чату. Укажи період або номер повідомлення. Приклад: «підсумуй сьогоднішній ранок». Для підсумку потрібен підключений AI."] },
-  memory: { kind: "optional", summary: ["Keeps useful notes and recalls them when needed.", "Сохраняю полезные сведения и вспоминаю их по запросу.", "Зберігаю корисні відомості й пригадую їх за запитом."],
-    steps: ["Default: save on request. /remember stores a note, /memory shows notes and /forget removes them. In a saved profile or group choose on-request, automatic capture from addressed requests, or off. Example: “configure memory in profile [name]”. Automatic mode does not mean recording every group message.", "По умолчанию сохраняю по просьбе. /remember — записать, /memory — посмотреть, /forget — удалить. В профиле или группе можно выбрать сохранение по просьбе, автоматически из обращений или выключить память. Пример: «настрой память в профиле [название]». Автоматический режим не означает запись всех сообщений группы.", "За замовчуванням зберігаю за проханням. /remember — записати, /memory — переглянути, /forget — видалити. У профілі або групі можна вибрати збереження за проханням, автоматично зі звернень або вимкнути пам’ять. Приклад: «налаштуй пам’ять у профілі [назва]». Автоматичний режим не означає запис усіх повідомлень групи."] },
-  voice: { kind: "optional", summary: ["Transcribes voice messages and can answer them.", "Расшифровываю голосовые и могу отвечать на них.", "Розшифровую голосові й можу відповідати на них."],
-    steps: ["The transcription service must be connected; replies also need AI. Default: when addressed. Choose when addressed, automatic replies, or off in a profile/group. Example: “configure voice messages in profile [name]”. If not connected, ask your installation agent to enable transcription.", "Нужна подключённая расшифровка; для ответов также нужен AI. По умолчанию — при обращении. Для профиля или группы выбери «при обращении», «автоответы» или «выключить». Пример: «настрой голосовые в профиле [название]». Если расшифровка не подключена, попроси агента установки её подключить.", "Потрібне підключене розпізнавання; для відповідей також потрібен AI. За замовчуванням — при зверненні. Для профілю або групи вибери «при зверненні», «автовідповіді» або «вимкнути». Приклад: «налаштуй голосові у профілі [назва]». Якщо розпізнавання не підключене, попроси агента встановлення його підключити."] },
-  download: { kind: "optional", summary: ["Sends media from supported public links in a group.", "Присылаю медиа по поддерживаемым публичным ссылкам в группе.", "Надсилаю медіа за підтримуваними публічними посиланнями в групі."],
-    steps: ["Enabled by default in new profiles after assignment to a group. Send a supported public Instagram, Threads or TikTok link. The bot needs administrator rights and its downloader enabled. Private or restricted posts may be unavailable. You can turn downloads off/on per profile or group. Example: “configure downloads in profile [name]”. Existing saved off settings stay off.", "В новых профилях включено по умолчанию после назначения группе. Пришли поддерживаемую публичную ссылку Instagram, Threads или TikTok. Боту нужны права администратора и подключённое скачивание. Закрытые или ограниченные публикации могут быть недоступны. Для профиля или группы можно включить или выключить скачивание. Пример: «настрой скачивание в профиле [название]». Ранее сохранённое выключение сохраняется.", "У нових профілях увімкнено за замовчуванням після призначення групі. Надішли підтримуване публічне посилання Instagram, Threads або TikTok. Боту потрібні права адміністратора й підключене завантаження. Закриті чи обмежені публікації можуть бути недоступні. Для профілю або групи можна ввімкнути чи вимкнути завантаження. Приклад: «налаштуй завантаження у профілі [назва]». Раніше збережене вимкнення зберігається."] },
-  analysis: { kind: "optional", summary: ["Explains images and available video evidence on request.", "По просьбе разбираю фото и доступное содержимое видео.", "За проханням розбираю фото й доступний вміст відео."],
-    steps: ["Needs media analysis and an AI that supports images. When using the current Claude adapter, image input is not connected yet. Send a file and your question. Video uses selected frames and available speech. Enabled by default; turn off/on per profile or group. Example: “configure media analysis in profile [name]”. This does not imply watching or hearing an entire video.", "Нужны подключённый анализ и AI с поддержкой изображений. При использовании текущего адаптера Claude передача изображений пока недоступна. Пришли файл и вопрос. Для видео используются выбранные кадры и доступная речь. По умолчанию включено; можно выключить или включить для профиля или группы. Пример: «настрой анализ фото в профиле [название]». Это не означает полный просмотр и прослушивание видео.", "Потрібні підключений аналіз і AI з підтримкою зображень. Якщо використовується поточний адаптер Claude, передавання зображень поки недоступне. Надішли файл і запитання. Для відео використовуються вибрані кадри й доступне мовлення. За замовчуванням увімкнено; можна вимкнути чи ввімкнути для профілю або групи. Приклад: «налаштуй аналіз фото у профілі [назва]». Це не означає повний перегляд і прослуховування відео."] },
-  assemble: { kind: "setup", summary: ["Calls the configured players for a game.", "Зову нужных игроков на игру.", "Кличу потрібних гравців на гру."],
-    steps: ["Choose a saved profile or a group, a supported game and its players. List Telegram usernames; a GIF is optional. Review the result and confirm. Games and rosters are kept in the selected profile/group. Example: “configure game calls in profile [name]”. I then ask for the game, @players and animation. Calls can be turned off without deleting the roster.", "Выбери сохранённый профиль или группу, поддерживаемую игру и её участников. Укажи Telegram-имена; GIF необязателен. Проверь итог и подтверди. Игры и составы хранятся в выбранном профиле или группе. Пример: «настрой сборы в профиле [название]». Затем я спрошу игру, @участников и анимацию. Сборы можно выключить без удаления состава.", "Вибери збережений профіль або групу, підтримувану гру та її учасників. Укажи Telegram-імена; GIF необов’язковий. Перевір підсумок і підтвердь. Ігри та склади зберігаються у вибраному профілі або групі. Приклад: «налаштуй збори у профілі [назва]». Потім я запитаю гру, @учасників та анімацію. Збори можна вимкнути без видалення складу."] },
-  reaction: { kind: "setup", summary: ["Connects a phrase to a GIF or another bot action.", "Связываю фразу с GIF или другим действием бота.", "Пов’язую фразу з GIF або іншою дією бота."],
-    steps: ["Choose a profile/group, the whole phrase, an action and who may use it. Actions: judge, player call, GIF or personality change. Add an optional announcement, review and confirm. Example: “create a rule”. Personality changes are owner-only. Forwarded or quoted phrases do not trigger rules. “Show rules” and “delete a rule” manage them.", "Выбери профиль или группу, полную фразу, действие и кто может запускать. Действия: судья, сбор, GIF или смена личности. Можно добавить сообщение при срабатывании. Проверь и подтверди. Пример: «создай правило». Менять личность может только владелец. Пересланные фразы и цитаты правила не запускают. Управление: «покажи правила» и «удали правило».", "Вибери профіль або групу, повну фразу, дію та хто може запускати. Дії: суддя, збір, GIF або зміна особистості. Можна додати повідомлення при спрацюванні. Перевір і підтвердь. Приклад: «створи правило». Змінювати особистість може лише власник. Переслані фрази й цитати не запускають правила. Керування: «покажи правила» та «видали правило»."] },
-  sticker: { kind: "setup", summary: ["Manages individual stickers in a connected group pack.", "Добавляю и удаляю стикеры в подключённом паке группы.", "Додаю й видаляю стікери в підключеному паку групи."],
-    steps: ["The pack must belong to this Telegram bot. Choose a profile/group and provide its t.me/addstickers link; review and confirm. Example: “configure sticker pack in profile [name]”. Then group admins can reply to an image with /stickeradd or to a sticker from that pack with /stickerdel. Pack creation/ownership must be prepared separately.", "Пак должен принадлежать этому Telegram-боту. Выбери профиль или группу и пришли ссылку t.me/addstickers; проверь и подтверди. Пример: «настрой стикерпак в профиле [название]». Затем администраторы группы могут ответить на картинку командой /stickeradd, а на стикер из этого пака — /stickerdel. Создание пака и его принадлежность нужно подготовить отдельно.", "Пак має належати цьому Telegram-боту. Вибери профіль або групу й надішли посилання t.me/addstickers; перевір і підтвердь. Приклад: «налаштуй стікерпак у профілі [назва]». Потім адміністратори групи можуть відповісти на зображення командою /stickeradd, а на стікер із цього пака — /stickerdel. Створення пака та його належність потрібно підготувати окремо."] },
-  minigames: { kind: "connection", summary: ["Launches separately connected Telegram games.", "Открываю отдельно подключённые игры в Telegram.", "Відкриваю окремо підключені ігри в Telegram."],
-    steps: ["Ask your installation agent to deploy the game services, connect their HTTPS addresses and register the Mini App in BotFather. Then enable launches for the desired profile/group: “configure mini-games in profile [name]”. /flappy and /duel open connected games. A chat toggle alone cannot install a missing game service.", "Попроси агента установки развернуть игры, подключить их HTTPS-адреса и зарегистрировать мини-приложение в BotFather. Затем включи запуск для нужного профиля или группы: «настрой мини-игры в профиле [название]». /flappy и /duel открывают подключённые игры. Переключатель в чате сам не устанавливает игровой сервис.", "Попроси агента встановлення розгорнути ігри, підключити їхні HTTPS-адреси й зареєструвати міні-застосунок у BotFather. Потім увімкни запуск для потрібного профілю або групи: «налаштуй міні-ігри у профілі [назва]». /flappy та /duel відкривають підключені ігри. Перемикач у чаті сам не встановлює ігровий сервіс."] },
-  moderation: { kind: "connection", summary: ["Lets authorized moderators remove group members.", "Помогаю уполномоченным модераторам удалять участников.", "Допомагаю уповноваженим модераторам видаляти учасників."],
-    steps: ["Give the bot the required Telegram administrator rights and ask your installation agent to configure authorized operators. /kick remains subject to those permissions. Moderator access is configured outside this chat editor.", "Выдай боту нужные права администратора в Telegram и попроси агента установки задать уполномоченных пользователей. /kick работает только с этими разрешениями. Список модераторов задаётся вне этого мастера.", "Надай боту потрібні права адміністратора в Telegram і попроси агента встановлення задати уповноважених користувачів. /kick працює лише з цими дозволами. Список модераторів задається поза цим майстром."] },
-  status: { kind: "default", summary: ["Checks whether the bot is online.", "Показываю, на связи ли бот.", "Показую, чи бот на зв’язку."],
-    steps: ["Use /ping. Detailed /status is available only to authorized users; no feature setup is required.", "Напиши /ping. Подробный /status доступен только уполномоченным пользователям. Отдельная настройка функции не нужна.", "Напиши /ping. Докладний /status доступний лише уповноваженим користувачам. Окреме налаштування функції не потрібне."] },
+  chat: [
+    ['Answers questions when addressed.','Отвечаю на вопросы при обращении.','Відповідаю на запитання при зверненні.'],
+    ['Needs a working AI. Mention me by username/name or reply to my message. This switch controls ordinary conversation; separate commands keep their own permissions.', 'Нужен работающий AI. Обратись по имени, упомяни меня или ответь на моё сообщение. Переключатель управляет обычным общением; отдельные команды имеют свои настройки и права.', 'Потрібен робочий AI. Звернися на ім’я, згадай мене або відповідай на моє повідомлення. Перемикач керує звичайним спілкуванням; окремі команди мають власні налаштування й права.']],
+  profile: [
+    ['My name, character and language. Reuse a personality in several groups.','Моё имя, характер и язык. Одну личность можно использовать в нескольких группах.','Моє ім’я, характер і мова. Одну особистість можна використовувати в кількох групах.'],
+    ['Create a new profile before or after joining groups. Features belong to each group. Switching personality preserves players, rules, settings and history. Editing a shared profile updates its linked personalities after confirmation.', 'Создай новый профиль до или после добавления в группы. Функции принадлежат каждой группе. Смена личности сохраняет игроков, правила, настройки и историю. Правка общего профиля обновляет связанные личности после подтверждения.', 'Створи новий профіль до чи після додавання до груп. Функції належать кожній групі. Зміна особистості зберігає гравців, правила, налаштування й історію. Редагування спільного профілю оновлює пов’язані особистості після підтвердження.']],
+  search: [
+    ['Checks current facts and finds sources.','Проверяю актуальные факты и ищу источники.','Перевіряю актуальні факти й шукаю джерела.'],
+    ['Ask me to check something online. Sources must support the answer. The current Claude adapter has no web connection; a switch cannot create that connection.', 'Попроси проверить информацию в интернете. Ответ должен опираться на источники. У текущего адаптера Claude поиск не подключён; переключатель не заменяет подключение.', 'Попроси перевірити інформацію в інтернеті. Відповідь має спиратися на джерела. У поточного адаптера Claude пошук не підключений; перемикач не замінює підключення.']],
+  judge: [
+    ['Reviews a dispute using available messages.','Разбираю спор по доступной переписке.','Розбираю суперечку за доступним листуванням.'],
+    ['Reply to the relevant message with /judge or ask me to review it. /judge all handles separate disputes. Needs working AI and available discussion; unavailable evidence is never guessed.', 'Ответь на нужную реплику командой /judge или попроси разобрать спор. /judge all разбирает отдельные споры. Нужны AI и доступная переписка; недоступные аргументы не выдумываются.', 'Відповідай на потрібну репліку командою /judge або попроси розібрати суперечку. /judge all розбирає окремі суперечки. Потрібні AI й доступне листування; недоступні аргументи не вигадуються.']],
+  history: [
+    ['Uses received messages and voice transcripts for context.','Учитываю полученные сообщения и расшифровки голосовых.','Враховую отримані повідомлення й розшифровки голосових.'],
+    ['Received chat history is retained for seven days, isolated by group and topic. Ask for a summary or message number. Old Telegram history is not automatically imported. Disabling stops new history records; it does not delete retained data or the AI provider’s dialogue.', 'Полученная история хранится семь дней отдельно по группам и темам. Попроси сводку или сообщение по номеру. Старая история Telegram автоматически не загружается. Выключение прекращает новые записи, сохраняя прежние данные и диалог у AI-провайдера.', 'Отримана історія зберігається сім днів окремо за групами й темами. Попроси підсумок або повідомлення за номером. Стара історія Telegram автоматично не завантажується. Вимкнення припиняє нові записи, зберігаючи попередні дані й діалог у AI-провайдера.']],
+  memory: [
+    ['Saves useful long-term notes on request.','Сохраняю полезные сведения надолго по просьбе.','Зберігаю корисні відомості надовго за проханням.'],
+    ['Default: explicit /remember, /memory and /forget. Optionally capture notes from addressed requests, or disable memory. This is different from chat history: transcribing a voice does not turn every statement into a permanent fact.', 'По умолчанию: явные /remember, /memory и /forget. Можно сохранять сведения из обращений или выключить память. Это отличается от истории: расшифровка голосового не превращает каждую реплику в постоянный факт.', 'За замовчуванням: явні /remember, /memory і /forget. Можна зберігати відомості зі звернень або вимкнути пам’ять. Це відрізняється від історії: розшифрування голосового не перетворює кожну репліку на постійний факт.']],
+  voice: [
+    ['Transcribes all received group voices for context; replies only when needed.','Расшифровываю все полученные голосовые для контекста; отвечаю при необходимости.','Розшифровую всі отримані голосові для контексту; відповідаю за потреби.'],
+    ['All received eligible voices are transcribed into this group’s history. I answer an addressed request or a reply to me, and execute permitted commands/rules. Ordinary voices get no reply. Transcription needs its installed model; size, duration and processing limits or failures are reported honestly.', 'Все доступные голосовые расшифровываются в историю этой группы. Отвечаю на обращение или ответ мне, выполняю разрешённые команды и правила. Обычные голосовые остаются без ответа. Нужна установленная модель; ограничения размера, длительности, обработки и ошибки указываются честно.', 'Усі доступні голосові розшифровуються в історію цієї групи. Відповідаю на звернення чи відповідь мені, виконую дозволені команди й правила. Звичайні голосові залишаються без відповіді. Потрібна встановлена модель; обмеження розміру, тривалості, обробки й помилки вказуються чесно.']],
+  analysis: [
+    ['Analyzes photos and video on request.','Разбираю фото и видео по запросу.','Розбираю фото й відео за запитом.'],
+    ['Send media and ask a question or reply to it. Video evidence uses selected frames and recognized speech, not a full audiovisual viewing. The current Claude adapter does not accept images. Telegram retrieval and processing limits may require a smaller file.', 'Пришли медиа с вопросом или ответь на него. Видео разбирается по выборочным кадрам и распознанной речи, а не как полный просмотр. Текущий адаптер Claude не принимает изображения. Из-за ограничений получения и обработки может потребоваться меньший файл.', 'Надішли медіа із запитанням або відповідай на нього. Відео розбирається за вибірковими кадрами й розпізнаним мовленням, а не як повний перегляд. Поточний адаптер Claude не приймає зображення. Через обмеження отримання й обробки може знадобитися менший файл.']],
+  download: [
+    ['Automatically sends media from supported public links.','Автоматически присылаю медиа по поддерживаемым публичным ссылкам.','Автоматично надсилаю медіа за підтримуваними публічними посиланнями.'],
+    ['Enabled by default for newly assigned groups. Send a public Instagram, Threads or TikTok link. Needs administrator rights and a connected downloader. Private/login-restricted posts, provider blocks, file limits and quotas may prevent a download. Saved off settings stay off.', 'По умолчанию включено для новых настроенных групп. Пришли публичную ссылку Instagram, Threads или TikTok. Нужны права администратора и подключённое скачивание. Закрытые публикации, авторизация, блокировки сайтов, размеры и квоты могут помешать загрузке. Сохранённое выключение сохраняется.', 'За замовчуванням увімкнено для нових налаштованих груп. Надішли публічне посилання Instagram, Threads або TikTok. Потрібні права адміністратора й підключене завантаження. Закриті публікації, авторизація, блокування сайтів, розміри й квоти можуть завадити завантаженню. Збережене вимкнення зберігається.']],
+  assemble: [
+    ['Calls the configured players for a game.','Зову настроенных игроков на выбранную игру.','Кличу налаштованих гравців до вибраної гри.'],
+    ['Choose a supported game, send Telegram @usernames, optionally add a GIF, then review and save. Players are specific to this group. Edit players or GIF separately. A call to everyone additionally needs a complete verified roster; preview never summons anyone.', 'Выбери поддерживаемую игру, пришли Telegram-имена игроков, при желании добавь GIF, проверь и сохрани. Состав относится только к этой группе. Игроков и GIF можно менять отдельно. Для общего сбора нужен полный проверенный состав; предпросмотр никого не вызывает.', 'Вибери підтримувану гру, надішли Telegram-імена гравців, за бажанням додай GIF, перевір і збережи. Склад належить лише цій групі. Гравців і GIF можна змінювати окремо. Для загального збору потрібен повний перевірений склад; попередній перегляд нікого не викликає.']],
+  minigames: [
+    ['Launches separately connected games. Initially off.','Запускаю отдельно подключённые игры. Изначально выключено.','Запускаю окремо підключені ігри. Спочатку вимкнено.'],
+    ['Mini Apps require their own services, public HTTPS addresses, BotFather registration and game-specific public IDs/state. Open the installation guide for the selected game, verify it, then allow it for this group. Never put the bot token in a game client.', 'Мини-играм нужны отдельные сервисы, публичные HTTPS-адреса, регистрация в BotFather и параметры выбранной игры. Открой инструкцию, проверь подключение, затем разреши запуск для этой группы. Токен бота нельзя помещать в клиент игры.', 'Мінііграм потрібні окремі сервіси, публічні HTTPS-адреси, реєстрація в BotFather і параметри вибраної гри. Відкрий інструкцію, перевір підключення, потім дозволь запуск для цієї групи. Токен бота не можна розміщувати в клієнті гри.']],
+  reaction: [
+    ['Runs configured actions for exact phrases.','Выполняю настроенные действия по полным фразам.','Виконую налаштовані дії за повними фразами.'],
+    ['Create a rule: whole phrase, action, required parameters, permitted actor and optional announcement. Review and save. Actions include judging, player calls, GIFs and owner-only personality changes. Quotes and forwarded messages do not trigger rules.', 'Создай правило: полная фраза, действие, параметры, разрешённый исполнитель и необязательное объявление. Проверь и сохрани. Доступны разбор спора, сбор игроков, GIF и смена личности владельцем. Цитаты и пересланные сообщения не запускают правила.', 'Створи правило: повна фраза, дія, параметри, дозволений виконавець і необов’язкове оголошення. Перевір і збережи. Доступні розбір суперечки, збір гравців, GIF і зміна особистості власником. Цитати й переслані повідомлення не запускають правила.']],
+  sticker: [
+    ['Manages a linked existing sticker pack.','Управляю привязанным существующим стикерпаком.','Керую прив’язаним наявним стікерпаком.'],
+    ['Send the existing pack link. The pack must belong to this bot and be unique to this group. After connection group administrators can add/remove individual stickers; disabling retains the binding parameters.', 'Пришли ссылку на существующий пак этого бота. Он может быть привязан только к одной группе. После подключения администраторы группы могут добавлять и удалять отдельные стикеры. Выключение сохраняет параметры привязки.', 'Надішли посилання на наявний пак цього бота. Він може бути прив’язаний лише до однієї групи. Після підключення адміністратори групи можуть додавати й видаляти окремі стікери. Вимкнення зберігає параметри прив’язки.']],
+  moderation: [
+    ['Lets permitted administrators remove a member.','Позволяю разрешённым администраторам удалить участника.','Дозволяю уповноваженим адміністраторам видалити учасника.'],
+    ['Configure numeric Telegram IDs of permitted operators for this group, then confirm. Operators must also be group administrators. The bot needs permission to restrict members. /kick works by reply or a known recent username. Group owners/admins are not removed.', 'Укажи цифровые Telegram ID разрешённых исполнителей для этой группы и подтверди. Они также должны быть администраторами группы. Боту нужно право ограничивать участников. /kick работает ответом или по известному недавнему имени. Владелец и администраторы не удаляются.', 'Укажи цифрові Telegram ID дозволених виконавців для цієї групи й підтвердь. Вони також мають бути адміністраторами групи. Боту потрібне право обмежувати учасників. /kick працює відповіддю або за відомим недавнім ім’ям. Власник і адміністратори не видаляються.']],
+  status: [
+    ['Checks availability and owner-only diagnostics.','Проверяю доступность и показываю владельцу диагностику.','Перевіряю доступність і показую власнику діагностику.'],
+    ['Use /ping to check the bot and /status for owner-only dependency diagnostics. An enabled switch is not proof that a model, provider or public game service is healthy; inspect the reported result and next step.', 'Используй /ping для проверки ответа и /status для диагностики подключений владельцем. Включённый переключатель не доказывает исправность модели, сайта или игрового сервиса; смотри результат проверки и следующий шаг.', 'Використовуй /ping для перевірки відповіді й /status для діагностики підключень власником. Увімкнений перемикач не доводить справність моделі, сайту чи ігрового сервісу; дивися результат перевірки й наступний крок.']],
 };
 
 export function matchFeature(text) {
   let closest;
   for (const [id, pattern] of features) {
     const match = pattern.exec(text);
-    if (match && (!closest || match.index < closest.start)) {
-      closest = { id, start: match.index, end: match.index + match[0].length };
-    }
+    if (match && (!closest || match.index < closest.start)) closest = { id, start: match.index, end: match.index + match[0].length };
   }
   return closest;
 }
 export const featureName = (id, locale) => say(locale, ...features.find(([key]) => id === key)[2]);
-export const featureDetail = (id, locale) => [
-  featureName(id, locale),
-  say(locale, ...help[id].summary),
-  say(locale, ...help[id].steps),
-].join("\n\n");
-export const editableGroupFeature = id => featureScope[id] === "group";
-
-function setupLabel(id, locale, mode) {
-  if (mode === "unavailable") return say(locale, "needs connection", "нужно подключить", "потрібно підключити");
-  if (mode === "off") return say(locale, "off", "выключено", "вимкнено");
-  const kind = help[id].kind === "connection" && id === "minigames" && mode ? "setup" : help[id].kind;
-  return say(locale, ...({
-    default: ["default", "по умолчанию", "за замовчуванням"],
-    optional: ["default; customizable", "по умолчанию; есть настройки", "за замовчуванням; є налаштування"],
-    setup: ["set up first", "нужно настроить", "потрібно налаштувати"],
-    connection: ["needs connection", "нужно подключить", "потрібно підключити"],
-  }[kind]));
-}
-
-export function catalogue(locale, getMode = () => undefined) {
-  const lines = sections.map(([title, ids]) => [
-    say(locale, ...title),
-    ...ids.map(id => `${featureName(id, locale)} — ${setupLabel(id, locale, getMode(id))}\n${say(locale, ...help[id].summary)}`),
-  ].join("\n\n"));
-  return [
-    say(locale, "> available features", "> возможности", "> можливості"),
-    say(locale, "Defaults apply after basic setup and profile assignment. AI answers, research, judging and media analysis require a connected AI. Group tools may also need Telegram permissions.",
-      "Здесь указаны стандартные настройки после создания и назначения профиля. Для ответов, поиска, судьи и анализа нужен подключённый AI. Групповым функциям также могут потребоваться права Telegram.",
-      "Тут указані стандартні налаштування після створення й призначення профілю. Для відповідей, пошуку, судді й аналізу потрібен підключений AI. Груповим функціям також можуть знадобитися права Telegram."),
-    ...lines,
-    say(locale, 'Ask about a feature for settings and an example, or say “configure game calls”. You can talk about another topic and later say “continue setup”.',
-      'Спроси о функции — объясню настройки и покажу пример. Для начала настройки: «настрой сборы». Можно поговорить о другом, а затем сказать «продолжим настройку».',
-      'Запитай про функцію — поясню налаштування й покажу приклад. Для початку налаштування: «налаштуй збори». Можна поговорити про інше, а потім сказати «продовжимо налаштування».'),
-  ].join("\n\n");
-}
-
-export const modeFeatures = ["memory", "voice", "analysis", "download", "minigames"];
+export const featureDetail = (id, locale) => [featureName(id, locale), ...help[id].map(words => say(locale, ...words))].join('\n\n');
 export const modeLabel = (mode, locale) => say(locale, ...({
-  on: ["on", "включено", "увімкнено"],
-  off: ["off", "выключено", "вимкнено"],
-  manual: ["on request", "по просьбе", "за запитом"],
-  auto: ["automatic", "автоматически", "автоматично"],
-  unavailable: ["needs a server connection", "нужно подключение на сервере", "потрібне підключення на сервері"],
-}[mode]));
-
+  on: ['on','включено','увімкнено'], off: ['off','выключено','вимкнено'],
+  manual: ['on request','по просьбе','за проханням'], auto: ['from addressed requests','из обращений','зі звернень'],
+  unavailable: ['needs connection','нужно подключить','потрібно підключити'], setup: ['set up first','нужно настроить','потрібно налаштувати'],
+  error: ['last attempt failed','последняя попытка не удалась','остання спроба не вдалася'],
+}[mode] ?? ['available','доступно','доступно']));
 export function modeOptions(feature, locale) {
-  if (feature === "memory") return say(locale, "Say “on request”, “automatic”, or “off”.", "Напиши «по просьбе», «автоматически» или «выключить».", "Напиши «за запитом», «автоматично» або «вимкнути».");
-  if (feature === "voice") return say(locale, "Say “when addressed”, “automatic replies”, or “off”.", "Напиши «при обращении», «автоответы» или «выключить».", "Напиши «при зверненні», «автовідповіді» або «вимкнути».");
-  return say(locale, "Say “on” or “off”.", "Напиши «включить» или «выключить».", "Напиши «увімкнути» або «вимкнути».");
+  return feature === 'memory' ? say(locale, 'Choose on request, capture from addressed requests, or off.', 'Выбери: по просьбе, из обращений или выключить.', 'Вибери: за проханням, зі звернень або вимкнути.') :
+    say(locale, 'Choose on or off.', 'Выбери: включить или выключить.', 'Вибери: увімкнути або вимкнути.');
+}
+export function introduction(locale) {
+  return say(locale,
+    'Profiles define my name, character and language. Reuse one in several groups; each group has independent features, players, rules, history and memory. Switching personality keeps those settings. Ask about any feature. Add me to a group, choose its profile and make me an administrator to configure features.',
+    'Профиль задаёт моё имя, характер и язык. Одну личность можно использовать в нескольких группах. У каждой группы свои функции, игроки, правила, история и память. Смена личности сохраняет эти настройки. Спроси о любой функции. Для настройки добавь меня в группу, выбери её профиль и назначь меня администратором.',
+    'Профіль задає моє ім’я, характер і мову. Одну особистість можна використовувати в кількох групах. Кожна група має власні функції, гравців, правила, історію й пам’ять. Зміна особистості зберігає ці налаштування. Запитай про будь-яку функцію. Для налаштування додай мене до групи, вибери її профіль і признач мене адміністратором.');
+}
+export function catalogue(locale, getMode = () => undefined) {
+  const lines = setupSections.map(([, title, ids]) => [say(locale, ...title), ...ids.map(id => {
+    const mode = getMode(id) ?? (['assemble','reaction','sticker','moderation'].includes(id) ? 'setup' : id === 'minigames' ? 'off' : 'on');
+    return featureName(id, locale) + ' — ' + modeLabel(mode, locale) + '\n' + say(locale, ...help[id][0]);
+  })].join('\n\n'));
+  return [say(locale, 'Available features', 'Возможности', 'Можливості'), introduction(locale), featureName('profile', locale) + ' — ' + modeLabel('on', locale) + '\n' + say(locale, ...help.profile[0]), ...lines].join('\n\n');
 }

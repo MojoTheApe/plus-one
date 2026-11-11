@@ -224,3 +224,18 @@ test('completed empty turns are explicit outcomes only for callers that opt in; 
   assert.equal(value.emptyFinal,true);assert.equal(value.text,'');assert.ok(calls[0].args.some(s=>s.includes('mcp_servers.telegram_context.env=')));assert.ok(!('TELEGRAM_BOT_TOKEN' in calls[0].options.env));
   await assert.rejects(backend.ask({sessionKey:'b',prompt:'Question'}),e=>e.code==='AI_EMPTY_ANSWER');
 });
+
+test('a group may disable actual web tools for an independent AI turn', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-no-search-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const backend = new CodexBackend({ home: directory, workspace: directory, models: ['default'] });
+  let args;
+  backend.executeDialogue = async values => {
+    args = values;
+    return { code: 0, stdout: [{ type: 'item.completed', item: { type: 'agent_message', text: 'OK' } }, { type: 'turn.completed' }].map(JSON.stringify).join('\n'), stderr: '' };
+  };
+  const result = await backend.ask({ prompt: 'Answer without research.', webSearch: false });
+  assert.equal(result.text, 'OK');
+  assert.ok(args.includes('web_search="disabled"'));
+  assert.ok(!args.includes('web_search="live"'));
+});
