@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CodexBackend } from "../src/codex-backend.js";
+import { ClaudeBackend } from "../src/claude-backend.js";
 import { loadPersonaProfile } from "../src/persona-policy.js";
 
 async function check() {
@@ -10,10 +11,13 @@ async function check() {
   if (!/^[1-9]\d*$/.test(owner || "") || !Number.isSafeInteger(Number(owner))) {
     throw new Error("Set BOT_OWNER_ID to the owner's numeric Telegram user ID");
   }
-  for (const key of ["CODEX_HOME", "AI_AGENT_DIR", "BOT_SETUP_FILE"]) {
+  const claude = process.env.ANSWER_BACKEND === "claude";
+  if (claude && !process.env.ANTHROPIC_API_KEY) throw new Error("Set ANTHROPIC_API_KEY in the private bot.env");
+  const home = claude ? "HOME" : "CODEX_HOME";
+  for (const key of [home, "AI_AGENT_DIR", "BOT_SETUP_FILE"]) {
     if (!path.isAbsolute(process.env[key] || "")) throw new Error(`Configure the absolute ${key} path`);
   }
-  for (const dir of [process.env.CODEX_HOME, process.env.AI_AGENT_DIR, path.dirname(process.env.BOT_SETUP_FILE)]) {
+  for (const dir of [process.env[home], process.env.AI_AGENT_DIR, path.dirname(process.env.BOT_SETUP_FILE)]) {
     if (!fs.existsSync(dir)) throw new Error("Create the instance's Codex, agent and runtime directories");
     fs.accessSync(dir, fs.constants.R_OK | fs.constants.W_OK);
   }
@@ -28,11 +32,13 @@ async function check() {
   }
   try {
     const profile = loadPersonaProfile(process.env.BOT_PROFILE_FILE, process.env.BOT_PROFILE);
-    await new CodexBackend({ profile, timeoutMs: 60000 }).ask({ prompt: "Reply with the word OK." });
+    const backend = claude ? new ClaudeBackend({ profile, timeoutMs: 60000 }) : new CodexBackend({ profile, timeoutMs: 60000 });
+    await backend.ask({ prompt: "Reply with the word OK." });
   } catch {
-    throw new Error("Codex did not answer. Check its login and AI_MODELS in the private bot.env.");
+    throw new Error(claude ? "Claude did not answer. Check ANTHROPIC_API_KEY, its credit balance and CLAUDE_MODEL in the private bot.env."
+      : "Codex did not answer. Check its login and AI_MODELS in the private bot.env.");
   }
-  console.log(`Telegram and Codex are ready. Open https://t.me/${bot.username} as the configured owner.`);
+  console.log(`Telegram and ${claude ? "Claude" : "Codex"} are ready. Open https://t.me/${bot.username} as the configured owner.`);
 }
 
 check().catch(error => {

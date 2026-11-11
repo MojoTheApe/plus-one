@@ -48,6 +48,8 @@ export async function collectDependencyStatus(deps) {
   return Promise.all([
     deps.answerBackend === "codex"
       ? deps.checkExecutable("codex_cli", process.env.CODEX_CLI || "codex", ["--version"], { required: true })
+      : deps.answerBackend === "claude"
+      ? deps.checkExecutable("claude_cli", process.env.CLAUDE_CLI || "claude", ["--version"], { required: true })
       : deps.checkExecutable("openclaw_cli", deps.openclawCli, ["--version"], { required: deps.answerBackend === "openclaw" }),
     deps.checkExecutable("social_video_downloader", deps.socialVideoDownloader, ["--version"], { required: deps.socialVideoEnabled }),
     deps.checkExecutable("ffprobe", deps.socialVideoFfprobe, ["-version"], { required: deps.socialVideoEnabled }),

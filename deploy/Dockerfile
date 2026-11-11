@@ -3,6 +3,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates python3 python3-venv ffmpeg git openssh-client tini libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 RUN npm install --global @openai/codex@0.152.1
+RUN npm install --global @anthropic-ai/claude-code@2.1.312
 WORKDIR /app
 COPY --chown=node:node package.json package-lock.json ./
 RUN npm ci --omit=dev
