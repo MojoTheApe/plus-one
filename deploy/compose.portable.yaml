@@ -6,6 +6,7 @@ services:
     restart: unless-stopped
     env_file: ${BOT_INSTANCE_DIR:?Set BOT_INSTANCE_DIR to a private absolute path}/bot.env
     environment:
+      BOT_REQUIRE_OWNER: "true"
       ANSWER_BACKEND: codex
       HOME: /state/home
       CODEX_HOME: /state/codex

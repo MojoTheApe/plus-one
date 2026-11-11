@@ -45,9 +45,9 @@ export function loadGroupSettings(file, games) {
     checkFields(settings, ["assemble", "insultReply", "stickerPack", "title", "modes", "rules", "legacyMemory"], key);
     if (settings.title !== undefined && (typeof settings.title !== "string" || !settings.title)) throw new Error("Invalid group title");
     if (settings.modes !== undefined) {
-      checkFields(settings.modes, ["memory", "voice", "analysis", "download", "minigames"], key + ".modes");
+      checkFields(settings.modes, ["chat", "search", "judge", "history", "memory", "voice", "analysis", "download", "minigames"], key + ".modes");
       for (const [feature, mode] of Object.entries(settings.modes)) {
-        if (!(feature === "memory" || feature === "voice" ? ["off", "manual", "auto"] : ["on", "off"]).includes(mode)) throw new Error("Invalid group mode");
+        if (!(feature === "memory" ? ["off", "manual", "auto"] : feature === "voice" ? ["off", "manual", "auto", "on"] : ["on", "off"]).includes(mode)) throw new Error("Invalid group mode");
       }
     }
     if (settings.legacyMemory !== undefined) {

@@ -33,9 +33,9 @@ export function validateMessageRules(rules) {
 export function matchMessageRule(rules, message) {
   if (!["group", "supergroup"].includes(message.chat?.type) || !Number.isSafeInteger(message.from?.id) || message.from?.is_bot ||
     message.forward_origin || message.forward_from || message.forward_date || message.via_bot ||
-    typeof message.text !== "string") return null;
+    typeof (message.text ?? message._voiceTranscript) !== "string") return null;
   if ((message.entities ?? []).some(entity => ["blockquote", "expandable_blockquote", "pre", "code"].includes(entity.type))) return null;
-  const body = message.text.trim();
+  const body = (message.text ?? message._voiceTranscript).trim();
   if (/^(?:[>“«„"'`]|\/)/u.test(body) || /(?:^|\n)\s*>/u.test(body)) return null;
   const phrase = normalizePhrase(body);
   return (rules ?? []).find(rule => rule.enabled !== false &&

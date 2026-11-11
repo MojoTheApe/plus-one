@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { initialProfileSettings } from "./setup-profiles.js";
+import { initialProfileSettings, groupConfiguration } from "./setup-profiles.js";
 import { createPersonaProfile } from "./persona-policy.js";
 
 export async function openSetupStore(owner, file, importedGroups, catalog, importedDefault = catalog?.defaultProfile) {
@@ -25,6 +25,15 @@ export async function openSetupStore(owner, file, importedGroups, catalog, impor
   function change(edit) {
     const next = structuredClone(state);
     edit(next);
+    if (JSON.stringify(next.session) !== JSON.stringify(state.session)) {
+      next.setupTurnSequence = (state.setupTurnSequence ?? 0) + 1;
+      if (next.session) next.session._turn = next.setupTurnSequence;
+    }
+    for (const [id, group] of Object.entries(next.groups)) {
+      if (JSON.stringify(groupConfiguration(group)) !== JSON.stringify(groupConfiguration(state.groups[id]))) {
+        group.settingsRevision = (state.groups[id]?.settingsRevision ?? 0) + 1;
+      }
+    }
     write.run(JSON.stringify(next));
     state = next;
   }
@@ -45,6 +54,17 @@ export async function openSetupStore(owner, file, importedGroups, catalog, impor
     for (const [id, sticker] of Object.entries(importedGroups?.stickerBindings ?? {})) {
       next.groups[id] ??= { sticker, configured: true };
     }
+  });
+
+  if (state.groupSettingsVersion !== 2) change(next => {
+    // Retain the server allowlist only for already configured legacy groups.
+    // New/default-profile assignments must explicitly configure group operators.
+    for (const group of Object.values(next.groups)) {
+      if (group.configured !== false && (group.configured || group.profile || group.legacyMemory || group.assemble || group.reaction || group.sticker || group.modes)) {
+        group.legacyModeration = true;
+      }
+    }
+    next.groupSettingsVersion = 2;
   });
 
   if (catalog) change(next => {
@@ -68,6 +88,16 @@ export async function openSetupStore(owner, file, importedGroups, catalog, impor
       if (!catalog) throw new Error("A stored private profile requires its configured catalog");
       catalog.get(record.catalogKey);
     }
+  }
+
+  // Managed voice now means transcription for context, never reply-to-all.
+  // Preserve explicit off; old manual/auto choices have no distinct new UI mode.
+  if (Object.values(state.groups).some(group => ["manual", "auto"].includes(group.modes?.voice))) {
+    change(next => {
+      for (const group of Object.values(next.groups)) {
+        if (["manual", "auto"].includes(group.modes?.voice)) group.modes.voice = "on";
+      }
+    });
   }
 
   if (Object.values(state.groups).some(group => group.configured === undefined) ||
@@ -112,7 +142,7 @@ export async function openSetupStore(owner, file, importedGroups, catalog, impor
     profile(id) {
       const key = state.groups[id]?.profile ?? state.defaultProfile;
       const character = state.groups[id]?.character;
-      const record = character?.persona ?? state.groups[id]?.persona ?? state.profiles[key];
+      const record = character?.persona ?? state.profiles[key] ?? state.groups[id]?.persona;
       if (!record) return null;
       const revision = character?.revision ?? state.groups[id]?.profileRevision ?? state.defaultRevision;
       return this.resolveProfile(character?.profile ?? key, record, revision);

@@ -1,13 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { createRuleEditor, ruleListRequest } from "./setup-rules.js";
 import { ruleRequest } from "./message-rules.js";
+import { createSetupControls } from "./setup-controls.js";
 import {
   assignGroupProfile, assignmentIntent, creationIntent, initialProfileSettings,
   isSetupRequest, profileListIntent, profileTitle, releaseInactiveStickerBindings, selectProfile, stickerConflict,
 } from "./setup-profiles.js";
 import { actionableAssembleText, normalizeGamePlayers } from "./assemble.js";
 import { escapeRegex, parseBotCommandText } from "./helpers.js";
-import { catalogue, editableGroupFeature, featureDetail, featureName, matchFeature, modeFeatures, modeLabel, modeOptions, say } from "./setup-copy.js";
+import { catalogue, introduction, setupSections, editableGroupFeature, featureDetail, featureName, matchFeature, modeFeatures, modeLabel, modeOptions, say } from "./setup-copy.js";
 
 const normalize = text => String(text ?? "").normalize("NFKC").trim().toLowerCase();
 const isGroup = chat => ["group", "supergroup"].includes(chat?.type);
@@ -147,13 +148,15 @@ function playerNames(text) {
 
 function readMode(feature, text) {
   if (/disable|turn off|^off$|выключ|вимк/iu.test(text)) return "off";
-  const withModes = feature === "memory" || feature === "voice";
+  const withModes = feature === "memory";
   if (withModes && /automatic|автомат|автоответ|автовідпов/iu.test(text)) return "auto";
   if (/enable|turn on|^on$|включ|увімк|on request|when addressed|по просьбе|при обращении|за запитом|при зверненні/iu.test(text)) return withModes ? "manual" : "on";
   return undefined;
 }
 
-export function createSetup({ store, games, telegram, featureMode, classifyTurn }) {
+export function createSetup({ store, games, telegram, featureMode, classifyTurn, checkFeature }) {
+  const controls = createSetupControls({ store, telegram });
+  let editMessageId;
   async function observe(update) {
     const event = update.my_chat_member ?? update.message;
     if (!isGroup(event?.chat) || !Number.isSafeInteger(event.chat.id) || !event.chat.title) return;
@@ -186,14 +189,113 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn 
       `Вижу группу «${title}». Какой профиль использовать в ней? Ответь на это сообщение названием профиля или попроси создать новый.`,
       `Бачу групу «${title}». Який профіль використовувати в ній? Відповідай на це повідомлення назвою профілю або попроси створити новий.`);
     try {
-      const sent = await telegram("sendMessage", { chat_id: store.ownerId, text: text + "\n\n" + profileList(locale) });
+      const sent = await telegram("sendMessage", { chat_id: store.ownerId, text: text + "\n\n" + profileList(locale),
+        reply_markup: controls.markup(profileRows(String(id)), { group: String(id) }) });
       if (Number.isSafeInteger(sent?.message_id)) {
         store.change(state => { state.groups[id].notificationId = sent.message_id; });
       }
     } catch { /* Binding stays pending if Telegram cannot deliver a private message. */ }
   }
 
-  const setSession = session => store.change(state => { state.session = session; });
+  const setSession = session => store.change(state => {
+    const previous = state.session;
+    const fields = value => JSON.stringify({ ...value, _turn: undefined, _back: undefined, paused: undefined, resume: undefined });
+    // Keep actual prior requested fields, not a guessed order of populated keys.
+    // In particular, editing players must never erase an already-saved GIF.
+    if (draftKinds.has(session?.kind) && session._turn === previous?._turn &&
+      session.kind === previous?.kind && !session.paused && !previous.paused && fields(session) !== fields(previous)) {
+      const { _back, ...snapshot } = previous;
+      session = { ...session, _back: [...(_back ?? []).slice(-31), snapshot] };
+    }
+    state.session = session;
+  });
+  const button = (text, type, values = {}) => ({ text, action: { type, ...values } });
+  const inputButton = (text, input) => button(text, "input", { input });
+  function profileRows(group) {
+    return Object.entries(store.state.profiles).map(([profile, record], index) =>
+      [button(`${index + 1}. ${profileTitle(record)}`, "profile", { profile, group })]);
+  }
+  function rootRows(bot, locale) {
+    return [[button(say(locale, "My groups", "Мои группы", "Мої групи"), "groups")],
+      [button(say(locale, "Profiles", "Профили", "Профілі"), "profiles")],
+      [{ text: say(locale, "Add to group", "Добавить в группу", "Додати до групи"), url: `https://t.me/${bot.username}?startgroup=setup` }],
+      [button(say(locale, "How it works", "Как это устроено", "Як це влаштовано"), "intro")]];
+  }
+  function sectionRows(locale) {
+    return [...setupSections.map(([section, title]) => [button(say(locale, ...title), "section", { section })]),
+      [button(say(locale, "Change personality", "Сменить личность", "Змінити особистість"), "chooseProfile")],
+      [button(say(locale, "Finish", "Завершить", "Завершити"), "finish")]];
+  }
+  function draftRows(session, locale) {
+    const rows = [];
+    if (session.kind === "persona") {
+      if (!session.language && session.name && session.personality) {
+        rows.push([inputButton("English", "English"), inputButton("Русский", "Русский"), inputButton("Українська", "Українська")]);
+      }
+      if (session.name && session.personality && session.language) rows.push([inputButton(say(locale, "Save", "Сохранить", "Зберегти"), "save")]);
+    } else if (session.kind === "assignment") {
+      if (session.profile === undefined) rows.push(...profileRows(session.group));
+      else rows.push([inputButton(say(locale, "Apply", "Применить", "Застосувати"), "save")]);
+    } else if (session.kind === "group") {
+      if (modeFeatures.includes(session.feature) && !session.mode) {
+        if (session.feature === "memory") rows.push([inputButton(say(locale, "On request", "По просьбе", "За проханням"), "on request"), inputButton(say(locale, "From requests", "Из обращений", "Зі звернень"), "automatic")]);
+        else rows.push([inputButton(say(locale, "On", "Включить", "Увімкнути"), "on")]);
+        rows.push([inputButton(say(locale, "Off", "Выключить", "Вимкнути"), "off")]);
+      } else if (session.feature === "assemble" && !session.game) {
+        rows.push(...games.map(game => [inputButton(game.name, game.name)]));
+      } else if (session.feature === "assemble" && session.players && session.animation === undefined) {
+        rows.push([inputButton(say(locale, "Skip animation", "Без анимации", "Без анімації"), "no animation")]);
+      }
+      if (session.feature === "moderation") rows.push(...(session.operators ?? []).map(user =>
+        [button((session.userIds?.includes(user.id) ? "✓ " : "") + user.name, "operator", { id: user.id })]));
+      if (groupDraftComplete(session)) rows.push([inputButton(
+        modeFeatures.includes(session.feature) || session.editField || session.operation === "disable"
+          ? say(locale, "Save", "Сохранить", "Зберегти")
+          : say(locale, "Save and enable", "Сохранить и включить", "Зберегти й увімкнути"), "save")]);
+    } else if (session.kind === "rule") {
+      if (session.phrase && !session.action) rows.push(...["judge", "assemble", "animation", "persona"].map(action =>
+        [inputButton(({ judge: say(locale, "Review dispute", "Разобрать спор", "Розібрати суперечку"), assemble: say(locale, "Call players", "Собрать игроков", "Зібрати гравців"), animation: "GIF", persona: say(locale, "Change personality", "Сменить личность", "Змінити особистість") })[action], action)]));
+      if (session.action?.type === "persona" && !session.action.profile) rows.push(...Object.entries(store.state.profiles).map(([, profile]) => [inputButton(profileTitle(profile), profileTitle(profile))]));
+      if (session.action?.type === "assemble" && !session.action.game) rows.push(...games.map(game => [inputButton(game.name, game.name)]), [inputButton(say(locale, "Everyone", "Всех", "Усіх"), "everyone")]);
+      const actionReady = session.action && (session.action.type === "judge" || session.action.profile || session.action.game || session.action.animation);
+      if (actionReady && !session.access) rows.push([inputButton(say(locale, "Only owner", "Только владелец", "Лише власник"), "owner"), inputButton(say(locale, "Members", "Участники", "Учасники"), "members")]);
+      if (actionReady && session.access && session.announcement === undefined) rows.push([inputButton(say(locale, "Skip announcement", "Без объявления", "Без оголошення"), "skip")]);
+      if (session.deleteId || (actionReady && session.access && session.announcement !== undefined)) rows.push([inputButton(say(locale, "Save", "Сохранить", "Зберегти"), "save")]);
+    }
+    rows.push([button(say(locale, "Back", "Назад", "Назад"), "backDraft"), inputButton(say(locale, "Cancel", "Отмена", "Скасувати"), "/cancel")]);
+    return rows;
+  }
+  function groupDraftComplete(draft) {
+    return modeFeatures.includes(draft.feature) ? Boolean(draft.mode) : draft.operation !== "set" ||
+      (draft.feature === "assemble" ? draft.game && draft.players && draft.animation !== undefined :
+        draft.feature === "reaction" ? draft.terms && draft.animation : draft.feature === "moderation" ? draft.userIds?.length : draft.packName);
+  }
+  function currentRows(bot, locale) {
+    const session = store.state.session;
+    if (draftKinds.has(session?.kind) && !session.paused) return draftRows(session, locale);
+    if (session?.kind === "discover") return [[button(say(locale, "Show me", "Да, расскажи", "Так, розкажи"), "intro"), button(say(locale, "Later", "Позже", "Пізніше"), "finish")]];
+    if (session?.kind === "invitation") return [[button(say(locale, "Configure features", "Настроить функции", "Налаштувати функції"), "group", { group: session.group }), button(say(locale, "Later", "Позже", "Пізніше"), "finish")]];
+    return session?.group && store.group(session.group)?.configured ? sectionRows(locale) : rootRows(bot, locale);
+  }
+  async function sendPanel(text, rows, { group, draft = false } = {}) {
+    const target = store.group(group);
+    const heading = target ? `${target.title} (${group})` : "";
+    if (heading && !text.startsWith(heading)) text = heading + "\n\n" + text;
+    const markup = controls.markup(rows, { group, draft });
+    // Edit only a confirmed callback's original private message. Notifications
+    // and ordinary setup replies always create their own message.
+    if (editMessageId && text.length <= 3900) {
+      try { return await telegram("editMessageText", { chat_id: store.ownerId, message_id: editMessageId, text, reply_markup: markup }); }
+      catch { /* Deleted/uneditable message: the same state is shown anew. */ }
+    }
+    while (text.length > 3900) {
+      const split = text.lastIndexOf("\n", 3900);
+      const length = split > 0 ? split : 3899;
+      await telegram("sendMessage", { chat_id: store.ownerId, text: text.slice(0, length) });
+      text = text.slice(length).trimStart();
+    }
+    return telegram("sendMessage", { chat_id: store.ownerId, text, reply_markup: markup });
+  }
   const pendingDraft = session => draftKinds.has(session?.kind) ? session : draftKinds.has(session?.resume?.kind) ? session.resume : null;
   const keepDraft = draft => {
     const previous = pendingDraft(store.state.session);
@@ -202,7 +304,7 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn 
   };
   const groupEntries = () => Object.entries(store.state.groups).filter(([, group]) => group.title && group.active !== false);
   const settingIsOn = (group, id) => Boolean((group?.[id] || (id === "reaction" && group?.rules?.length)) && !group.disabled?.[id]);
-  const ruleEditor = createRuleEditor({ store, games, targetPrompt: configurationPrompt, resolveTarget: resolveConfigurationTarget });
+  const ruleEditor = createRuleEditor({ store, games, targetPrompt: configurationPrompt, resolveTarget: resolveConfigurationTarget, onDraft: setSession });
   function showCatalogue(locale) {
     const session = store.state.session;
     return catalogue(locale, feature => {
@@ -221,17 +323,13 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn 
   }
 
   async function resolveConfigurationTarget(text, bot) {
-    const profile = selectProfile(store.state.profiles, text);
     const group = groupChoice(groupEntries(), text, true);
-    if (profile && (/profile|профил|профіл/iu.test(text) || !group)) return { profileId: profile };
-    if (group && await allowedGroup(group, bot)) return { group };
+    if (group && await allowedGroup(group, bot, true)) return { group };
     return null;
   }
 
   function configuration(draft) {
-    if (!draft.profileId) return store.group(draft.group);
-    const profile = store.state.profiles[draft.profileId];
-    return profile ? { ...profile.settings, title: profileTitle(profile) } : null;
+    return draft.profileId ? null : store.group(draft.group);
   }
 
   function profileList(locale) {
@@ -240,14 +338,16 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn 
       (entries.join("\n") || say(locale, "Create a new profile to get started.", "Начни с сообщения «создай новый профиль».", "Почни з повідомлення «створи новий профіль»."));
   }
 
-  async function allowedGroup(id, bot) {
-    if (!store.group(id)?.title) return false;
+  async function allowedGroup(id, bot, featureWrite = false) {
+    const group = store.group(id);
+    if (!group?.title || group.active === false || (featureWrite === true && !group.configured)) return false;
     try {
       const [owner, member] = await Promise.all([
         telegram("getChatMember", { chat_id: Number(id), user_id: store.ownerId }),
         telegram("getChatMember", { chat_id: Number(id), user_id: bot.id }),
       ]);
-      return activeMember(owner) && activeMember(member);
+      return activeMember(owner) && activeMember(member) &&
+        (!featureWrite || ["creator", "administrator"].includes(member.status));
     } catch {
       return false;
     }
@@ -267,30 +367,30 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn 
   }
 
   function configurationPrompt(locale) {
-    return say(locale, "Which saved profile or group should I configure? You can write “profile Night”.",
-      "Какой сохранённый профиль или группу настроить? Можно написать «профиль Игровой».",
-      "Який збережений профіль чи групу налаштувати? Можна написати «профіль Ігровий».") +
-      "\n\n" + profileList(locale) + "\n\n" + groupPrompt(locale);
+    return say(locale, "Features belong to a group, not a personality. Add me, select its profile and make me an administrator before editing its features.",
+      "Функции принадлежат группе, а не личности. Добавь меня в группу, выбери её профиль и назначь меня администратором, чтобы настраивать функции.",
+      "Функції належать групі, а не особистості. Додай мене до групи, вибери її профіль і признач мене адміністратором, щоб налаштовувати функції.") + "\n\n" + groupPrompt(locale);
   }
 
   function groupFeatureStatus(id, key, locale) {
     const group = store.group(id);
-    const mode = modeFeatures.includes(key) ? featureMode(id, key) : settingIsOn(group, key) ? "on" : "off";
-    return `${featureName(key, locale)} — ${modeLabel(mode, locale)}`;
+    const mode = nativeMode(id, key);
+    return `${featureName(key, locale)} — ${modeLabel(mode, locale)}` +
+      (group.featureChecks?.[key]?.ok === false && !["off", "unavailable"].includes(mode) ? " · " + modeLabel("error", locale) : "");
   }
 
   function groupSummary(id, locale) {
     const group = store.group(id);
-    const profile = group.character?.persona ?? group.persona ?? store.state.profiles[group.profile ?? store.state.defaultProfile];
+    const profile = group.character?.persona ?? store.state.profiles[group.profile ?? store.state.defaultProfile] ?? group.persona;
       const roster = group.assemble?.games.map(game => {
       const animation = game.animationReference || game.animationPath ?
         say(locale, "animation on", "с анимацией", "з анімацією") : say(locale, "no animation", "без анимации", "без анімації");
       return `${game.name} — ${game.players.map(player => "@" + player).join(", ")} (${animation})`;
     }).join("\n");
     return [
-      group.title,
+      `${group.title} (${id})`,
       `${featureName("profile", locale)} — ${profile ? profileTitle(profile) : say(locale, "default", "общий", "загальний")}`,
-      ...["assemble", "reaction", "sticker", ...modeFeatures].map(key => groupFeatureStatus(id, key, locale)),
+      ...setupSections.flatMap(([, , features]) => features).map(key => groupFeatureStatus(id, key, locale)),
       roster,
     ].filter(Boolean).join("\n");
   }
@@ -329,6 +429,14 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       case "sticker":
         if (!draft.packName) return say(locale, "Send the link to your existing sticker pack.", "Пришли ссылку на свой существующий стикерпак.", "Надішли посилання на свій наявний стікерпак.");
         return say(locale, `${group.title} — connect ${draft.packName}. Save and enable?`, `${group.title} — подключаю ${draft.packName}. Сохранить и включить?`, `${group.title} — підключаю ${draft.packName}. Зберегти й увімкнути?`);
+      case "moderation":
+        return draft.userIds?.length ? say(locale,
+          `${group.title} — permitted administrator IDs: ${draft.userIds.join(", ")}. The bot needs restriction permission. Save and enable?`,
+          `${group.title} — разрешённые ID администраторов: ${draft.userIds.join(", ")}. Боту нужно право ограничивать участников. Сохранить и включить?`,
+          `${group.title} — дозволені ID адміністраторів: ${draft.userIds.join(", ")}. Боту потрібне право обмежувати учасників. Зберегти й увімкнути?`) :
+          say(locale, "Select administrators below or send their numeric Telegram IDs separated by spaces.",
+            "Выбери администраторов ниже или пришли их цифровые Telegram ID через пробел.",
+            "Вибери адміністраторів нижче або надішли їхні цифрові Telegram ID через пробіл.");
     }
   }
 
@@ -336,14 +444,14 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     store.change(state => {
       const group = draft.profileId ? state.profiles[draft.profileId].settings : state.groups[draft.group];
       if (!draft.profileId) group.configured = true;
-      state.session = draft.resume ?? { kind: "menu", group: draft.group, profileId: draft.profileId };
+      state.session = { kind: "menu", group: draft.group, resume: draft.resume };
       if (modeFeatures.includes(draft.feature)) {
         group.modes ??= {};
         group.modes[draft.feature] = draft.mode;
         return;
       }
       group.disabled ??= {};
-      group.disabled[draft.feature] = draft.operation === "disable";
+      if (!draft.editField) group.disabled[draft.feature] = draft.operation === "disable";
       if (draft.operation !== "set") {
         if (!draft.profileId && draft.feature === "sticker") releaseInactiveStickerBindings(state, draft.group, group);
         return;
@@ -353,10 +461,13 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         const current = group.assemble ?? { games: [] };
         group.assemble = {
           ...current,
-          games: [...current.games.filter(item => item.id !== game.id), { ...game, players: draft.players, animationReference: draft.animation }],
+          games: [...current.games.filter(item => item.id !== game.id), { ...current.games.find(item => item.id === game.id), ...game,
+            players: draft.players, animationReference: draft.animation, animationPath: draft.animationPath ?? null }],
         };
       } else if (draft.feature === "reaction") {
         group.reaction = { terms: draft.terms, animation: draft.animation };
+      } else if (draft.feature === "moderation") {
+        group.moderation = { userIds: draft.userIds };
       } else {
         group.sticker = { packName: draft.packName, ownerId: store.ownerId };
         if (!draft.profileId) releaseInactiveStickerBindings(state, draft.group, group);
@@ -365,6 +476,11 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
   }
 
   async function collectGroupInputs(draft, text, animation, bot, fullRequest) {
+    if (draft.feature === "moderation") {
+      const entries = text.trim().split(/[\s,;]+/u);
+      if (entries.length && entries.length <= 50 && entries.every(id => /^[1-9]\d*$/u.test(id) && Number.isSafeInteger(Number(id)))) draft.userIds = [...new Set(entries.map(Number))];
+      return;
+    }
     if (draft.operation !== "set" || modeFeatures.includes(draft.feature)) return;
     if (draft.feature === "assemble") {
       draft.game ??= pickGame(games, text)?.id;
@@ -417,7 +533,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       profileTitle(profile),
       `${profile.name} — ${profile.personality ?? say(locale, "private personality configured on the server", "частная личность, подключённая на сервере", "приватна особистість, підключена на сервері")}`,
       languageText(locale, profile.language),
-      settingsSummary(profile.settings ?? initialProfileSettings(), locale),
+      say(locale, "Only personality changes. Group features, players and history are retained.", "Меняется только личность. Функции, игроки и история группы сохраняются.", "Змінюється лише особистість. Функції, гравці й історія групи зберігаються."),
     ].join("\n");
   }
 
@@ -434,23 +550,26 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     const selectedGroup = store.group(draft.group);
     const duplicate = groupEntries().some(([id, item]) => id !== draft.group && normalize(item.title) === normalize(selectedGroup.title));
     const title = selectedGroup.title + (duplicate ? ` (${draft.group})` : "");
-    return say(locale, `Apply ${name} in ${title}? This replaces the group's managed profile settings.\n\n`,
-      `В группе «${title}» применю профиль «${name}». Его личность и настройки заменят текущие настройки профиля этой группы.\n\n`,
-      `У групі «${title}» застосую профіль «${name}». Його особистість і налаштування замінять поточні налаштування профілю цієї групи.\n\n`) +
+    return say(locale, `Apply ${name} in ${title}? Features, players, rules and history are retained.\n\n`,
+      `В группе «${title}» применю профиль «${name}». Функции, игроки, правила и история сохранятся.\n\n`,
+      `У групі «${title}» застосую профіль «${name}». Функції, гравці, правила й історія збережуться.\n\n`) +
       profileSummary(id, locale) + "\n\n" + say(locale, "Save?", "Сохранить?", "Зберегти?");
   }
 
-  const askPersona = draft => personaQuestion(draft, store.group(draft.target)?.title);
+  const askPersona = draft => {
+    const affected = draft.editId ? groupEntries().filter(([, group]) => !group.character &&
+      (group.profile ?? store.state.defaultProfile) === draft.editId).map(([, group]) => group.title) : [];
+    return personaQuestion(draft, store.group(draft.target)?.title) + (affected.length ? "\n\n" + say(draft.locale,
+      "Updates personality in: ", "Обновит личность в группах: ", "Оновить особистість у групах: ") + affected.join(", ") : "");
+  };
 
   async function editGroup(draft, text, animation, bot, locale) {
     const next = { ...draft };
+    if (next.profileId) return configurationPrompt(locale);
     if (!next.group && !next.profileId) {
-      const profile = next.feature ? selectProfile(store.state.profiles, text) : undefined;
       const group = groupChoice(groupEntries(), text, true);
-      const explicitProfile = /profile|профил|профіл/iu.test(text);
-      if (profile && (explicitProfile || !group)) next.profileId = profile;
-      else {
-        if (!group || !await allowedGroup(group, bot)) {
+      {
+        if (!group || !await allowedGroup(group, bot, Boolean(next.feature))) {
           return next.feature ? configurationPrompt(locale) : groupPrompt(locale);
         }
         next.group = group;
@@ -476,12 +595,17 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       setSession(next);
       return groupQuestion(next, locale);
     }
-    const complete = modeSetting || next.operation !== "set" || (next.feature === "assemble" ? next.game && next.players && next.animation !== undefined :
-      next.feature === "reaction" ? next.terms && next.animation : next.packName);
+    const complete = groupDraftComplete(next);
     if (complete && yes.test(text)) {
-      if (!next.profileId && !await allowedGroup(next.group, bot)) {
+      if (!await allowedGroup(next.group, bot, true)) {
         return say(locale, "I can’t verify access to that group.", "Не получилось проверить доступ к группе.", "Не вдалося перевірити доступ до групи.");
       }
+      if (next.feature === "minigames" && next.mode === "on" && (!checkFeature || !(await checkFeature("minigames")).ok)) return say(locale,
+        "The game connection is not verified. Follow the Mini App instructions and retry.",
+        "Подключение игры не подтверждено. Выполни инструкцию Mini App и повтори.",
+        "Підключення гри не підтверджене. Виконай інструкцію Mini App і повтори.");
+      if (next.feature === "moderation" && next.operation !== "disable" &&
+        !await moderationReady(next.group, next.userIds ?? store.group(next.group)?.moderation?.userIds, bot)) return moderationRequirements(locale);
       const sticker = next.packName ? { packName: next.packName } : configuration(next).sticker;
       if (!next.profileId && next.feature === "sticker" && next.operation !== "disable" &&
         stickerConflict(store.state, next.group, { sticker })) {
@@ -509,6 +633,8 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     const groups = groupEntries();
     const asksAbout = helpRequest.test(text);
     if (!asksAbout && (ruleRequest.test(text) || (!animation && /(?:configure|set up|настро|налашту).*(?:reaction|реакц)/iu.test(text) && !text.includes(":")))) {
+      if (!groups.length || /(?:in|for|в|для|у)\s+(?:profile|профиле|профілі)/iu.test(text)) return configurationPrompt(locale);
+      if (!groups.some(([, group]) => group.configured)) return configurationPrompt(locale);
       const target = await resolveConfigurationTarget(text, bot) ?? {};
       const operation = /delete|remove|удал|видал/iu.test(text) ? "delete" : ruleListRequest.test(text) ? "list" : "create";
       const draft = keepDraft({ kind: "rule", operation, ...target });
@@ -551,9 +677,11 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       match ? text.slice(0, match.start) + " " + text.slice(match.end) : text;
     const presetRequest = /(?:in|for|в|для|у)\s+(?:profile|профиле|профілі)(?:\s+|$)/iu.exec(text);
     const presetId = presetRequest ? selectProfile(store.state.profiles, text.slice(presetRequest.index + presetRequest[0].length)) : undefined;
+    if (presetRequest && editableGroupFeature(feature)) return configurationPrompt(locale);
     if (presetRequest && !presetId) return profileList(locale);
     const profileId = presetId ?? (!presetRequest && !groupChoice(groups, targetWords) ? store.state.session?.profileId : undefined);
-    const explicitGroup = profileId ? undefined : groupChoice(groups, targetWords);
+    const assignmentTarget = assignmentIntent.test(text) ? /(?:^|\s)(?:in|for|в|для|у)\s+(.+)$/iu.exec(text)?.[1] : undefined;
+    const explicitGroup = profileId ? undefined : groupChoice(groups, assignmentTarget ?? targetWords);
     const mentionsKnownTitle = groups.some(([, entry]) => mentionsGroup(entry.title, targetWords));
     const group = profileId ? null : explicitGroup ?? (mentionsKnownTitle ? null : store.state.session?.group);
     const access = profileId || (group && await allowedGroup(group, bot));
@@ -588,6 +716,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       return askPersona(draft);
     }
     if (feature && !asksAbout && editableGroupFeature(feature) && configure.test(text)) {
+      if (!groups.length || (group && !await allowedGroup(group, bot, true))) return configurationPrompt(locale);
       let operation = /disable|turn off|выключ|вимк/iu.test(text) ? "disable" : /enable|turn on|включ|увімк/iu.test(text) ? "enable" : "set";
       if (operation === "enable" && access && !(profileId ? store.state.profiles[profileId].settings : store.group(group))?.[feature] && !modeFeatures.includes(feature)) operation = "set";
       const draft = keepDraft({ kind: "group", feature, profileId, group: access ? group : null, operation });
@@ -605,9 +734,9 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       const selected = access && editableGroupFeature(feature) ? "\n\n" +
         (profileId ? settingsSummary(store.state.profiles[profileId].settings, locale) : groupFeatureStatus(group, feature, locale)) : "";
       const hint = editableGroupFeature(feature) ? "\n\n" + say(locale,
-        `To change it, say “configure ${featureName(feature, locale)}” and choose a saved profile or a group.`,
-        `Чтобы изменить, напиши «настрой ${featureName(feature, locale).toLowerCase()}» и выбери сохранённый профиль или группу.`,
-        `Щоб змінити, напиши «налаштуй ${featureName(feature, locale).toLowerCase()}» та вибери збережений профіль або групу.`) : "";
+        `To change it, say “configure ${featureName(feature, locale)}” and choose a group.`,
+        `Чтобы изменить, напиши «настрой ${featureName(feature, locale).toLowerCase()}» и выбери группу.`,
+        `Щоб змінити, напиши «налаштуй ${featureName(feature, locale).toLowerCase()}» та вибери групу.`) : "";
       return detail + selected + hint;
     }
     return catalogueRequest.test(text) ? showCatalogue(locale) : null;
@@ -626,6 +755,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
   }
 
   async function handle(message, bot) {
+    if (!message.text && !message.caption && !message.animation) return false;
     const text = actionableAssembleText(message, message.text ?? message.caption ?? "").trim();
     const command = parseBotCommandText(text, bot.username);
     const internal = isSetupRequest({ ...message, text });
@@ -653,14 +783,11 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     const locale = session?.kind === "persona" ? session.locale : store.state.locale;
     const reply = async response => {
       if (response === null) return false;
-      let remaining = response;
-      while (remaining.length > 3900) {
-        const split = remaining.lastIndexOf("\n", 3900);
-        const length = split > 0 ? split : 3899;
-        await telegram("sendMessage", { chat_id: store.ownerId, text: remaining.slice(0, length) });
-        remaining = remaining.slice(length).trimStart();
-      }
-      await telegram("sendMessage", { chat_id: store.ownerId, text: remaining });
+      const current = store.state.session;
+      const draft = draftKinds.has(current?.kind) && !current.paused;
+      const group = current?.group;
+      const heading = draft && group ? store.group(group)?.title + ` (${group})\n\n` : "";
+      await sendPanel(heading + response, currentRows(bot, current?.locale ?? store.state.locale), { group, draft });
       return true;
     };
     const pending = pendingDraft(session);
@@ -729,6 +856,11 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       return reply(showCatalogue(locale));
     }
     if (!session) return reply(await menuOrChat(text, bot, locale, message.animation?.file_id));
+    if (session.kind === "invitation" && yes.test(text)) {
+      if (!await allowedGroup(session.group, bot, true)) return reply(configurationPrompt(locale));
+      setSession({ kind: "menu", group: session.group, resume: session.resume });
+      return reply(groupSummary(session.group, locale));
+    }
     if (pending) {
       // A side conversation pauses a draft, not its confirmed settings. A bare
       // confirmation in that conversation can never apply an older preview.
@@ -743,7 +875,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       }
       const expectedAnimation = pending.kind === "rule" ? pending.action?.type === "animation" && !pending.action.animation :
         pending.kind === "group" && ["assemble", "reaction"].includes(pending.feature) && pending.animation === undefined;
-      if (!yes.test(text) && !(message.animation && expectedAnimation) && classifyTurn) {
+      if (!message._setupButton && !yes.test(text) && !(message.animation && expectedAnimation) && classifyTurn) {
         let intent;
         try {
           intent = readTurnIntent(await classifyTurn({ kind: pending.kind, paused: Boolean(pending.paused), question: currentQuestion.slice(0, 3500), message: text.slice(0, 4000) }));
@@ -769,7 +901,10 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         session = { ...pending, paused: false }; setSession(session);
       } else if (pending.paused) return false;
     } else if (session.paused) return false;
-    if (session.kind === "rule") return reply(await ruleEditor.handle(session, text, message.animation?.file_id, bot, locale, yes.test(text)));
+    if (session.kind === "rule") {
+      if (session.profileId || (session.group && !await allowedGroup(session.group, bot, true))) return reply(configurationPrompt(locale));
+      return reply(await ruleEditor.handle(session, text, message.animation?.file_id, bot, locale, yes.test(text)));
+    }
 
     if (session.kind === "persona") {
       if (session.name && session.personality && session.language && yes.test(text)) {
@@ -785,7 +920,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
           const id = session.editId ?? randomUUID();
           state.profiles[id] = {
             ...state.profiles[id], name, label: session.label || name, personality, language, locale,
-            settings: state.profiles[id]?.settings ?? initialProfileSettings(), revision: randomUUID(),
+            revision: randomUUID(),
           };
           if (session.makeDefault || !state.defaultProfile) state.defaultProfile = id;
           state.locale = locale;
@@ -823,22 +958,24 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       }
       if (!yes.test(text)) return reply(assignmentQuestion(next, locale));
       if (next.group && !await allowedGroup(next.group, bot)) return reply(groupPrompt(locale));
+      if (next.group && !await allowedGroup(next.group, bot, "assign")) return reply(say(locale,
+        "Make me an administrator of this group, then confirm again. Your draft is retained.",
+        "Назначь меня администратором этой группы и подтверди ещё раз. Черновик сохранён.",
+        "Признач мене адміністратором цієї групи й підтвердь ще раз. Чернетку збережено."));
       const selected = store.state.profiles[next.profile ?? store.state.defaultProfile];
       if (!selected) return reply(profileList(locale));
-      if (next.group && stickerConflict(store.state, next.group, selected.settings ?? {})) {
-        return reply(say(locale, "That sticker pack is in use by another group. Change or disable it in this profile before applying.",
-          "Стикерпак этого профиля уже используется в другой группе. Измени или выключи его в профиле перед применением.",
-          "Стікерпак цього профілю вже використовується в іншій групі. Зміни або вимкни його в профілі перед застосуванням."));
-      }
       store.change(state => {
         if (next.group) assignGroupProfile(state, next.group, next.profile, randomUUID());
         else {
           state.defaultProfile = next.profile;
           state.defaultRevision = randomUUID();
         }
-        state.session = next.resume ?? { kind: "menu", group: next.group };
+        state.session = next.group ? { kind: "invitation", group: next.group, resume: next.resume } : next.resume ?? { kind: "menu" };
       });
-      return reply(say(locale, "Profile assignment saved.", "Назначение профиля сохранено.", "Призначення профілю збережено."));
+      if (!next.group) return reply(say(locale, "Default personality saved.", "Общая личность сохранена.", "Спільну особистість збережено."));
+      return reply(say(locale, `Profile assignment saved for ${store.group(next.group)?.title ?? "the default"}. Would you like to configure this group's features?`,
+        `Профиль назначен для «${store.group(next.group)?.title ?? "установки"}». Хочешь перейти к настройке функций этой группы?`,
+        `Профіль призначено для «${store.group(next.group)?.title ?? "інсталяції"}». Хочеш перейти до налаштування функцій цієї групи?`));
     }
     if (session.kind === "group") return reply(await editGroup(session, text, message.animation?.file_id, bot, locale));
     if (session.kind === "discover") {
@@ -848,11 +985,314 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     return reply(await menuOrChat(text, bot, locale, message.animation?.file_id));
   }
 
+  function nativeMode(group, feature) {
+    if (feature === "status") return "on";
+    const available = featureMode(group, feature);
+    if (available === "unavailable") return available;
+    const settings = store.group(group);
+    if (modeFeatures.includes(feature)) return settings?.modes?.[feature] ?? (feature === "memory" ? "manual" : feature === "minigames" ? "off" : "on");
+    if (!settings?.[feature] && !(feature === "reaction" && settings?.rules?.length)) return "setup";
+    return settings.disabled?.[feature] ? "off" : "on";
+  }
+
+  const moderationRequirements = locale => say(locale,
+    "Only current administrators may be operators, and I need restriction permission. Correct the selection or permissions.",
+    "Исполнители должны быть действующими администраторами, а мне нужно право ограничивать участников. Исправь список или права.",
+    "Виконавці мають бути чинними адміністраторами, а мені потрібне право обмежувати учасників. Виправ список чи права.");
+
+  async function moderationReady(group, userIds, bot) {
+    if (!userIds?.length) return false;
+    try {
+      const members = await Promise.all(userIds.map(id => telegram("getChatMember", { chat_id: Number(group), user_id: id })));
+      const self = await telegram("getChatMember", { chat_id: Number(group), user_id: bot.id });
+      return self.status === "administrator" && self.can_restrict_members === true &&
+        members.every(member => ["creator", "administrator"].includes(member.status));
+    } catch { return false; }
+  }
+
+  async function showFeature(group, feature, bot, locale, notice = "") {
+    if (!featureName(feature, locale)) return;
+    const settings = store.group(group);
+    const rows = [];
+    const mode = group ? nativeMode(group, feature) : "setup";
+    if (group && settings?.configured && editableGroupFeature(feature)) {
+      if (mode !== "unavailable") {
+        if (mode !== "setup") rows.push([button(mode === "off" ? say(locale, "Enable", "Включить", "Увімкнути") : say(locale, "Disable", "Выключить", "Вимкнути"), "toggle", { feature })]);
+        if (feature === "memory") rows.push([button(say(locale, "Change mode", "Изменить режим", "Змінити режим"), "configure", { feature })]);
+        if (!modeFeatures.includes(feature)) rows.push([button(say(locale, "Configure", "Настроить", "Налаштувати"), "configure", { feature })]);
+      }
+      if (feature === "assemble") rows.push(...(settings.assemble?.games ?? []).map(game => [button(game.name, "game", { game: game.id })]));
+      if (feature === "reaction") rows.push(...(settings.rules ?? []).map(rule => [button(rule.phrase.slice(0, 50), "rule", { rule: rule.id })]));
+    }
+    if (feature === "minigames") {
+      rows.push([{ text: say(locale, "Connection instructions", "Инструкция подключения", "Інструкція підключення"),
+        url: "https://github.com/MojoTheApe/plus-one/blob/main/docs/runtime/MINI_APPS.md" }]);
+      rows.push([button(say(locale, "Check connection", "Проверить подключение", "Перевірити підключення"), "checkConnection", { feature })]);
+    }
+    rows.push([button(say(locale, "How to test", "Как проверить", "Як перевірити"), "test", { feature })]);
+    rows.push([button(say(locale, "Back", "Назад", "Назад"), group ? "group" : "intro", { group })]);
+    const title = settings ? `${settings.title} (${group})\n\n` : "";
+    await sendPanel(title + featureDetail(feature, locale) + "\n\n" +
+      (notice ? notice + "\n\n" : "") + say(locale, "State: ", "Состояние: ", "Стан: ") + modeLabel(mode, locale) +
+      (settings?.featureChecks?.[feature]?.ok === false && !["off", "unavailable"].includes(mode) ? " · " + modeLabel("error", locale) : ""), rows, { group });
+  }
+
+  async function configureFeature(group, feature, bot, locale) {
+    if (!await allowedGroup(group, bot, true)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
+    if (featureMode(group, feature) === "unavailable") return showFeature(group, feature, bot, locale);
+    const draft = keepDraft({ kind: feature === "reaction" ? "rule" : "group", group,
+      feature, operation: feature === "reaction" ? "create" : "set" });
+    if (feature === "moderation") {
+      try {
+        const admins = await telegram("getChatAdministrators", { chat_id: Number(group) });
+        draft.operators = admins.filter(member => !member.user.is_bot).map(member => ({ id: member.user.id,
+          name: member.user.username ? "@" + member.user.username : member.user.first_name || String(member.user.id) }));
+      } catch { /* Numeric IDs remain an explicit supported input. */ }
+    }
+    setSession(draft);
+    const text = feature === "reaction" ? ruleEditor.question(draft, locale) : groupQuestion(draft, locale);
+    await sendPanel(store.group(group).title + ` (${group})\n\n` + text, draftRows(draft, locale), { group, draft: true });
+  }
+
+  async function nativeAction(action, group, bot, locale) {
+    switch (action.type) {
+      case "intro":
+        return sendPanel(catalogue(locale, feature => featureMode(undefined, feature)), rootRows(bot, locale));
+      case "profiles": {
+        const rows = Object.entries(store.state.profiles).map(([profile, item]) => [button(profileTitle(item), "editProfile", { profile })]);
+        rows.push([button(say(locale, "Create profile", "Создать профиль", "Створити профіль"), "createProfile")],
+          [button(say(locale, "Back", "Назад", "Назад"), "intro")]);
+        return sendPanel(profileList(locale), rows);
+      }
+      case "createProfile":
+        setSession(keepDraft({ kind: "persona", locale }));
+        return sendPanel(askPersona(store.state.session), draftRows(store.state.session, locale), { draft: true });
+      case "editProfile": {
+        const profile = store.state.profiles[action.profile];
+        if (!profile) return;
+        if (profile.catalogKey) return sendPanel(profileSummary(action.profile, locale), [[button(say(locale, "Create editable profile", "Создать свой профиль", "Створити свій профіль"), "createProfile")]]);
+        setSession(keepDraft({ ...profile, kind: "persona", editId: action.profile, locale }));
+        return sendPanel(askPersona(store.state.session), [[inputButton(say(locale, "Change name", "Изменить имя", "Змінити ім’я"), "change name")],
+          [inputButton(say(locale, "Change character", "Изменить характер", "Змінити характер"), "change personality")],
+          [inputButton(say(locale, "Change language", "Изменить язык", "Змінити мову"), "change language")],
+          ...draftRows(store.state.session, locale)], { draft: true });
+      }
+      case "groups": {
+        const rows = groupEntries().map(([id, item]) => [button(`${id} · ${item.title}`, "group", { group: id })]);
+        return sendPanel(groupPrompt(locale), [...rows, ...rootRows(bot, locale)]);
+      }
+      case "group": {
+        if (!await allowedGroup(group, bot)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
+        if (!store.group(group).configured) return nativeAction({ type: "chooseProfile" }, group, bot, locale);
+        setSession(keepDraft({ kind: "menu", group }));
+        return sendPanel(groupSummary(group, locale), sectionRows(locale), { group });
+      }
+      case "chooseProfile":
+        return sendPanel(store.group(group)?.title + ` (${group})\n\n` + profileList(locale), profileRows(group), { group });
+      case "profile": {
+        if (!store.state.profiles[action.profile] || !await allowedGroup(group, bot)) return;
+        const draft = keepDraft({ kind: "assignment", group, profile: action.profile });
+        setSession(draft);
+        return sendPanel(assignmentQuestion(draft, locale), draftRows(draft, locale), { group, draft: true });
+      }
+      case "section": {
+        if (!await allowedGroup(group, bot, true)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
+        const section = setupSections.find(([id]) => id === action.section);
+        if (!section) return;
+        const rows = section[2].map(feature => [button(featureName(feature, locale) + " · " + modeLabel(nativeMode(group, feature), locale), "feature", { feature })]);
+        rows.push([button(say(locale, "Back", "Назад", "Назад"), "group", { group })]);
+        return sendPanel(`${store.group(group).title} (${group})\n\n` + say(locale, ...section[1]), rows, { group });
+      }
+      case "feature": return showFeature(group, action.feature, bot, locale);
+      case "configure": return configureFeature(group, action.feature, bot, locale);
+      case "toggle": {
+        if (!await allowedGroup(group, bot, true)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
+        const feature = action.feature;
+        if (featureMode(group, feature) === "unavailable") return showFeature(group, feature, bot, locale);
+        const mode = nativeMode(group, feature);
+        if (mode === "setup") return configureFeature(group, feature, bot, locale);
+        if (feature === "minigames" && mode === "off") {
+          const check = checkFeature ? await checkFeature(feature) : { ok: false };
+          if (!check.ok) return showFeature(group, feature, bot, locale, say(locale,
+            "The game service check failed. Follow the connection instructions and retry.",
+            "Проверка игрового сервиса не прошла. Выполни инструкцию подключения и повтори.",
+            "Перевірка ігрового сервісу не пройшла. Виконай інструкцію підключення й повтори."));
+        }
+        const settings = store.group(group);
+        if (feature === "moderation" && mode === "off" && !await moderationReady(group, settings.moderation?.userIds, bot)) {
+          return showFeature(group, feature, bot, locale, moderationRequirements(locale));
+        }
+        if (feature === "sticker" && mode === "off" && stickerConflict(store.state, group, settings)) {
+          return showFeature(group, feature, bot, locale, say(locale, "This pack is linked to another group.", "Этот пак уже привязан к другой группе.", "Цей пак уже прив’язаний до іншої групи."));
+        }
+        store.change(state => {
+          const target = state.groups[group];
+          if (modeFeatures.includes(feature)) {
+            target.modes ??= {};
+            target.modes[feature] = mode === "off" ? (feature === "memory" ? target.lastMemoryMode || "manual" : "on") : "off";
+            if (feature === "memory" && mode !== "off") target.lastMemoryMode = mode;
+          } else {
+            target.disabled ??= {};
+            target.disabled[feature] = mode !== "off";
+          }
+        });
+        return showFeature(group, feature, bot, locale);
+      }
+      case "input": {
+        const draft = store.state.session;
+        if (draft?.group && ["group", "rule"].includes(draft.kind) && !await allowedGroup(draft.group, bot, true)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
+        return handle({ chat: { id: store.ownerId, type: "private" }, from: { id: store.ownerId }, text: action.input, _setupButton: true }, bot);
+      }
+      case "backDraft": {
+        const current = store.state.session;
+        if (current?._back?.length) {
+          const history = [...current._back];
+          const previous = { ...history.pop(), _back: history };
+          setSession(previous);
+          return sendPanel(draftQuestion(store.state.session, locale), draftRows(store.state.session, locale), { group, draft: true });
+        }
+        if (current?.editField) {
+          setSession(current.resume ?? { kind: "menu", group });
+          return current.kind === "rule" ? nativeAction({ type: "rule", rule: current.ruleId }, group, bot, locale) : nativeAction({ type: "game", game: current.game }, group, bot, locale);
+        }
+        const next = structuredClone(current);
+        const keys = next?.kind === "persona" ? ["language", "personality", "name"] : next?.kind === "group" ?
+          ["mode", "animation", "players", "game", "packName", "userIds"] : next?.kind === "rule" ? ["deleteId", "announcement", "access", "action", "phrase"] : ["profile"];
+        const key = keys.find(key => next?.[key] !== undefined && next[key] !== null);
+        if (!key) return nativeAction({ type: group ? "group" : "profiles" }, group, bot, locale);
+        delete next[key];
+        setSession(next);
+        return sendPanel(draftQuestion(next, locale), draftRows(next, locale), { group, draft: true });
+      }
+      case "game": {
+        const game = store.group(group)?.assemble?.games.find(item => item.id === action.game);
+        if (!game) return;
+        const rows = [[button(say(locale, "Edit players", "Изменить игроков", "Змінити гравців"), "gameField", { game: game.id, field: "players" })],
+          [button(say(locale, "Edit animation", "Изменить GIF", "Змінити GIF"), "gameField", { game: game.id, field: "animation" })],
+          [button(game.enabled === false ? say(locale, "Enable call", "Включить сбор", "Увімкнути збір") : say(locale, "Disable call", "Выключить сбор", "Вимкнути збір"), "toggleGame", { game: game.id })],
+          [button(say(locale, "Delete game settings", "Удалить настройку игры", "Видалити налаштування гри"), "deleteGame", { game: game.id })],
+          [button(say(locale, "Preview", "Предпросмотр", "Попередній перегляд"), "game", { game: game.id })],
+          [button(say(locale, "Back", "Назад", "Назад"), "feature", { feature: "assemble" })]];
+        return sendPanel(`${store.group(group).title} (${group})\n\n${game.name}\n${game.players.map(name => "@" + name).join(", ")}`, rows, { group });
+      }
+      case "gameField": {
+        if (!await allowedGroup(group, bot, true)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
+        const game = store.group(group)?.assemble?.games.find(item => item.id === action.game);
+        if (!game) return;
+        const draft = keepDraft({ kind: "group", group, feature: "assemble", operation: "set", game: game.id,
+          players: game.players, animation: game.animationReference || "", animationPath: game.animationPath, editField: action.field });
+        delete draft[action.field];
+        if (action.field === "animation") delete draft.animationPath;
+        setSession(draft);
+        return sendPanel(`${store.group(group).title} (${group})\n\n` + groupQuestion(draft, locale), draftRows(draft, locale), { group, draft: true });
+      }
+      case "rule": {
+        const rule = store.group(group)?.rules?.find(item => item.id === action.rule);
+        if (!rule) return;
+        const label = rule.action.type === "animation" ? "GIF" : rule.action.type === "persona" ? featureName("profile", locale) : featureName(rule.action.type, locale);
+        return sendPanel(`${store.group(group).title} (${group})\n\n${rule.phrase} → ${label}\n` +
+          modeLabel(rule.enabled === false ? "off" : "on", locale) + "\n" + (rule.announcement || ""), [
+          [button(say(locale, "Change action", "Изменить действие", "Змінити дію"), "ruleField", { rule: rule.id, field: "action" })],
+          ...(rule.action.type === "persona" ? [] : [[button(say(locale, "Change access", "Изменить доступ", "Змінити доступ"), "ruleField", { rule: rule.id, field: "access" })]]),
+          [button(say(locale, "Change announcement", "Изменить объявление", "Змінити оголошення"), "ruleField", { rule: rule.id, field: "announcement" })],
+          [button(rule.enabled === false ? say(locale, "Enable rule", "Включить правило", "Увімкнути правило") : say(locale, "Disable rule", "Выключить правило", "Вимкнути правило"), "toggleRule", { rule: rule.id })],
+          [button(say(locale, "Delete rule", "Удалить правило", "Видалити правило"), "deleteRule", { rule: rule.id })],
+          [button(say(locale, "Back", "Назад", "Назад"), "feature", { feature: "reaction" })],
+        ], { group });
+      }
+      case "ruleField": {
+        if (!await allowedGroup(group, bot, true)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
+        const rule = store.group(group)?.rules?.find(item => item.id === action.rule);
+        if (!rule) return;
+        const draft = keepDraft({ kind: "rule", group, operation: "create", phrase: rule.phrase,
+          action: structuredClone(rule.action), access: rule.access, announcement: rule.announcement ?? "", ruleId: rule.id, editField: action.field });
+        delete draft[action.field];
+        setSession(draft);
+        return sendPanel(ruleEditor.question(draft, locale), draftRows(draft, locale), { group, draft: true });
+      }
+      case "toggleGame":
+      case "toggleRule":
+      case "confirmDeleteGame": {
+        if (!await allowedGroup(group, bot, true)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
+        store.change(state => {
+          const settings = state.groups[group];
+          if (action.type === "toggleRule") {
+            const rule = settings.rules?.find(item => item.id === action.rule);
+            if (rule) rule.enabled = rule.enabled === false;
+          } else if (action.type === "toggleGame") {
+            const game = settings.assemble?.games.find(item => item.id === action.game);
+            if (game) game.enabled = game.enabled === false;
+          } else if (settings.assemble) settings.assemble.games = settings.assemble.games.filter(item => item.id !== action.game);
+        });
+        return action.type === "toggleRule" ? nativeAction({ type: "rule", rule: action.rule }, group, bot, locale) : showFeature(group, "assemble", bot, locale);
+      }
+      case "deleteGame":
+        return sendPanel(say(locale, "Delete game settings: ", "Удалить настройки игры: ", "Видалити налаштування гри: ") +
+          (store.group(group)?.assemble?.games.find(game => game.id === action.game)?.name ?? action.game) + "?", [
+          [button(say(locale, "Delete", "Удалить", "Видалити"), "confirmDeleteGame", { game: action.game })],
+          [button(say(locale, "Back", "Назад", "Назад"), "game", { game: action.game })]], { group });
+      case "deleteRule": {
+        const draft = keepDraft({ kind: "rule", group, operation: "delete", deleteId: action.rule });
+        setSession(draft);
+        return sendPanel(ruleEditor.question(draft, locale), draftRows(draft, locale), { group, draft: true });
+      }
+      case "operator": {
+        const draft = structuredClone(store.state.session);
+        if (draft?.feature !== "moderation" || !draft.operators?.some(item => item.id === action.id)) return;
+        draft.userIds ??= [];
+        draft.userIds = draft.userIds.includes(action.id) ? draft.userIds.filter(id => id !== action.id) : [...draft.userIds, action.id];
+        setSession(draft);
+        return sendPanel(groupQuestion(draft, locale), draftRows(draft, locale), { group, draft: true });
+      }
+      case "checkConnection": {
+        const check = checkFeature ? await checkFeature(action.feature) : { ok: false };
+        return showFeature(group, action.feature, bot, locale, check.ok ? say(locale,
+          "Configured game services are reachable. Also verify Main Mini App registration in BotFather and launch the selected game in Telegram.",
+          "Настроенные игровые сервисы доступны. Также проверь регистрацию Main Mini App в BotFather и запуск выбранной игры в Telegram.",
+          "Налаштовані ігрові сервіси доступні. Також перевір реєстрацію Main Mini App у BotFather і запуск вибраної гри в Telegram.") : say(locale,
+          "No working game connection was verified. Follow the per-game instructions and retry.",
+          "Работающее подключение игры не подтверждено. Выполни инструкцию для выбранной игры и повтори.",
+          "Робоче підключення гри не підтверджене. Виконай інструкцію для вибраної гри й повтори."));
+      }
+      case "test":
+        return showFeature(group, action.feature, bot, locale, action.feature === "voice" ? say(locale,
+          "Send an ordinary voice in the group, then ask me to summarize it. To test a reply, send a voice replying to my message.",
+          "Отправь обычное голосовое в группу, затем попроси пересказать его. Для проверки ответа отправь голосовое ответом на моё сообщение.",
+          "Надішли звичайне голосове до групи, потім попроси переказати його. Для перевірки відповіді надішли голосове відповіддю на моє повідомлення.") :
+          say(locale, "Use the example above in this group. For connection diagnostics, use /status. No group action has been executed by this preview.",
+            "Используй пример выше в этой группе. Для диагностики подключений открой /status. Этот предпросмотр не выполнял действий в группе.",
+            "Використай приклад вище в цій групі. Для діагностики підключень відкрий /status. Цей попередній перегляд не виконував дій у групі."));
+      case "finish":
+        setSession(pendingDraft(store.state.session) ? { ...pendingDraft(store.state.session), paused: true } : null);
+        return sendPanel(say(locale, "Settings retained. Talk to me or return with /setup.", "Настройки сохранены. Можешь общаться или вернуться через /setup.", "Налаштування збережено. Можеш спілкуватися або повернутися через /setup."), rootRows(bot, locale));
+    }
+  }
+
+  async function handleCallback(query, bot) {
+    const consumed = await controls.consume(query);
+    if (!consumed) return false;
+    if (consumed.invalid) return true;
+    editMessageId = consumed.messageId;
+    try {
+      await nativeAction(consumed.action, consumed.action.group ?? consumed.group, bot, store.state.locale);
+    } catch {
+      await sendPanel(say(store.state.locale, "Could not apply this step. Your saved settings remain; open /setup and try again.",
+        "Не удалось выполнить шаг. Сохранённые настройки остаются; открой /setup и попробуй снова.",
+        "Не вдалося виконати крок. Збережені налаштування залишаються; відкрий /setup і спробуй ще раз."), rootRows(bot, store.state.locale));
+    } finally { editMessageId = undefined; }
+    return true;
+  }
+
   let handling = Promise.resolve();
   function serialHandle(message, bot) {
     const run = handling.catch(() => {}).then(() => handle(message, bot));
     handling = run;
     return run;
   }
-  return { handle: serialHandle, observe, settingIsOn, isSetupRequest };
+  return { handle: serialHandle, observe, settingIsOn, isSetupRequest,
+    handleCallback: (query, bot) => {
+      const run = handling.catch(() => {}).then(() => handleCallback(query, bot));
+      handling = run;
+      return run;
+    } };
 }

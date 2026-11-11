@@ -86,10 +86,10 @@ export class CodexBackend {
     this.saveQueue = Promise.resolve();
   }
 
-  ask({ sessionKey, prompt, images = [], allowEmpty = false, contextTicket = null, profile = this.profile }) {
+  ask({ sessionKey, prompt, images = [], allowEmpty = false, contextTicket = null, profile = this.profile, webSearch = true }) {
     const sessionScope = sessionKey && profile ? JSON.stringify([sessionKey, profile.fingerprint]) : sessionKey;
     const key = sessionScope ? createHash("sha256").update(sessionScope).digest("hex") : randomUUID();
-    const work = (this.pending.get(key) || Promise.resolve()).catch(() => {}).then(() => this.run(key, prompt, images, Boolean(sessionKey), { allowEmpty, contextTicket, profile }));
+    const work = (this.pending.get(key) || Promise.resolve()).catch(() => {}).then(() => this.run(key, prompt, images, Boolean(sessionKey), { allowEmpty, contextTicket, profile, webSearch }));
     this.pending.set(key, work);
     return work.finally(() => { if (this.pending.get(key) === work) this.pending.delete(key); });
   }
@@ -113,7 +113,7 @@ export class CodexBackend {
     throw new Error("No independent AI model is configured");
   }
 
-  async run(key, prompt, images, persist, { allowEmpty = false, contextTicket = null, profile = this.profile } = {}) {
+  async run(key, prompt, images, persist, { allowEmpty = false, contextTicket = null, profile = this.profile, webSearch = true } = {}) {
     if (!this.home || !this.workspace) throw new Error("Independent AI runtime paths are not configured");
     if (!this.sessions) {
       this.loadPromise ||= (async () => {
@@ -144,7 +144,7 @@ export class CodexBackend {
       const args = ["exec", ...(previous ? ["resume", previous] : []), "--strict-config", "--json", "--skip-git-repo-check", ...(model === "default" ? [] : ["-m", model]),
         "-c", `model_reasoning_effort=${JSON.stringify(this.thinking)}`,
         "-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"',
-        "-c", "features.shell_tool=false", "-c", 'web_search="live"'];
+        "-c", "features.shell_tool=false", "-c", webSearch ? 'web_search="live"' : 'web_search="disabled"'];
       if (contextTicket) {
         args.push("-c", 'mcp_servers.telegram_context.command="node"',
           "-c", `mcp_servers.telegram_context.args=${JSON.stringify([path.resolve(path.dirname(new URL(import.meta.url).pathname), "../tools/telegram-context-mcp.mjs")])}`,

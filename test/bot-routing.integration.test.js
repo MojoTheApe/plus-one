@@ -161,7 +161,8 @@ test('enabled group auto reply responds to a transcribed voice note', async (t) 
 test('failed voice transcription replies to a triggered group message', async (t) => {
   const f = await fixture(t);
   await f.handle({ voice: { file_id: 'fixture' }, _voiceTranscriptionError: 'fixture decoding failure', reply_to_message: { message_id: 9, from: { id: 77, is_bot: true }, text: 'Привіт' } });
-  assert.match(f.calls.at(-1).payload.text, /could not transcribe/);
+  assert.match(f.calls.at(-1).payload.text, /Не вдалося розпізнати голосове/);
+  assert.ok(!f.calls.at(-1).payload.text.includes('fixture decoding failure'));
 });
 
 

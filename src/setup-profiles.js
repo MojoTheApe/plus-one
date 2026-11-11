@@ -2,6 +2,11 @@ import { escapeRegex } from "./helpers.js";
 import { ruleRequest } from "./message-rules.js";
 
 export const profileSettingsKeys = ["assemble", "reaction", "sticker", "modes", "disabled", "rules"];
+export function groupConfiguration(group) {
+  if (!group) return null;
+  return Object.fromEntries([...profileSettingsKeys, "title", "active", "configured", "profile", "profileRevision", "persona", "character", "moderation", "legacyModeration"]
+    .map(key => [key, group[key]]));
+}
 export const profileTitle = profile => profile.label || profile.name;
 
 export const creationIntent = /(?:create (?:a )?(?:new )?profile|new profile|созда(?:й|ть) (?:новый )?профиль|новый профиль|створи (?:новий )?профіль|новий профіль)/iu;
@@ -32,19 +37,21 @@ export function isSetupRequest(message) {
 }
 
 export function initialProfileSettings() {
-  return { modes: { memory: "manual", voice: "manual", analysis: "on", download: "on", minigames: "off" } };
+  return { modes: { chat: "on", search: "on", judge: "on", history: "on", memory: "manual", voice: "on", analysis: "on", download: "on", minigames: "off" } };
 }
 
-// Assign a snapshot so edits made in one chat never mutate another chat or the
-// reusable source profile. History and room data are stored outside these keys.
+// Personalities are reusable. Features belong to the group: seed defaults once,
+// and never copy legacy profile templates over an existing group's settings.
 export function assignGroupProfile(state, id, profileId, revision) {
   const selected = state.profiles[profileId ?? state.defaultProfile];
   if (!selected) throw new Error("Unknown profile");
   const group = state.groups[id];
   if (!group) throw new Error("Unknown group");
-  for (const key of profileSettingsKeys) delete group[key];
+  if (!group.configured) {
+    const defaults = initialProfileSettings();
+    group.modes = { ...defaults.modes, ...group.modes };
+  }
   delete group.character;
-  Object.assign(group, structuredClone(selected.settings ?? initialProfileSettings()));
   const { settings: ignored, ...persona } = selected;
   Object.assign(group, { persona: structuredClone(persona), profile: profileId, profileRevision: revision, configured: true, awaitingProfile: false });
   releaseInactiveStickerBindings(state, id, group);

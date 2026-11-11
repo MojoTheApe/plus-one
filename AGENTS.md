@@ -1,25 +1,38 @@
-# Plus One: agent guide
+# Plus One: installation and development guide
 
-Start with README.md and docs/runtime/PORTABLE.md. A fresh installation uses
-the user's own Telegram token, numeric owner ID and Codex login. Explain the
-BotFather and device-login steps, and let the user authenticate privately.
-Never reuse another installation's identity, credentials, profiles or services.
+Read README.md, docs/runtime/PORTABLE.md and src/bot-guide.md first. Follow this
+mandatory order for a fresh installation; do not request every credential upfront.
 
-Keep the private instance directory outside this checkout. Do not print tokens,
-auth files, private personas, member lists or conversation contents in logs.
-Run the documented non-polling connection check before starting. Use a distinct
-instance directory and Compose project for every token; never start two pollers
-with the same token. Preserve existing state and back it up before updates.
+1. Ask where and how the user wants to install: this computer with Docker, a VPS
+   with Docker, or the documented native path if they explicitly select it.
+   Prepare that environment and its isolated private instance directory.
+2. Ask which AI connection: Codex CLI or Anthropic API (the existing Claude CLI
+   adapter). Explain that adapter's current search/image/history limitations.
+   Help the user authenticate privately. Run --ai-only without Telegram credentials;
+   resolve AI errors before proceeding. Run --media-only to load the speech model
+   and check tools, without starting a poller.
+3. Only after AI passes, guide creation in BotFather: allow groups (Group Joining),
+   disable Group Privacy, obtain the new bot token. Explain that the owner later
+   needs to make the bot an administrator in each group.
+4. Ask who owns this installation and obtain their numeric Telegram user ID.
+   A username alone cannot establish ownership. Keep token/keys/login private,
+   outside Git; never print them or reuse another installation's credentials.
+5. Run the Telegram/full non-polling check. Start only after Telegram, AI and owner
+   are configured. Give the private bot link and instruct the owner to press Start.
+   The installation-agent stage ends here; personality/group setup happens in Telegram.
 
-After installation, guide the owner to Start in the bot's private chat. Setup
-uses free text; no source edits are needed for ordinary profiles and group rules.
-Settings and profile/rule lists are owner-only. A Telegram administrator is not
-automatically the installation owner.
+Use a distinct instance directory and Compose project per bot. Never start two
+pollers with one token. Keep existing state and back it up before updating.
+A group administrator is not automatically the installation owner.
 
-For development, use supported Node, install the lockfile dependencies and run
-the relevant offline tests. Tests must not inherit real credentials or private
-paths. Keep fixture, real model, container, installed and physical-client evidence
-distinct. Do not send Telegram messages, call a paid AI account or restart a live
-installation without authorization for that task. Preserve feature permissions
-and group boundaries when changing routing. Configured rules invoke supported
-actions; they never execute arbitrary code or shell commands.
+Profiles define name, character and language only. Functions belong to groups.
+Do not edit saved-profile feature templates: choose a joined group, assign its
+profile and verify bot administrator rights. Personality changes preserve group
+settings/players/rules/history. Help is available before a group exists.
+
+For development read the shipped bot guide and use supported Node and lockfile
+dependencies. Offline tests use synthetic state/mocked services. Separate source,
+container, real-model, installed and physical-client evidence. Do not restart a
+live instance, send live Telegram messages or call a paid AI account without
+explicit authorization. Preserve owner checks, topic boundaries, private memory
+scopes and one-poller ownership. Rules invoke bounded actions, never arbitrary code.
