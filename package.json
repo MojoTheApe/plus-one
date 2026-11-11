@@ -1,0 +1,25 @@
+{
+  "name": "plus-one-bot",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bot:start": "node scripts/manage-bot.mjs start",
+    "bot:status": "node scripts/manage-bot.mjs status",
+    "bot:stop": "node scripts/manage-bot.mjs stop",
+    "bot:restart": "node scripts/manage-bot.mjs restart",
+    "start": "node src/bot.js",
+    "rotate-logs": "node scripts/rotate-logs.mjs",
+    "test": "node --test",
+    "verify": "node scripts/check-portable.mjs"
+  },
+  "engines": {
+    "node": ">=24.20.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "polygon-clipping": "0.15.7",
+    "ws": "8.22.2",
+    "zod": "4.6.7"
+  }
+}

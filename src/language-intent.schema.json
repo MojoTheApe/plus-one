@@ -1,0 +1,1 @@
+{"type":"object","properties":{"language":{"type":"string","enum":["uk","ru","mixed","neutral","unclear"]},"confident":{"type":"boolean"}},"required":["language","confident"],"additionalProperties":false}

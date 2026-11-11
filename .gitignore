@@ -1,0 +1,20 @@
+.env
+.env.*
+!.env.example
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+*.pid
+*.tmp
+*.swp
+.DS_Store
+logs/
+memory/
+assets/assemble.mp4
+assets/insult-reply.mp4
+
+# Pinned shared Tracker client cache.
+.tracker-runtime/
+web/flappy-bird/dist/

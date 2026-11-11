@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "chats": {
+    "-1001000000001": {
+      "assemble": {
+        "games": {
+          "fortnite": { "players": ["AlphaPlayer", "AlphaFriend"] },
+          "rocket-league": { "players": ["AlphaPlayer"] }
+        }
+      },
+      "stickerPack": {
+        "packName": "alpha_by_ExampleBot",
+        "ownerId": 101
+      }
+    },
+    "-1001000000002": {
+      "assemble": {
+        "games": {
+          "fortnite": { "players": ["BetaPlayer"] },
+          "arc-riders": { "players": ["BetaPlayer", "BetaFriend"] }
+        }
+      }
+    }
+  }
+}

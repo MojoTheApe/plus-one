@@ -1,0 +1,7 @@
+FROM node:24.20.0-bookworm-slim
+WORKDIR /app
+COPY scripts/serve-duel.mjs ./scripts/
+COPY web/duel ./web/duel
+USER node
+EXPOSE 8091
+CMD ["node", "scripts/serve-duel.mjs"]

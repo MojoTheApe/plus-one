@@ -1,0 +1,56 @@
+#flappy-ui {
+  --bird-paper:#ded895; --bird-ink:#543847;
+  position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+  container-type:inline-size; pointer-events:none; line-height:1;
+  font-family:"Bird Ref","Flappy Pixel",sans-serif; font-weight:700;
+}
+#flappy-ui [hidden] { display:none; }
+#flappy-ui img { display:block; width:100%; height:auto; image-rendering:pixelated; }
+#flappy-result-actions {
+  position:absolute; left:7.6389cqw; display:flex; gap:4.1667cqw;
+  width:84.7222cqw; pointer-events:auto;
+}
+#flappy-result-actions button {
+  width:40.2778cqw; min-height:44px; flex:none; padding:0; border:0; background:none; cursor:pointer;
+  -webkit-tap-highlight-color:transparent;
+}
+#flappy-result-actions button:hover img { filter:brightness(1.04); }
+#flappy-result-actions button:active { translate:0 2px; }
+#flappy-leaderboard {
+  position:absolute; inset:0; display:flex; flex-direction:column;
+  background:var(--bird-paper); color:#0e0d08; pointer-events:auto;
+}
+.bird-board-header { position:relative; height:50cqw; flex:none; background:#4ec0ca; }
+.bird-board-title {
+  position:absolute; bottom:3.4722cqw; left:0; right:0; margin:0;
+  color:#fff; text-align:center; font:700 10.4167cqw/1 "Bird Ref","Flappy Pixel",sans-serif;
+}
+.bird-board-back {
+  position:absolute; top:11.1111cqw; left:5.5556cqw; display:grid; place-items:center;
+  width:max(44px,15.2778cqw); height:max(44px,15.2778cqw); padding:0;
+  border:0; background:none; cursor:pointer;
+}
+.bird-board-back-plate {
+  display:grid; place-items:center; width:11.8056cqw; height:11.8056cqw;
+  border:2px solid var(--bird-ink); background:#dd6a24; box-shadow:inset 0 0 0 2px #fff3c5;
+}
+.bird-board-arrow { width:5.5556cqw; height:5.5556cqw; image-rendering:pixelated; }
+.bird-board-back:hover .bird-board-back-plate { background:#ee7a2b; }
+.bird-board-grass { height:8.3333cqw; flex:none; background-position:left top; background-size:116.6667cqw 38.8889cqw; border-bottom:2px solid #9a8655; }
+.bird-board-content {
+  flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain;
+  padding:17.3611cqw 6.9444cqw 6.9444cqw; scrollbar-width:thin; scrollbar-color:#9a8655 var(--bird-paper);
+}
+.bird-list-title { margin:0 0 4.8611cqw; text-align:center; font:700 5.5556cqw/1 "Bird Ref","Flappy Pixel",sans-serif; }
+.bird-ranking { margin:0; padding:0; list-style:none; font:700 max(14px,5.5556cqw)/1 "Bird Ref","Flappy Pixel",sans-serif; }
+.bird-ranking li { display:flex; align-items:center; justify-content:center; gap:1.3889cqw; min-height:5.5556cqw; padding:0; }
+.bird-ranking li + li { margin-top:.3472cqw; }
+.bird-player-name { min-width:0; max-width:54.1667cqw; overflow-wrap:anywhere; text-align:center; }
+.bird-points { flex:none; font-variant-numeric:tabular-nums; }
+.bird-crown { flex:none; width:5.7292cqw; height:3.6458cqw; image-rendering:pixelated; }
+.bird-board-status { margin:0; text-align:center; font:16px/1.25 "Flappy Pixel",sans-serif; overflow-wrap:anywhere; }
+.bird-board-retry { display:block; margin:12px auto 0; min-height:44px; padding:6px 12px; border:2px solid var(--bird-ink); background:#f4edbb; color:var(--bird-ink); font:16px/1 "Flappy Pixel",sans-serif; cursor:pointer; }
+/* Keep the existing 44px settings hit target; its small result-screen icon stays
+   above the approved Game Over lettering even in a short landscape playfield. */
+#flappy-frame .flappy-result-gear { top:0; right:0; background:none; border:0; box-shadow:none; color:#543847; }
+#flappy-frame .flappy-result-gear svg { position:absolute; top:calc(var(--game-pixel) * 4); right:calc(var(--game-pixel) * 4); width:calc(var(--game-pixel) * 18); height:calc(var(--game-pixel) * 18); }

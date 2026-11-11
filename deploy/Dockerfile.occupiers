@@ -1,0 +1,12 @@
+FROM node:24.20.0-bookworm-slim
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+COPY src/occupiers ./src/occupiers
+COPY src/flappy-records.js ./src/
+COPY scripts/serve-occupiers.mjs ./scripts/
+COPY web/occupiers/index.html web/occupiers/app.js web/occupiers/controls.js web/occupiers/territories.js web/occupiers/absorption.js web/occupiers/art.js web/occupiers/style.css ./web/occupiers/
+COPY web/occupiers/assets ./web/occupiers/assets
+USER node
+EXPOSE 8090
+CMD ["node", "scripts/serve-occupiers.mjs"]

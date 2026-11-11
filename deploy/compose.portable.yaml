@@ -1,0 +1,45 @@
+services:
+  bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file: ${BOT_INSTANCE_DIR:?Set BOT_INSTANCE_DIR to a private absolute path}/bot.env
+    environment:
+      ANSWER_BACKEND: codex
+      HOME: /state/home
+      CODEX_HOME: /state/codex
+      AI_AGENT_DIR: /state/agent
+      AI_SESSION_MAP: /state/runtime/ai-sessions.json
+      BOT_LOCK_FILE: /state/runtime/bot.pid
+      BOT_STATUS_FILE: /state/runtime/status.json
+      BOT_OFFSET_FILE: /state/runtime/telegram-offset.json
+      BOT_SETUP_FILE: /state/runtime/setup.sqlite
+      BOT_PROFILE_FILE: /app/src/profiles.example.json
+      BOT_INBOX_FILE: /state/runtime/update-inbox.json
+      CONVERSATION_HISTORY_DIR: /state/runtime/conversations
+      MEMORY_DIR: /state/memory
+      ASSEMBLE_MEMBERS_FILE: /state/runtime/assemble-members.json
+      ASSEMBLE_STATE_FILE: /state/runtime/assemble-state.json
+      XDG_CACHE_HOME: /state/cache
+      HF_HOME: /state/cache/huggingface
+      WHISPER_PYTHON: /opt/whisper/bin/python
+      SOCIAL_VIDEO_DOWNLOADER: /opt/whisper/bin/yt-dlp
+    volumes:
+      - type: bind
+        source: ${BOT_INSTANCE_DIR:?Set BOT_INSTANCE_DIR to a private absolute path}/state
+        target: /state
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "scripts/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3

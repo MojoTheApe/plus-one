@@ -1,0 +1,194 @@
+[
+  {
+    "name": "insistence-keeps-interpersonal-dispute",
+    "route": "dialogue",
+    "history": [
+      {
+        "messageId": 1,
+        "sender": "@PersonC",
+        "text": "Хмара краще локального ШІ"
+      },
+      {
+        "messageId": 2,
+        "sender": "@PersonD",
+        "replyToMessageId": 1,
+        "text": "Але є ризики централізації"
+      },
+      {
+        "messageId": 10,
+        "sender": "@PersonA",
+        "text": "Скинув картинку, але сам дивитися не буду"
+      },
+      {
+        "messageId": 11,
+        "sender": "@PersonB",
+        "replyToMessageId": 10,
+        "text": "Так а скинув чисто, щоб усі знали, що ти не дивишся?"
+      },
+      {
+        "messageId": 12,
+        "sender": "@PersonA",
+        "replyToMessageId": 11,
+        "text": "Ти до мене чіпляєшся?"
+      },
+      {
+        "messageId": 13,
+        "sender": "@PersonB",
+        "replyToMessageId": 12,
+        "text": "Просто цікавлюся твоєю картинкою"
+      },
+      {
+        "messageId": 14,
+        "sender": "@PersonA",
+        "text": "@Bot розсуди нас"
+      },
+      {
+        "messageId": 15,
+        "sender": "@Bot",
+        "isBot": true,
+        "replyToMessageId": 14,
+        "text": "Це дружня перепалка про намір і тон спілкування."
+      }
+    ],
+    "request": {
+      "messageId": 16,
+      "sender": "@PersonA",
+      "replyToMessageId": 15,
+      "text": "Розсуди всеодно",
+      "addressedToBot": true
+    },
+    "expected": {
+      "action": "judge",
+      "judgeScope": "single",
+      "targetIds": [
+        10,
+        11,
+        12,
+        13
+      ]
+    }
+  },
+  {
+    "name": "clarification-with-cited-parent",
+    "route": "dialogue",
+    "history": [
+      {
+        "messageId": 10,
+        "sender": "@Bot",
+        "isBot": true,
+        "text": "Точне місце служби не варто розганяти. Джерело: https://example.org/biography"
+      }
+    ],
+    "request": {
+      "messageId": 11,
+      "sender": "@PersonA",
+      "replyToMessageId": 10,
+      "text": "Розганяти? Шо?",
+      "addressedToBot": true
+    },
+    "expected": {
+      "action": "reply",
+      "needsResearch": false
+    }
+  },
+  {
+    "name": "human-discord-prototype-invitation",
+    "route": "assemble",
+    "history": [
+      {
+        "messageId": 10,
+        "sender": "@PersonA",
+        "text": "Гоу диск покажу прототип"
+      },
+      {
+        "messageId": 11,
+        "sender": "@PersonB",
+        "replyToMessageId": 10,
+        "text": "Маякуй"
+      }
+    ],
+    "request": {
+      "messageId": 12,
+      "sender": "@PersonA",
+      "replyToMessageId": 11,
+      "text": "Го?",
+      "addressedToBot": false
+    },
+    "expected": {
+      "action": "none"
+    }
+  },
+  {
+    "name": "hd-selects-offered-game",
+    "route": "menu",
+    "history": [
+      {
+        "messageId": 10,
+        "sender": "@PersonA",
+        "text": "Будем во что катать?"
+      },
+      {
+        "messageId": 11,
+        "sender": "@Bot",
+        "isBot": true,
+        "replyToMessageId": 10,
+        "text": "У що збираємось грати?",
+        "choices": [
+          "Fortnite",
+          "Rocket League",
+          "Arc Riders",
+          "Helldivers 2"
+        ]
+      }
+    ],
+    "request": {
+      "messageId": 12,
+      "sender": "@PersonB",
+      "replyToMessageId": 10,
+      "text": "ХД",
+      "addressedToBot": false
+    },
+    "expected": {
+      "action": "assemble",
+      "gameIds": [
+        "helldivers-2"
+      ]
+    }
+  },
+  {
+    "name": "explicit-all-disputes-still-supported",
+    "route": "dialogue",
+    "history": [
+      {
+        "messageId": 1,
+        "sender": "@PersonA",
+        "text": "Піца краще супу"
+      },
+      {
+        "messageId": 2,
+        "sender": "@PersonB",
+        "text": "Ні, суп краще"
+      },
+      {
+        "messageId": 3,
+        "sender": "@PersonC",
+        "text": "Чай краще кави"
+      },
+      {
+        "messageId": 4,
+        "sender": "@PersonD",
+        "text": "Ні, кава краще"
+      }
+    ],
+    "request": {
+      "messageId": 10,
+      "sender": "@PersonA",
+      "text": "@Bot розсуди всі суперечки в цій історії",
+      "addressedToBot": true
+    },
+    "expected": {
+      "action": "judge",
+      "judgeScope": "all"
+    }
+  }
+]

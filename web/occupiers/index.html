@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#fbfbfc">
+  <title>Occupiers</title>
+  <link rel="stylesheet" href="/occupiers/style.css">
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="/occupiers/app.js" type="module"></script>
+</head>
+<body>
+  <div id="app">
+    <header class="apphead"><div class="wordmark"><svg viewBox="0 0 30 30" aria-hidden="true"><path d="M2 2H17V9H28V28H9V20H2Z" fill="currentColor"/><path d="M10 5H14V17H25V21H10Z" fill="#fbfbfc"/></svg>Occupiers</div><div class="room"><strong id="room-title">Кімната твоєї групи</strong><span id="room-meta">Території</span></div></header>
+    <div id="connection" class="connection" role="status" hidden></div>
+    <section id="loading" class="center"><h1>Заходимо до кімнати…</h1><p>Перевіряємо Telegram і підключаємося до групи.</p></section>
+    <section id="error" class="center" hidden><h1>Не вдалося увійти</h1><p id="error-text"></p><button id="retry-login" class="primary">Повторити вхід</button></section>
+    <section id="dev-login" class="center" hidden><h1>Локальна перевірка</h1><p>Цей сервер працює лише на твоєму комп’ютері. Кожна вкладка — окремий тестовий гравець.</p><label for="dev-name">Ім’я гравця</label><input id="dev-name" maxlength="48" autocomplete="off" value="Гравець"><button id="dev-enter" class="primary">Увійти</button></section>
+    <section id="lobby" class="panel" hidden>
+      <div class="body lobbygrid"><section class="intro"><fieldset class="mode-choice"><legend>Режим гри</legend><div class="mode-buttons"><button data-mode="territories" aria-pressed="true">Території</button><button data-mode="absorption" aria-pressed="false">Поглинання</button></div><small id="mode-note">Режим обирає організатор.</small></fieldset><h1 id="lobby-headline">Малюй. Замикай.<br>Захоплюй!</h1><p id="lobby-tagline">Повертайся на свою землю, поки твій слід не перерізали.</p><details><summary>Як грати</summary><p id="lobby-rules">Вийди зі своєї землі та повернися, замкнувши контур. Переріж чужий слід, щоб усунути суперника. Власний слід, зіткнення та межа арени небезпечні. Після вибуття — наступний раунд.</p><p>Керування: джойстик на телефоні, миша на комп’ютері.</p></details></section><section class="colour-section"><div id="lobby-colors"></div><p id="lobby-message" class="hint" role="status"></p><button id="spectate-lobby" class="textbutton">Спостерігати</button></section><section class="roster-section"><div class="sectiontitle"><h2>Хто грає</h2><span id="population"></span></div><ul id="roster" class="roster"></ul></section></div>
+      <footer class="actions"><p id="ready-hint" class="hint"></p><button id="ready" class="secondary">Готовий</button><button id="start" class="primary">Почати матч</button></footer>
+    </section>
+    <section id="join" class="panel" hidden>
+      <div class="body joinlayout"><section><h1>Матч уже триває.</h1><p id="join-count"></p><div class="timeleft"><span id="join-time">—</span><small>залишилося до кінця</small></div><p id="join-leader" class="hint"></p></section><section><div id="join-info" class="banner" role="status">Безпечна стартова земля та захист на 3 секунди, доки ти не вийдеш за її межі.</div><div id="join-colors"></div><h2>Зараз попереду</h2><ul id="join-leaders" class="roster"></ul></section></div>
+      <footer class="actions"><p class="hint">Після входу таймер матчу продовжиться.</p><button id="watch" class="secondary">Спостерігати</button><button id="join-game" class="primary">Приєднатися</button></footer>
+    </section>
+    <section id="match" class="game" hidden>
+      <canvas id="arena" aria-label="Спільна арена Occupiers"></canvas>
+      <aside class="minimap-box"><canvas id="minimap" aria-label="Мінікарта: території, гравці та видима область"></canvas></aside>
+      <div class="hud"><div><label id="score-label">Твоя земля</label><strong id="score">—</strong></div><div id="rank-wrap"><label>Місце <strong id="rank">—</strong></label></div><div class="timer"><label>До кінця</label><strong id="time">—</strong></div></div>
+      <aside id="leaders-box" class="leaderboard"><h2>Лідери</h2><div id="leaders"></div></aside>
+      <div id="protection" class="protect" role="status" hidden></div>
+      <div id="game-notice" class="toast" role="status" hidden></div>
+      <div id="observe-panel" class="spectatebar" hidden><div><strong id="observe-title"></strong><p id="observe-text"></p></div><button id="open-join" class="primary">Приєднатися</button></div>
+      <div id="joystick" class="joystick" hidden aria-hidden="true"><div id="stick"></div></div><button id="boost-game" class="primary boost-action" hidden aria-label="Утримуй, щоб скидати масу назад і прискорюватися"><span>Скинути масу</span><small>Утримуй для прискорення</small></button>
+    </section>
+    <section id="results" class="panel" hidden><div class="body results"><h1 id="result-title"></h1><p id="result-subtitle"></p><table><thead><tr><th>№</th><th>Гравець</th><th id="result-metric">Земля</th><th>Статус</th></tr></thead><tbody id="result-rows"></tbody></table><p id="result-note" class="hint">У тих, хто вибув, — земля на момент вибуття. Вони нижче тих, хто вижив: спочатку ті, хто вибув пізніше.</p></div><footer class="actions"><p class="hint">Та сама кімната, новий матч. Кольори збережуться, готовність скинеться.</p><button id="back-lobby" class="primary">Повернутися до лобі</button></footer></section>
+    <p id="notice" class="global-notice" role="status" hidden></p>
+  </div>
+</body>
+</html>

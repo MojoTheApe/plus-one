@@ -1,0 +1,9 @@
+FROM node:24.20.0-bookworm-slim
+WORKDIR /app
+COPY scripts/build-flappy.mjs scripts/serve-flappy.mjs ./scripts/
+COPY src/flappy-records.js ./src/
+COPY web/flappy-bird ./web/flappy-bird
+RUN node scripts/build-flappy.mjs
+USER node
+EXPOSE 8080
+CMD ["node", "scripts/serve-flappy.mjs"]

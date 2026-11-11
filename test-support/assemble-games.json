@@ -1,0 +1,138 @@
+[
+  {
+    "id": "fortnite",
+    "name": "Fortnite",
+    "aliases": [
+      "fort",
+      "fortnite",
+      "fn",
+      "форт",
+      "фортнайт",
+      "фортік",
+      "фортик",
+      "форточка",
+      "форточку"
+    ],
+    "players": [
+      "fixture_player_01",
+      "fixture_player_02",
+      "fixture_player_03",
+      "fixture_player_04",
+      "fixture_player_05",
+      "fixture_player_06",
+      "fixture_player_07",
+      "fixture_player_08",
+      "fixture_player_09",
+      "fixture_player_10",
+      "fixture_player_11",
+      "fixture_player_12"
+    ]
+  },
+  {
+    "id": "rocket-league",
+    "name": "Rocket League",
+    "aliases": [
+      "rocket",
+      "rocket league",
+      "rocket ліжка",
+      "rocket ліжку",
+      "rl",
+      "рокет",
+      "рокет ліга",
+      "рокет ліг",
+      "рл",
+      "ракетка",
+      "ракетку"
+    ],
+    "players": [
+      "fixture_player_13",
+      "fixture_player_01",
+      "fixture_player_14",
+      "fixture_player_15",
+      "fixture_player_07",
+      "fixture_player_11",
+      "fixture_player_06",
+      "fixture_player_16",
+      "fixture_player_12",
+      "fixture_player_08",
+      "fixture_player_17",
+      "fixture_player_09"
+    ]
+  },
+  {
+    "id": "arc-riders",
+    "name": "Arc Riders",
+    "aliases": [
+      "arc",
+      "arc riders",
+      "arc raiders",
+      "air raiders",
+      "арк",
+      "арка",
+      "арку",
+      "арки",
+      "арков",
+      "арк райдерс",
+      "арочка",
+      "арочку",
+      "рейдери",
+      "рейдерів",
+      "рейдеров"
+    ],
+    "players": [
+      "fixture_player_11",
+      "fixture_player_06",
+      "fixture_player_01",
+      "fixture_player_18",
+      "fixture_player_19",
+      "fixture_player_08"
+    ]
+  },
+  {
+    "id": "helldivers-2",
+    "name": "Helldivers 2",
+    "aliases": [
+      "helldivers",
+      "helldivers 2",
+      "helldiver",
+      "hell divers",
+      "hd",
+      "hd2",
+      "хв",
+      "хд",
+      "хд2",
+      "хеллдайвери",
+      "хелдайвери",
+      "хеллдайверс",
+      "хелдайверс",
+      "хеллдайверс",
+      "дайвери",
+      "дайверів",
+      "дайверы",
+      "дайверов",
+      "демократія",
+      "демократію",
+      "демократіям",
+      "демократия",
+      "демократию",
+      "демократиям",
+      "жуки",
+      "жуків",
+      "жуков"
+    ],
+    "media": "helldivers-2.mp4",
+    "players": [
+      "fixture_player_01",
+      "fixture_player_07",
+      "fixture_player_11",
+      "fixture_player_16",
+      "fixture_player_12",
+      "fixture_player_18",
+      "fixture_player_08",
+      "fixture_player_20",
+      "fixture_player_02",
+      "fixture_player_13",
+      "fixture_player_06"
+    ]
+  }
+]
