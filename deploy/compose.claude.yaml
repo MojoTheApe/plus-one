@@ -1,0 +1,7 @@
+# Overlay for the Claude backend. Use together with the portable file:
+#   docker compose -p <project> -f deploy/compose.portable.yaml -f deploy/compose.claude.yaml ...
+# Put ANTHROPIC_API_KEY (and optionally CLAUDE_MODEL, CLAUDE_CLASSIFY_MODEL) in the private bot.env.
+services:
+  bot:
+    environment:
+      ANSWER_BACKEND: claude

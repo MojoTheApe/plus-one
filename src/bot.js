@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { openSetupStore } from "./setup-store.js";
 import { createSetup } from "./setup.js";
 import { CodexBackend } from "./codex-backend.js";
+import { ClaudeBackend } from "./claude-backend.js";
 import { AssembleRouter, actionableAssembleText, assembleForumThread } from "./assemble.js";
 import { loadPersonaCatalog, profileReplyLanguage } from "./persona-policy.js";
 import { matchMessageRule, ruleDecision, claimRuleAction, finishRuleAction } from "./message-rules.js";
@@ -107,12 +108,15 @@ const flappyBirdUrl = (process.env.FLAPPY_BIRD_URL || "").trim();
 const occupiersUrl = (process.env.OCCUPIERS_URL || "").trim();
 const occupiersRegistry = process.env.OCCUPIERS_ROOMS_FILE ? new RoomRegistry(process.env.OCCUPIERS_ROOMS_FILE) : null;
 const answerBackend = process.env.ANSWER_BACKEND || "codex";
-if (!["openclaw", "openai", "codex"].includes(answerBackend)) throw new Error("Invalid AI answer backend");
-const profileCatalog = answerBackend === "codex" || process.env.BOT_PROFILE_FILE
+if (!["openclaw", "openai", "codex", "claude"].includes(answerBackend)) throw new Error("Invalid AI answer backend");
+const independentBackend = ["codex", "claude"].includes(answerBackend);
+const profileCatalog = independentBackend || process.env.BOT_PROFILE_FILE
   ? loadPersonaCatalog(process.env.BOT_PROFILE_FILE || path.join(rootDir, "src/profiles.example.json")) : null;
 const botProfile = profileCatalog?.get(process.env.BOT_PROFILE || profileCatalog.defaultProfile) ?? null;
-if ((botProfile || process.env.BOT_OWNER_ID) && answerBackend !== "codex") throw new Error("Bot profiles and setup require ANSWER_BACKEND=codex");
-const codexBackend = answerBackend === "codex" ? new CodexBackend({ profile: botProfile }) : null;
+if ((botProfile || process.env.BOT_OWNER_ID) && !independentBackend) throw new Error("Bot profiles and setup require ANSWER_BACKEND=codex or claude");
+// Despite the name, this holds whichever independent backend is selected (Codex or Claude): both expose ask/classify/cli.
+const codexBackend = answerBackend === "codex" ? new CodexBackend({ profile: botProfile })
+  : answerBackend === "claude" ? new ClaudeBackend({ profile: botProfile }) : null;
 const openclawCli = process.env.OPENCLAW_CLI || "openclaw";
 const openclawAgentId = process.env.OPENCLAW_AGENT_ID || "telegram-aibot";
 const openclawSessionVersion = process.env.AI_SESSION_VERSION || process.env.OPENCLAW_SESSION_VERSION || "v1";
@@ -1057,7 +1061,7 @@ async function answerJudge(message, request, slice) {
   try {
     const ticket = codexBackend ? await conversationStore.ticket({ ...conversationScope(message), timeZone: chatTimeZone }) : null;
     try {
-      const result = ["openclaw", "codex"].includes(answerBackend)
+      const result = ["openclaw", "codex", "claude"].includes(answerBackend)
         ? await callConversationJudge(message, scopePrompt, { phase: "scope", contextTicket: ticket?.file })
         : await callOpenAIJudge(scopePrompt, { researchEnabled: false });
       if (request.allDisputes && candidateExcerpt.omittedCount > 0 && !result.historyStatus?.succeeded) {
@@ -1150,7 +1154,7 @@ async function answerScopedJudge(message, request, slice, humorInstruction, anch
     `Material public claims identified by scope extraction:\n${formatJudgeClaims(claims)}\n\n` +
     `Selected dispute messages:\n${finalExcerpt.text}`;
 
-  if (["openclaw", "codex"].includes(answerBackend)) {
+  if (["openclaw", "codex", "claude"].includes(answerBackend)) {
     return answerJudgeWithConversationAgent(message, prompt, { researchRequired, phase: `verdict-d${disputeIndex + 1}` });
   }
   return answerJudgeWithOpenAI(prompt, { researchRequired });
@@ -3198,7 +3202,7 @@ function getMessageTextForRouting(message) {
 }
 
 async function answerQuestion(message, question) {
-  if (["openclaw", "codex"].includes(answerBackend)) {
+  if (["openclaw", "codex", "claude"].includes(answerBackend)) {
     return answerWithConversationAgent(message, question);
   }
 
