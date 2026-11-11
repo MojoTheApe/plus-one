@@ -1,0 +1,6 @@
+{
+  "type": "object",
+  "properties": { "intent": { "type": "string", "enum": ["answer", "conversation", "resume", "setup"] } },
+  "required": ["intent"],
+  "additionalProperties": false
+}

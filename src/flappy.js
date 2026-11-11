@@ -1,5 +1,5 @@
 import { actionableAssembleText } from "./assemble.js";
-import { parseBotCommandText } from "./helpers.js";
+import { parseBotCommandText, say } from "./helpers.js";
 
 const escape = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const launch = /^(?:запусти|запустити|запустить|відкрий|відкрити|открой|открыть|open|launch|start|play)\s+(?:(?:мені|мне|me)\s+)?(?:(?:гру|игру|the game)\s+)?(?:flappy[\s-]*bird|фл[еэа]п[піи]+[\s,-]*б[еёіи]рд)[.!?\s]*$/iu;
@@ -22,20 +22,20 @@ export function isFlappyRequest(message, bot, aliasPrefix) {
   return launch.test(request);
 }
 
-export function flappyReply(message, bot, gameUrl, aliasPrefix) {
+export function flappyReply(message, bot, gameUrl, aliasPrefix, locale = "uk") {
   if (!isFlappyRequest(message, bot, aliasPrefix)) return null;
   let url;
   try {
     url = new URL(gameUrl);
     if (url.protocol !== "https:" || url.username || url.password) throw new Error("Invalid game URL");
   } catch {
-    return { text: "Flappy Bird ще не підключено. Спробуй пізніше." };
+    return { text: say(locale, "Flappy Bird is not connected. Ask your installation agent to connect the game; /setup explains the requirements.", "Flappy Bird не подключена. Попроси агента установки подключить игру; условия есть в /setup.", "Flappy Bird ще не підключено. Попроси агента встановлення підключити гру; умови є в /setup.") };
   }
   const privateChat = message.chat.type === "private";
-  const button = privateChat ? { text: "Грати", web_app: { url: url.href } }
-    : { text: "Грати у Flappy Bird", url: `https://t.me/${bot.username}?startapp=flappy` };
+  const button = privateChat ? { text: say(locale, "Play", "Играть", "Грати"), web_app: { url: url.href } }
+    : { text: say(locale, "Play Flappy Bird", "Играть в Flappy Bird", "Грати у Flappy Bird"), url: `https://t.me/${bot.username}?startapp=flappy` };
   return {
-    text: privateChat ? "Flappy Bird — натисни «Грати»." : "Flappy Bird — грайте тут. Рекорд спільний для всіх гравців.",
+    text: privateChat ? say(locale, "Flappy Bird — press Play.", "Flappy Bird — нажми «Играть».", "Flappy Bird — натисни «Грати».") : say(locale, "Flappy Bird — play here. All players share the record.", "Flappy Bird — играйте здесь. Рекорд общий для всех игроков.", "Flappy Bird — грайте тут. Рекорд спільний для всіх гравців."),
     reply_markup: { inline_keyboard: [[button]] },
   };
 }

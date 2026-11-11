@@ -53,6 +53,21 @@ available profiles” at any time. A profile can have its own label and can be
 prepared before the bot joins any group. For example, “configure game calls in
 profile Gaming” edits that saved profile's feature settings.
 
+The first private Start should ask what to call the bot. If it reports that the
+owner is missing or incorrect, verify the numeric `BOT_OWNER_ID` in this instance's
+private environment file and restart that instance. Use the matching Telegram
+account; the bot never assigns ownership to the first person who writes.
+
+AI must be connected for conversational setup. You can discuss another topic
+without losing the draft, then say “continue setup” or use `/setup` to return.
+A plain yes during side conversation cannot save an older preview. If the AI
+turn check fails, the bot keeps the draft and reports the connection problem.
+The catalogue shows descriptions and whether a feature needs setup or connection;
+asking about one opens its detailed requirements and supported configuration steps.
+Supported public-link downloads default on in new profiles after group assignment.
+The bot still needs administrator rights and the downloader enabled. Updates
+preserve previously saved off modes; private/restricted posts may be unavailable.
+
 When the bot joins a group, it privately asks the owner which profile to use.
 Reply to that message to select the group, review the preview and confirm.
 The owner can also ask “use profile Gaming” inside a group. The confirmation is
@@ -74,6 +89,27 @@ message to retry after an uncertain external failure.
 Check Telegram bot privacy and group permissions if the group does not appear.
 The owner can send a message that the bot receives in that group as a fallback
 for discovery. If private notification delivery fails, setup still lists the group.
+
+## Use Claude instead of Codex
+
+The existing Claude connection uses Claude Code CLI with your own API key.
+Set `ANTHROPIC_API_KEY` in the instance's private `bot.env`. Optionally set
+`CLAUDE_MODEL` and `CLAUDE_CLASSIFY_MODEL` to models available to your account.
+It does not use the Codex login. Keep the instance directories and owner setup
+above, and add the Claude overlay to **every** Compose operation for that instance,
+including checking, starting, stopping, backups and updates:
+
+```sh
+docker compose -p nightbot -f deploy/compose.portable.yaml -f deploy/compose.claude.yaml build
+docker compose -p nightbot -f deploy/compose.portable.yaml -f deploy/compose.claude.yaml run --rm bot node scripts/check-portable.mjs
+docker compose -p nightbot -f deploy/compose.portable.yaml -f deploy/compose.claude.yaml up -d
+```
+
+The current Claude adapter supports conversation, profiles and intent classification,
+including interrupted setup. Its image input, web search and scoped history tool
+are not connected yet; the catalogue marks search and image analysis accordingly.
+This is not full capability parity with Codex. Non-AI functions such as game calls
+and public-link downloads keep their existing Telegram/server requirements.
 
 ## Add another bot
 

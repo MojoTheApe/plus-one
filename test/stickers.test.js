@@ -45,7 +45,7 @@ async function fixture(t) {
   };
   let router = new StickerRouter(deps);
   return { root, calls, faults, pack, bindingsFile, stateFile,
-    handle: message => router.handleMessage(message, bot),
+    handle: (message, locale) => router.handleMessage(message, bot, undefined, locale),
     restart: () => { router = new StickerRouter(deps); }, setStatus: value => { status = value; },
     conversions: () => conversions };
 }
@@ -58,6 +58,17 @@ test("explicit and polite requests resolve only current addressed text", () => {
   assert.equal(stickerIntent(msg({ text: "Оріон, додай у стікери" }), bot), null);
   assert.equal(stickerIntent(msg({ text: "видали цей стікер", reply_to_message: { from: { id: 77 } } }), bot)?.action, "delete");
   for (const text of ["@TestBot Загальне оголошення: у нас новий стікерпак", "@TestBot Тегни всіх, поговоримо про стікери", "@TestBot Хочеться катки, стікери потім", "@TestBot весь пак дуже гарний"]) assert.equal(stickerIntent(msg({ text }), bot), null, text);
+});
+
+test("sticker help and permission failures follow the selected profile language", async t => {
+  const f = await fixture(t);
+  await f.handle(msg({ text: "/stickers" }), "ru");
+  assert.match(f.calls.at(-1).payload.text, /Администраторы группы/);
+  assert.match(f.calls.at(-1).payload.text, /\/stickeradd/);
+  f.setStatus("member");
+  await f.handle(msg({ message_id: 22, text: "/stickeradd" }), "en");
+  assert.match(f.calls.at(-1).payload.text, /admin/i);
+  assert.ok(!f.calls.some(call => call.method === "addStickerToSet"));
 });
 
 test("quoted, forwarded, negative, hypothetical and other-bot text cannot mutate packs", () => {

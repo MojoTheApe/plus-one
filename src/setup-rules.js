@@ -132,7 +132,7 @@ export function createRuleEditor({ store, games, targetPrompt, resolveTarget }) 
         if (!target.configured) target.modes = { memory: "off", voice: "off", analysis: "off", download: "off", minigames: "off" };
         target.configured = true;
       }
-      state.session = { kind: "menu", group: draft.group, profileId: draft.profileId };
+      state.session = draft.resume ?? { kind: "menu", group: draft.group, profileId: draft.profileId };
     });
     return say(locale, "Message rules saved.", "Правила сохранены.", "Правила збережено.");
   }

@@ -52,6 +52,15 @@ test('missing, insecure or credential-bearing configuration gives a clear unavai
   }
 });
 
+test('launch text, button and connection notice use the selected profile language', () => {
+  for (const [locale, play, missing] of [['en', 'Play', /not connected/], ['ru', 'Играть', /не подключена/], ['uk', 'Грати', /ще не підключено/]]) {
+    const reply = flappyReply(message('/flappy'), bot, gameUrl, undefined, locale);
+    assert.equal(reply.reply_markup.inline_keyboard[0][0].text, play);
+    assert.ok(reply.text.includes(play));
+    assert.match(flappyReply(message('/flappy'), bot, '', undefined, locale).text, missing);
+  }
+});
+
 test('static service serves only the bundled page, supports HEAD/cache and exposes no files', () => {
   const server = createGameServer('<title>Flappy Bird</title>');
   const request = (url, method = 'GET', headers = {}) => {

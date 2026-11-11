@@ -17,6 +17,13 @@ test('only deliberate Duel commands launch, respecting other bots and forwarded 
   assert.match(duelReply(message('/duel'), bot, 'http://unsafe/').text, /ще не підключено/);
 });
 
+test('Duel connection notices and Play buttons use the profile language', () => {
+  for (const [locale, label, missing] of [['en', 'Play Duel', /not connected/], ['ru', 'Играть в Duel', /не подключена/], ['uk', 'Грати в Duel', /ще не підключено/]]) {
+    assert.equal(duelReply(message('/duel'), bot, 'https://example.com/duel/', locale).reply_markup.inline_keyboard[0][0].text, label);
+    assert.match(duelReply(message('/duel'), bot, '', locale).text, missing);
+  }
+});
+
 test('Main Mini App routes Duel lobby and invitation while preserving raw launch context', async () => {
   const source = await fs.readFile(new URL('../web/flappy-bird/src/game-router.js', import.meta.url), 'utf8');
   for (const start of ['duel', 'duel_AB234', 'flappy', 'duel_BAD', 'duel_../x', 'duel_IIIII']) {

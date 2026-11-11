@@ -5,12 +5,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { CodexBackend } from "../src/codex-backend.js";
+import { ClaudeBackend } from "../src/claude-backend.js";
 
-async function fixture(t, profile = "legacy", owner, configure = async () => {}) {
+async function fixture(t, profile = "legacy", owner, configure = async () => {}, answerBackend = "codex") {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "bot-reliability-"));
   const oldEnv = { ...process.env }, oldFetch = globalThis.fetch;
-  const oldAsk = CodexBackend.prototype.ask, oldClassify = CodexBackend.prototype.classify;
-  Object.assign(process.env, { TELEGRAM_BOT_TOKEN: "000:FAKE", ANSWER_BACKEND: "codex", CODEX_HOME: root + "/codex", AI_AGENT_DIR: root + "/agent",
+  const Backend = answerBackend === "claude" ? ClaudeBackend : CodexBackend;
+  const oldAsk = Backend.prototype.ask, oldClassify = Backend.prototype.classify;
+  Object.assign(process.env, { TELEGRAM_BOT_TOKEN: "000:FAKE", ANSWER_BACKEND: answerBackend, CODEX_HOME: root + "/codex", AI_AGENT_DIR: root + "/agent",
     CONVERSATION_HISTORY_DIR: root + "/runtime/conversations", BOT_INBOX_FILE: root + "/runtime/inbox.json", CHAT_TIME_ZONE: "Europe/Kyiv", MEMORY_DIR: root + "/memory", MEMORY_AUTO_CAPTURE: "false", BOT_LOCK_FILE: root + "/runtime/bot.pid",
     ASSEMBLE_MEMBERS_FILE: root + "/runtime/members.json", ASSEMBLE_STATE_FILE: root + "/runtime/assemble.json", ASSEMBLE_GAMES_FILE: path.resolve("test-support/assemble-games.json"), ASSEMBLE_GAME_ASSET_DIR: root + "/assets/games",
     MEDIA_OPERATIONS_FILE: root + "/runtime/media.json", SOCIAL_VIDEO_ENABLED: "true", VOICE_TRANSCRIPTION_ENABLED: "false", INSULT_REPLY_ENABLED: "false" });
@@ -23,20 +25,21 @@ async function fixture(t, profile = "legacy", owner, configure = async () => {})
   if (owner) Object.assign(process.env, { BOT_OWNER_ID: String(owner), BOT_SETUP_FILE: root + "/runtime/setup.sqlite" });
   const calls = [], prompts = [], classified = [];
   let answerError = null, searchSucceeded = true, answerFn = null, languageDecision = {language:"uk",confident:true};
-  CodexBackend.prototype.classify = async args => { classified.push(args); return JSON.stringify(languageDecision); };
-  CodexBackend.prototype.ask = async args => { prompts.push(args.prompt); if (answerError) throw answerError; if (answerFn) return answerFn(args); return { text: "Знайшов відповідь за назвою.", searchStatus: { executed: searchSucceeded, succeeded: searchSucceeded, failures: 0 } }; };
-  let nextMessage = 1000;
+  let setupTurn = async input => ({ intent: input.kind === "menu" ? "setup" : "answer" });
+  Backend.prototype.classify = async args => { classified.push(args); return JSON.stringify(args.schemaFile.endsWith("setup-turn.schema.json") ? await setupTurn(JSON.parse(args.prompt)) : languageDecision); };
+  Backend.prototype.ask = async args => { prompts.push(args.prompt); if (answerError) throw answerError; if (answerFn) return answerFn(args); return { text: "Знайшов відповідь за назвою.", searchStatus: { executed: searchSucceeded, succeeded: searchSucceeded, failures: 0 } }; };
+  let nextMessage = 1000, memberStatus = "administrator";
   globalThis.fetch = async (input, options = {}) => {
     const url = new URL(String(input)); assert.equal(url.hostname, "api.telegram.org", "Only mocked Telegram calls");
     if(url.pathname.startsWith("/file/"))return new Response(new Uint8Array([1,2,3]));
     const method = url.pathname.split("/").at(-1), payload = JSON.parse(options.body || "{}");
     assert.notEqual(method, "getUpdates"); calls.push({ method, payload });
-    const result = method === "getStickerSet" ? { name: payload.name, sticker_type: "regular" } : method === "getChatMember" ? { status: "administrator" } : method === "getFile" ? {file_path:"photos/fixture.jpg",file_size:3} : { message_id: nextMessage++ };
+    const result = method === "getStickerSet" ? { name: payload.name, sticker_type: "regular" } : method === "getChatMember" ? { status: memberStatus } : method === "getFile" ? {file_path:"photos/fixture.jpg",file_size:3} : { message_id: nextMessage++ };
     assert.ok(["getChatMember", "sendChatAction", "sendMessage", "getFile", "sendAnimation", "getStickerSet"].includes(method), method);
     return new Response(JSON.stringify({ ok: true, result }));
   };
   t.after(async () => {
-    globalThis.fetch = oldFetch; CodexBackend.prototype.ask = oldAsk; CodexBackend.prototype.classify = oldClassify;
+    globalThis.fetch = oldFetch; Backend.prototype.ask = oldAsk; Backend.prototype.classify = oldClassify;
     for (const key of Object.keys(process.env)) if (!(key in oldEnv)) delete process.env[key]; Object.assign(process.env, oldEnv);
     await fs.rm(root, { recursive: true, force: true });
   });
@@ -51,8 +54,8 @@ async function fixture(t, profile = "legacy", owner, configure = async () => {})
   let app = await import(root + "/src/bot.mjs"); await app.init();
   t.after(() => app.closeSetup());
   let id = 10;
-  return { root, calls, prompts, classified, update: update => app.handleUpdate(update), queue: update => app.queued(update), setCallback: fn => app.setCallback(fn), restart: async () => { app.closeSetup(); app = await import(root + "/src/bot.mjs?restart=" + Date.now()); await app.init(); }, setDownloader: app.setDownloader, setMediaNow:app.setMediaNow, setLanguage:value=>{languageDecision=value;},
-    setAnswer: fn => { answerFn = fn; }, setError: error => { answerError = error; }, setSearch: value => { searchSucceeded = value; },
+  return { root, calls, prompts, classified, update: update => app.handleUpdate(update), queue: update => app.queued(update), setCallback: fn => app.setCallback(fn), restart: async () => { app.closeSetup(); app = await import(root + "/src/bot.mjs?restart=" + Date.now()); await app.init(); }, setDownloader: fn => app.setDownloader(fn), setMediaNow: fn => app.setMediaNow(fn), setLanguage:value=>{languageDecision=value;},
+    setAnswer: fn => { answerFn = fn; }, setSetupTurn: fn => { setupTurn = fn; }, setMemberStatus: value => { memberStatus = value; }, setError: error => { answerError = error; }, setSearch: value => { searchSucceeded = value; },
     handle: extra => app.handleUpdate({ update_id: id, message: { message_id: nextMessage++, date: Math.floor(Date.now()/1000), chat: { id: -123, type: "supergroup", is_forum:true }, is_topic_message:true, from: { id: 88, username: "Fixture" }, message_thread_id: 9, ...extra } }) };
 }
 
@@ -418,10 +421,10 @@ test("owner completes Operator setup after a restart and edits two independent g
   await dm("хочу посмотреть что дальше");
   assert.ok(f.calls.filter(call => call.method === "sendMessage" && call.payload.chat_id === 88).every(call => !call.payload.reply_markup));
   assert.match(last(), /История и память/);
-  assert.match(last(), /Голосовые · группа/);
+  assert.match(last(), /Голосовые — нужно подключить\nРасшифровываю голосовые/);
   assert.doesNotMatch(last(), /Fortnite|Helldivers|Rocket League/);
   await dm("расскажи про голосовые");
-  assert.match(last(), /расшифровать голосовое/);
+  assert.match(last(), /Нужна подключённая расшифровка/);
   assert.doesNotMatch(last(), /доступные функции/);
 
   await f.handle({ text: "hello", chat: alpha });
@@ -447,7 +450,7 @@ test("owner completes Operator setup after a restart and edits two independent g
   assert.match(last(), /profile saved/);
   await dm("yes");
   await dm("show group profile Спокойный чат");
-  assert.match(last(), /Profile — Lumen/);
+  assert.match(last(), /Bot personality — Lumen/);
   assert.doesNotMatch(last(), /@alpha_player|@beta_player/);
   await dm("configure game calls in Спокойный чат for Fortnite @beta_player, no animation");
   await dm("save");
@@ -490,9 +493,9 @@ test("owner completes Operator setup after a restart and edits two independent g
   await dm("yes");
   await dm("yes");
   await dm("show group profile Спокойный чат");
-  assert.match(last(), /Profile — Lumen/);
+  assert.match(last(), /Bot personality — Lumen/);
   await dm("show group profile Profile");
-  assert.match(last(), /Profile — Искра/);
+  assert.match(last(), /Bot personality — Искра/);
   await dm("create new profile in Gaming");
   assert.match(last(), /Which group/);
   assert.match(last(), /Gaming \(-504\)/);
@@ -504,8 +507,260 @@ test("owner completes Operator setup after a restart and edits two independent g
   await dm("yes");
   await dm("/start");
   assert.match(last(), /talk to me or open \/setup/);
+  f.setSetupTurn(async () => ({ intent: "conversation" }));
   await dm("hello");
   assert.equal(last(), "test");
+});
+
+test("plain Start diagnoses ownership without AI and preserves game deep links", async t => {
+  const f = await fixture(t, "neutral");
+  await f.handle({ text: "/start", chat: { id: 88, type: "private" } });
+  assert.match(f.calls.at(-1).payload.text, /BOT_OWNER_ID/);
+  assert.equal(f.prompts.length, 0);
+  assert.equal(f.classified.length, 0);
+  await f.handle({ text: "/start flappy", chat: { id: 88, type: "private" } });
+  assert.match(f.calls.at(-1).payload.text, /Flappy Bird/);
+  assert.doesNotMatch(f.calls.at(-1).payload.text, /BOT_OWNER_ID/);
+});
+
+test("owner can chat through first setup, resume after restart and explicitly save", async t => {
+  const f = await fixture(t, "neutral", 88);
+  const dm = (text, extra = {}) => f.handle({ text, chat: { id: 88, type: "private" }, ...extra });
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const state = async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(f.root + "/runtime/setup.sqlite", { readOnly: true });
+    try { return JSON.parse(db.prepare("SELECT document FROM setup WHERE id=1").get().document); }
+    finally { db.close(); }
+  };
+  const chat = "Кстати, почему небо синее?";
+  const story = "Расскажи историю про игроков";
+  f.setSetupTurn(async input => ({ intent: [chat, story].includes(input.message) ? "conversation" : input.kind === "menu" ? "setup" : "answer" }));
+  f.setAnswer(async () => ({ text: JSON.stringify({ action: "reply", text: "Из-за рассеяния света." }), searchStatus: { succeeded: false } }));
+
+  await dm("/start", { chat: { id: 99, type: "private" }, from: { id: 99 } });
+  assert.match(last(), /Only the owner/);
+  assert.equal(f.classified.length, 0);
+  await dm("/start");
+  assert.match(last(), /^> connection open/);
+  assert.equal(f.prompts.length, 0);
+  await dm(chat);
+  assert.equal(last(), "Из-за рассеяния света.");
+  assert.match(f.prompts.at(-1), /paused a configuration draft/);
+  assert.equal((await state()).session.name, undefined);
+  await dm("продолжим настройку");
+  assert.match(last(), /What do you want to call me/);
+  await dm("Spark");
+  await dm("Warm, concise and curious.");
+  await dm("Russian");
+  assert.match(last(), /Я Spark/);
+  await dm(chat);
+  await f.restart();
+  await dm("Да");
+  assert.equal(Object.keys((await state()).profiles).length, 0, "side-chat yes cannot commit the pending preview");
+  assert.equal((await state()).session.paused, true);
+  await dm("Сохраняй");
+  assert.equal(Object.keys((await state()).profiles).length, 0, "a save after side chat returns to the preview first");
+  assert.match(last(), /Мой характер и поведение/);
+  await dm("вернёмся к настройке");
+  assert.match(last(), /Мой характер и поведение\nWarm, concise and curious/);
+  await dm("Сохраняй");
+  assert.match(last(), /профиль сохранён/);
+  const saved = await state();
+  assert.equal(saved.profiles[saved.defaultProfile].name, "Spark");
+  assert.equal(saved.profiles[saved.defaultProfile].settings.modes.download, "on");
+  await dm("Да");
+  assert.match(last(), /Сборы игроков — нужно настроить\nЗову нужных игроков/);
+  await dm("Как добавить нужных игроков?");
+  assert.match(last(), /Telegram-имена|Telegram/);
+  assert.match(last(), /настрой сборы в профиле/);
+  await dm("Как твои дела?");
+  assert.equal(last(), "Из-за рассеяния света.");
+  assert.equal((await state()).session.kind, "menu");
+  await dm(story);
+  assert.equal(last(), "Из-за рассеяния света.");
+  await dm("/flappy"); assert.match(last(), /не подключена/);
+  await dm("/duel"); assert.match(last(), /не подключена/);
+  await dm("/stickers"); assert.match(last(), /Управление стикерами/);
+  await dm("/start");
+  assert.match(last(), /Я на связи/);
+  assert.equal(Object.keys((await state()).profiles).length, 1, "Start must not reset confirmed setup");
+});
+
+test("game, rule and assignment drafts survive side conversations and nested setup", async t => {
+  const f = await fixture(t, "neutral", 88);
+  const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const state = async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(f.root + "/runtime/setup.sqlite", { readOnly: true });
+    try { return JSON.parse(db.prepare("SELECT document FROM setup WHERE id=1").get().document); }
+    finally { db.close(); }
+  };
+  const chat = "Кстати, я читал историю про игроков. Обсудим?";
+  f.setSetupTurn(async input => ({ intent: input.message === chat ? "conversation" : input.message === "Давай продолжим" ? "resume" : input.kind === "menu" ? "setup" : "answer" }));
+  f.setAnswer(async () => ({ text: JSON.stringify({ action: "reply", text: "Давай обсудим." }), searchStatus: { succeeded: false } }));
+  await dm("/start"); await dm("call me Cedar, calm and friendly in Russian"); await dm("сохраняй");
+  const alpha = { id: -961, type: "supergroup", title: "Alpha" };
+  const beta = { id: -962, type: "supergroup", title: "Beta" };
+  await f.handle({ text: "hello", chat: alpha }); await f.handle({ text: "hello", chat: beta });
+  await dm("/start"); // A request works outside the catalogue too.
+  await dm('Давай создадим сбор для "Alpha"');
+  assert.match(last(), /Какая игра/);
+  await dm("Fortnite"); assert.match(last(), /Кто играет/);
+  await dm(chat); assert.equal(last(), "Давай обсудим.");
+  assert.equal((await state()).session.game, "fortnite");
+  await dm("создай новый профиль");
+  await dm("Echo"); await dm("Спокойный и дружелюбный."); await dm("Русский"); await dm("Сохраняй");
+  assert.match(last(), /Предыдущий черновик сохранён/);
+  await dm("Да");
+  assert.equal((await state()).groups[alpha.id].assemble, undefined);
+  await f.restart(); await dm("Давай продолжим"); assert.match(last(), /Кто играет/);
+  await dm("@alpha_player"); await dm("без анимации");
+  await dm("не сохраняй");
+  assert.equal((await state()).groups[alpha.id].assemble, undefined);
+  await dm("сохраняй");
+  assert.deepEqual((await state()).groups[alpha.id].assemble.games[0].players, ["alpha_player"]);
+  assert.equal((await state()).groups[beta.id].assemble, undefined);
+
+  await dm("создай правило в Alpha"); await dm("вечерний сбор");
+  const ruleDraft = (await state()).session;
+  await dm(chat); assert.equal(last(), "Давай обсудим.");
+  await f.restart(); await dm("/setup");
+  assert.equal((await state()).session.phrase, ruleDraft.phrase);
+  assert.equal((await state()).session.kind, "rule");
+  assert.match(last(), /Что делать: разобрать спор, собрать игроков/);
+  await dm("отмена");
+  await dm("используй профиль Echo в Beta");
+  assert.match(last(), /применю профиль «Echo»/);
+  const before = (await state()).groups[beta.id].profile;
+  await dm(chat); await f.restart(); await dm("да");
+  assert.equal((await state()).groups[beta.id].profile, before);
+  await dm("продолжим настройку"); await dm("Сохраняй");
+  const assigned = await state();
+  assert.equal(assigned.profiles[assigned.groups[beta.id].profile].name, "Echo");
+  assert.deepEqual(assigned.groups[alpha.id].assemble.games[0].players, ["alpha_player"]);
+});
+
+test("failed AI turn classification preserves draft and saved settings", async t => {
+  const f = await fixture(t, "neutral", 88);
+  const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
+  await dm("/start"); await dm("Spark");
+  f.setSetupTurn(async () => { throw new Error("connection unavailable"); });
+  await dm("Let's talk about something else.");
+  assert.match(f.calls.at(-1).payload.text, /AI check failed.*draft is safe/);
+  await f.restart(); await dm("/setup");
+  assert.match(f.calls.at(-1).payload.text, /I’m Spark.*what I’m like/);
+  f.setSetupTurn(async () => ({ intent: "unexpected" }));
+  await dm("another topic");
+  assert.match(f.calls.at(-1).payload.text, /AI check failed/);
+  assert.equal(f.prompts.length, 0);
+});
+
+test("negative resume and informational detours never make a later yes save an old preview", async t => {
+  const f = await fixture(t, "neutral", 88);
+  const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const state = async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(f.root + "/runtime/setup.sqlite", { readOnly: true });
+    try { return JSON.parse(db.prepare("SELECT document FROM setup WHERE id=1").get().document); }
+    finally { db.close(); }
+  };
+  const conversation = new Set([
+    "Не продолжай настройку, расскажи про космос",
+    "If I want to continue setup later, how does that work?",
+  ]);
+  f.setSetupTurn(async input => ({ intent: conversation.has(input.message) ? "conversation" : input.kind === "menu" ? "setup" : "answer" }));
+  f.setAnswer(async () => ({ text: JSON.stringify({ action: "reply", text: "We can talk." }), searchStatus: { succeeded: false } }));
+  await dm("/start"); await dm("Draft"); await dm("Calm and concise."); await dm("English");
+  for (const text of [...conversation, "How can I create a new profile?", "How can I use profile Draft?"]) {
+    const before = f.classified.length;
+    await dm(text);
+    assert.ok(f.classified.length > before, "ambiguous discussion goes through semantic discrimination");
+    assert.equal((await state()).session.paused, true, text);
+    assert.equal((await state()).session.name, "Draft");
+    await dm("yes");
+    assert.equal(Object.keys((await state()).profiles).length, 0, text + " must not leave an active confirmation");
+    await dm("continue setup"); assert.match(last(), /My character and behavior/);
+  }
+  await dm("save"); assert.match(last(), /profile saved/);
+  assert.equal(Object.keys((await state()).profiles).length, 1);
+});
+
+test("ordinary feature questions stay conversational and saved-profile inspection keeps its scope", async t => {
+  const f = await fixture(t, "neutral", 88);
+  const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const ordinary = new Set([
+    "Tell me about JavaScript features",
+    "Расскажи про возможности Photoshop",
+    "What's enabled by default in nginx?",
+  ]);
+  f.setSetupTurn(async input => ({ intent: ordinary.has(input.message) ? "conversation" : input.kind === "menu" ? "setup" : "answer" }));
+  f.setAnswer(async () => ({ text: JSON.stringify({ action: "reply", text: "Ordinary answer." }), searchStatus: { succeeded: false } }));
+  await dm("/start"); await dm("call me Gaming, calm and clear in English"); await dm("save"); await dm("yes");
+  for (const text of ordinary) {
+    const before = f.prompts.length;
+    await dm(text);
+    assert.equal(f.prompts.length, before + 1, text);
+    assert.equal(last(), "Ordinary answer.");
+  }
+  await dm("What's enabled in profile Gaming?");
+  assert.match(last(), /Gaming/); assert.match(last(), /Media downloads — on/);
+  await dm("/start"); // Also works outside the open configuration menu.
+  await dm("What's enabled in profile Gaming?");
+  assert.match(last(), /Media downloads — on/);
+  const before = f.classified.length;
+  await dm("/setup"); assert.match(last(), /available features/);
+  assert.equal(f.classified.length, before, "explicit bot command remains deterministic");
+});
+
+test("download defaults apply only after assignment, require admin and preserve saved off", async t => {
+  const f = await fixture(t, "neutral", 88);
+  const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
+  const alpha = { id: -971, type: "supergroup", title: "Alpha" };
+  const beta = { id: -972, type: "supergroup", title: "Beta" };
+  const attempts = [];
+  const download = async url => { attempts.push(url); throw new Error("fixture download unavailable"); };
+  f.setDownloader(download);
+  await dm("/start"); await dm("call me Cedar, calm and friendly in English"); await dm("save");
+  await f.handle({ text: "hello", chat: alpha }); await f.handle({ text: "hello", chat: beta });
+  const link = "https://www.instagram.com/reel/fixture_default/";
+  await f.handle({ text: link, chat: alpha }); assert.equal(attempts.length, 0);
+  await dm("create rule in Alpha"); await dm("settle it"); await dm("judge"); await dm("everyone"); await dm("skip"); await dm("save");
+  await f.handle({ text: link, chat: alpha }); assert.equal(attempts.length, 0, "first rule alone must not enable downloads");
+  await dm("use profile Cedar in Alpha"); await dm("save");
+  f.setMemberStatus("member"); await f.restart(); f.setDownloader(download);
+  await f.handle({ text: link, chat: alpha }); assert.equal(attempts.length, 0, "administrator permission is still required");
+  f.setMemberStatus("administrator"); await f.restart(); f.setDownloader(download);
+  await f.handle({ text: link, chat: alpha }); assert.equal(attempts.length, 1);
+  await dm("turn off downloads in Alpha"); await dm("save");
+  await f.restart(); f.setDownloader(download);
+  await f.handle({ text: link, chat: alpha }); await f.handle({ text: link, chat: beta });
+  assert.equal(attempts.length, 1, "saved off and unassigned second group stay off across restart");
+  await dm("/setup"); await dm("show group profile Alpha");
+  assert.match(f.calls.filter(call => call.method === "sendMessage").at(-1).payload.text, /Media downloads — off/);
+});
+
+test("the existing Claude backend uses conversational setup and reports unsupported connections", async t => {
+  const f = await fixture(t, "neutral", 88, async () => {}, "claude");
+  const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  f.setSetupTurn(async input => ({ intent: input.message === "Как твои дела?" ? "conversation" : input.kind === "menu" ? "setup" : "answer" }));
+  f.setAnswer(async () => ({ text: JSON.stringify({ action: "reply", text: "Я на связи." }), searchStatus: { succeeded: false } }));
+  await dm("/start"); assert.match(last(), /^> connection open/);
+  await dm("Cedar"); await dm("Спокойный и любопытный.");
+  await dm("Как твои дела?"); assert.equal(last(), "Я на связи.");
+  await f.restart(); await dm("продолжим настройку"); assert.match(last(), /What language/);
+  await dm("Русский"); await dm("Сохраняй"); await dm("Да");
+  assert.match(last(), /Поиск в интернете — нужно подключить/);
+  assert.match(last(), /Анализ фото и видео — нужно подключить/);
+  assert.match(last(), /Сборы игроков — нужно настроить/);
+  await dm("настрой сборы в профиле Cedar"); assert.match(last(), /Какая игра/);
+  await dm("Fortnite"); await dm("@alpha_player"); await dm("без анимации"); await dm("Сохраняй");
+  assert.match(last(), /Сохранено для «Cedar»/);
+  assert.ok(f.classified.some(call => call.schemaFile.endsWith("setup-turn.schema.json")));
 });
 
 test("confirmed reactions, stickers and feature modes apply only to the selected group", async t => {

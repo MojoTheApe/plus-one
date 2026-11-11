@@ -23,15 +23,16 @@ export function selectProfile(profiles, text) {
 
 export function isSetupRequest(message) {
   const text = message.text ?? message.caption ?? "";
-  return /^\/setup(?:@\w+)?(?:\s|$)/iu.test(text) || creationIntent.test(text) ||
+  return /^\/setup(?:@\w+)?(?:\s|$)/iu.test(text) ||
+    (message.chat?.type === "private" && /^\/start(?:@\w+)?\s*$/iu.test(text)) || creationIntent.test(text) ||
     ruleRequest.test(text) || /(?:configure|настро|налашту).*(?:reaction|реакц)/iu.test(text) ||
     profileListIntent.test(text) || assignmentIntent.test(text) ||
     /(?:what|which|какой|какие|який|які).*(?:profile|профил|профіл|настройк|налаштуван)/iu.test(text) ||
-    /(?:show|tell me|edit|configure|покажи|расскажи|измени|настро|налашту|зміни).*(?:profile|профил|профіл|internal settings|внутренн.*настрой|налаштуван.*бот)/iu.test(text);
+    /(?:show|tell me|edit|configure|покажи|расскажи|измени|настро|налашту|зміни).*(?:profile|personality|личност|особист|профил|профіл|internal settings|внутренн.*настрой|налаштуван.*бот)/iu.test(text);
 }
 
 export function initialProfileSettings() {
-  return { modes: { memory: "manual", voice: "manual", analysis: "on", download: "off", minigames: "off" } };
+  return { modes: { memory: "manual", voice: "manual", analysis: "on", download: "on", minigames: "off" } };
 }
 
 // Assign a snapshot so edits made in one chat never mutate another chat or the
