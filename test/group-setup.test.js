@@ -24,6 +24,7 @@ async function fixture(t) {
   };
   const make = () => createSetup({ store, games: [{ id: 'fortnite', name: 'Fortnite', aliases: ['fort'] }], telegram,
     featureMode: (id, feature) => feature === 'minigames' ? 'unavailable' : store.group(id)?.modes?.[feature] ?? 'on' });
+  store.bind(bot.id);
   let setup = make();
   t.after(async () => { store.close(); await fs.rm(dir, { recursive: true, force: true }); });
   const dm = text => setup.handle({ message_id: 9, chat: { id: 101, type: 'private' }, from: { id: 101 }, text }, bot);
@@ -116,13 +117,11 @@ test('separate joining notifications select their original groups without overwr
   assert.equal(notices.length, 2);
   assert.equal(f.store.state.session.name, 'Unfinished');
   await f.click('Base', 101, notices[0].payload);
-  await f.click('Apply');
   assert.equal(f.store.group('-500').profile, 'base');
   assert.equal(f.store.group('-600').configured, false);
   assert.equal(f.store.state.session.resume.name, 'Unfinished');
-  assert.match(f.calls.at(-1).payload.text, /configure this group's features/);
+  assert.match(f.calls.at(-1).payload.text, /Settings for/);
   await f.click('Other', 101, notices[1].payload);
-  await f.click('Apply');
   assert.equal(f.store.group('-600').profile, 'other');
 });
 
@@ -192,8 +191,8 @@ test('group home distinguishes missing configuration and mode Off uses an honest
   const f = await fixture(t); f.seed();
   f.store.change(state => assignGroupProfile(state, '-300', 'base', 'first'));
   await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha');
-  assert.match(f.calls.at(-1).payload.text, /Game calls — set up first/);
-  assert.match(f.calls.at(-1).payload.text, /Moderation — set up first/);
+  assert.match(f.calls.at(-1).payload.text, /Game calls — <b>inactive · set up first/);
+  assert.match(f.calls.at(-1).payload.text, /Moderation — <b>inactive · set up first/);
   await f.click('Conversation and memory'); await f.click('Memory'); await f.click('Change mode'); await f.click('Off');
   const labels = f.calls.at(-1).payload.reply_markup.inline_keyboard.flat().map(button => button.text);
   assert.ok(labels.includes('Save'));
@@ -268,6 +267,6 @@ test('default-linked groups are included in shared-profile preview and show the 
   assert.match(f.calls.at(-1).payload.text, /Updates personality in: Alpha, Beta/);
   await f.dm('change name'); await f.dm('Updated'); await f.dm('save'); await f.dm('/setup');
   await f.click('My groups'); await f.click('Beta');
-  assert.match(f.calls.at(-1).payload.text, /Bot personality — Updated/);
+  assert.match(f.calls.at(-1).payload.text, /Profile: <b>Updated/);
   assert.equal(f.store.profile('-400').displayName, 'Updated');
 });

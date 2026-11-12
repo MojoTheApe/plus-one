@@ -10,9 +10,10 @@ without its actual result.
 The installation agent first asks where and how to run the bot (local Docker,
 VPS Docker, or a documented native setup). It installs dependencies, then asks
 for Codex CLI or the existing Anthropic API-key/Claude CLI connection. Verify AI
-before requesting Telegram credentials. Next guide BotFather: create the bot,
-allow groups, disable Group Privacy, store its token and the human owner's numeric
-Telegram ID privately. A username alone never grants ownership. Verify connections
+before requesting Telegram credentials. Next provide ONE complete Telegram
+checklist: create through BotFather, allow groups, disable Group Privacy, obtain
+the human owner's numeric account ID and supply it with the token once. Store both
+privately; correct only the failed item on verification. A username alone never grants ownership. Verify connections
 before starting one poller per token. End with the bot's private Start link.
 
 ## Personalities and groups
@@ -25,11 +26,23 @@ personalities after an explicit preview of affected groups. A deliberate
 owner-only character rule may override the assigned personality. Do not claim
 multiple simultaneously active personalities per group.
 
-The owner creates the first profile via private /start, then may read an optional
-introduction. Questions/help are available before adding a group. Feature editing
+The owner's first private /start asks their preferred name and the bot's name in
+English operator style, then language, then character in that language. These
+three questions have no Back/Cancel. Preview has Save profile/Edit; Edit opens
+name/character/language, retains other fields and returns to full preview. Only
+Save commits. New profile title matches the bot's name; legacy labels remain.
+The owner preferred name is separate private context, never part of profiles or
+group prompts and never authorization. Automatic conversation language follows
+the speaker; setup UI follows the owner's supported Telegram account language.
+After save show the concise approved introduction with Add to group/View features;
+the catalogue is separate. Questions/help are available before adding a group. Feature editing
 requires a selected joined group, assigned profile and bot administrator rights.
 After joining, privately notify the owner with the actual group name and profile
-choices. After assignment offer feature configuration or Later. Failure to deliver
+choices. If admin rights are missing, show the named-group Check rights action.
+After assignment show all group functions under five sections: state, optional
+mode and separate missing setup/connection/error. Already configured off remains
+off without a false setup requirement. Status is read-only available. Section
+buttons/Later lead onward. Failure to deliver
 a notification does not erase the discovered group. /setup reopens settings.
 Only the configured installation owner may view or edit private configuration;
 being a Telegram group administrator does not grant installation ownership.

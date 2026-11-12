@@ -70,10 +70,24 @@ check verifies model loading and executables, not a physical Telegram interactio
 It neither polls nor sends Telegram messages. Correct the reported problem before
 continuing. No Telegram token or owner is needed for AI/media-only checks.
 
-## 3. Create the Telegram bot and configure group reception
+## 3. One Telegram checklist, one confirmation
 
-Only after AI works, open the official BotFather and create your own bot with
-`/newbot`. Keep its token private. Configure these settings immediately:
+Only after AI/media work, the agent sends this complete checklist in one message.
+Complete it before replying; there is no separate agent question after each item.
+
+1. Open [BotFather](https://t.me/BotFather), press Start, send `/newbot`, choose a
+   display name and a unique username ending in `bot`. Copy the complete token.
+2. Send `/setjoingroups`, select the new bot and choose **Enable**.
+3. Send `/setprivacy`, select that same bot and choose **Disable**.
+4. From the owner's Telegram account, open [@userinfobot](https://t.me/userinfobot),
+   press Start and copy the numeric **user ID**. It is not the account's @username
+   or the new bot's ID. A trusted client showing your own numeric ID also works.
+5. Supply token and owner ID together through the installation's indicated
+   private input, then say **Ready** (or press **OK** once if fields are available).
+
+The agent states the exact private input location. Store values in `bot.env`
+outside Git; never echo the token into logs or a public issue. Correct a reported
+failed item without repeating the whole completed checklist. The group settings are:
 
 - `/setjoingroups`: Enable, so the bot can be added to groups.
 - `/setprivacy`: Disable, so it can receive ordinary participants' group messages.
@@ -85,11 +99,11 @@ about re-adding it. Later make it an administrator in each target group. Give
 restriction permission only when configuring moderation; other optional actions
 must have their actual required rights.
 
-## 4. Identify the owner, verify, then start
+## 4. Verify the supplied Telegram settings, then start
 
-The agent asks **who owns this installation**. Get that human account's numeric
-Telegram user ID through a trusted client or verified update. A username is not
-an ownership credential. Set `TELEGRAM_BOT_TOKEN` and `BOT_OWNER_ID` in private
+Use the human owner's numeric ID supplied with the token. A username is not
+an ownership credential; numeric formatting alone does not prove which human
+owns an account. Set `TELEGRAM_BOT_TOKEN` and `BOT_OWNER_ID` in private
 `bot.env`. Keep `BOT_PROFILE=neutral` for a new installation.
 Portable Compose refuses to start without a numeric owner ID. Keep
 `BOT_REQUIRE_OWNER=true` from the portable example for native installations too.
@@ -105,21 +119,32 @@ Use the Claude overlay on these commands when selected. The full check verifies
 AI, local media readiness, Telegram identity/group settings and owner/runtime
 configuration without polling. Never start two processes with one token.
 
-The installer finishes by giving the bot link. Open it **as the configured owner**
-and press **Start**. A missing/incorrect owner notice is an installation problem:
+After actual startup passes, the installer sends one final success message with
+the personal bot link and instructions to press Start and create a first profile.
+Open it **as the configured owner** and press **Start**. A missing/incorrect owner notice is an installation problem:
 correct the numeric ID and restart that instance, rather than assigning ownership
 to the first person who writes.
 
 ## 5. Continue in Telegram
 
-Create the first personality: name, character, language, preview, save. Accept or
-skip the short introduction. Profiles are reusable personalities; features belong
+The first English wake-up asks what to call you and the bot. Choose the language
+next, then describe the character in that language. There are no Back/Cancel
+controls on those three questions. Preview and Save profile, or use Edit → My
+name/Character/Language. A field reply returns to the full preview; Back retains
+its previous value. The bot's name is its profile title. Your preferred name is
+private owner context, separate from profiles and numeric ownership. Automatic
+reply language uses your Telegram language for setup and each speaker's language
+for conversation. The concise introduction offers Add to group or View features;
+the full catalogue is a separate message. Profiles are reusable personalities; features belong
 to specific groups. You can ask about features before joining any groups, but
 cannot configure them in a saved profile.
 
 Add the bot to a group and make it an administrator. It privately asks the owner
-which profile to use. Select it, confirm the named group and choose Configure or
-Later. Several joining notifications retain their own group. Failed notification
+which profile to use. Missing admin rights have a group-bound Check rights action.
+Choose the profile to see all functions of that named group under five sections,
+with active/inactive state, missing configuration/connection and recent failure
+indicators. Configured but disabled does not mean it needs configuring again.
+Select a section or Later. Several joining notifications retain their own group. Failed notification
 delivery does not erase a discovery; use My groups in `/setup`.
 
 New groups enable conversation/search/judging, seven-day received history,

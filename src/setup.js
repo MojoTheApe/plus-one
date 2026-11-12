@@ -1,3 +1,4 @@
+import { renderTelegramHtml, escapeTelegramMarkdown as literal } from "./telegram-format.js";
 import { randomUUID, createHash } from "node:crypto";
 import { createRuleEditor, ruleListRequest } from "./setup-rules.js";
 import { ruleRequest } from "./message-rules.js";
@@ -29,7 +30,7 @@ const noAnimation = /^(?:no|skip|none|нет|пропусти|ні)[.!]?$|(?:no 
 function readTurnIntent(raw) {
   const { intent } = JSON.parse(raw);
   if (!["answer", "conversation", "resume", "setup"].includes(intent)) throw new Error("Invalid setup intent");
-  return intent;
+  return { ...JSON.parse(raw), intent };
 }
 
 function localeOf(text, fallback) {
@@ -57,11 +58,13 @@ function languageText(locale, language) {
 }
 
 function personaQuestion(draft, targetTitle) {
-  const { locale, name, personality, language } = draft;
-  if (!name) return draft.makeDefault && locale === "en" ?
+  if (draft.flowVersion === 2 || draft.editMenu || draft.editorField) return personaQuestionV2(draft, targetTitle);
+  const { locale, language } = draft;
+  const name = literal(draft.name), personality = literal(draft.personality);
+  if (!draft.name) return draft.makeDefault && locale === "en" ?
     "> connection open\nYou there? Looks like I made it through. What do you want to call me?" :
     say(locale, "What name should I use?", "Какое имя мне использовать?", "Яке ім’я мені використовувати?");
-  if (!personality) return say(locale,
+  if (!draft.personality) return say(locale,
     `Okay. I’m ${name}. Now tell me what I’m like. Describe me like you’d describe someone you know. How do I talk? What do I find funny? How do I act when things get serious? A couple of lines in your own words is enough.`,
     `Хорошо, я ${name}. Теперь опиши меня, как описал бы знакомого. Как я разговариваю, над чем смеюсь и как веду себя, когда разговор серьёзный? Пары строк своими словами достаточно.`,
     `Добре, я ${name}. Тепер опиши мене, як описав би знайомого. Як я розмовляю, над чим сміюся і як поводжуся, коли розмова серйозна? Достатньо кількох рядків своїми словами.`);
@@ -70,15 +73,15 @@ function personaQuestion(draft, targetTitle) {
     "На каком языке мне отвечать? Можно выбрать один язык или отвечать на языке собеседника.",
     "Якою мовою мені відповідати? Можна вибрати одну мову або відповідати мовою співрозмовника.");
   const label = draft.label && draft.label !== name ? say(locale,
-    `Profile “${draft.label}”\n`, `Профиль «${draft.label}»\n`, `Профіль «${draft.label}»\n`) : "";
-  const target = targetTitle ? say(locale, `For ${targetTitle}\n`, `Группа «${targetTitle}»\n`, `Група «${targetTitle}»\n`) : "";
+    `Profile “${literal(draft.label)}”\n`, `Профиль «${literal(draft.label)}»\n`, `Профіль «${literal(draft.label)}»\n`) : "";
+  const target = targetTitle ? say(locale, `For ${literal(targetTitle)}\n`, `Группа «${literal(targetTitle)}»\n`, `Група «${literal(targetTitle)}»\n`) : "";
   return label + target + say(locale,
     `I’m ${name}. My character and behavior\n${personality}\n\nReply language — ${languageText(locale, language)}. Save that, or tell me what to change?`,
     `Я ${name}. Мой характер и поведение\n${personality}\n\nЯзык ответов — ${languageText(locale, language)}. Сохранить или хочешь что-то изменить?`,
     `Я ${name}. Мій характер і поведінка\n${personality}\n\nМова відповідей — ${languageText(locale, language)}. Зберегти чи хочеш щось змінити?`);
 }
 
-function editPersona(draft, text) {
+function editPersonaLegacy(draft, text) {
   const value = text.trim();
   if (!value || value.startsWith("/")) return;
   if (draft.name && draft.personality && draft.language) {
@@ -112,6 +115,114 @@ function editPersona(draft, text) {
       draft.language = language;
       draft.locale = language === "match-request" ? localeOf(value, draft.locale) : language;
     }
+  }
+}
+
+function validName(value) {
+  return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 80 && !/[\n\r\u0000-\u001f]/u.test(value);
+}
+
+function initialNames(text, draft, extracted = {}) {
+  const capture = pattern => pattern.exec(text)?.[1]?.trim();
+  const supplied = key => {
+    if (!validName(extracted[key])) return;
+    const match = new RegExp(`(?<![\\p{L}\\p{M}\\p{N}_])${escapeRegex(extracted[key].trim())}(?![\\p{L}\\p{M}\\p{N}_])`, "iu").exec(text);
+    return match?.[0];
+  };
+  const owner = supplied("ownerName") ?? capture(/(?:my name is|меня зовут|мене звати)\s+([^,;.!?\n]+)/iu);
+  const bot = supplied("botName") ?? capture(/(?:your name is|call yourself|тебя зовут|тебе звати|назовись|називайся|назвися)\s+([^,;.!?\n]+)/iu) ??
+    capture(/(?:^|[,;.!?]\s*|\s)(?:and\s+)?you(?:'re| are)\s+([^,;.!?\n]+)/iu) ??
+    capture(/(?:^|[,;.!?]\s*|\s)(?:а\s+)?(?:ты|ти)\s+[—–-]?\s*([\p{L}][\p{L}\p{M} '-]{0,79})(?=[,;.!?\n]|$)/iu);
+  const pairedOwner = bot ? capture(/(?:^|[.!?]\s*)(?:I(?:'m| am)|я)\s*[—–-]?\s*([^,;.!?\n]+)/iu) : undefined;
+  const onlyValue = text.trim().replace(/^[«"“]|[»"”]$/g, "");
+  const simple = /^[\p{L}\p{M}][\p{L}\p{M} .'-]{0,79}$/u.test(onlyValue) && !/^(?:yes|no|save|hello|hi|да|нет|привет|так|ні|save it)$/iu.test(onlyValue);
+  if (!draft.ownerName && validName(owner ?? pairedOwner)) draft.ownerName = (owner ?? pairedOwner).trim();
+  if (!draft.name && validName(bot)) draft.name = bot.trim();
+  if (simple && draft.namesClarification === "owner" && !draft.ownerName) draft.ownerName = onlyValue;
+  if (simple && draft.namesClarification === "bot" && !draft.name) draft.name = onlyValue;
+  if (!draft.ownerName || !draft.name) draft.namesClarification = draft.ownerName ? "bot" : draft.name ? "owner" : "both";
+  else delete draft.namesClarification;
+}
+
+function personaComplete(draft) {
+  return draft.name && draft.language && draft.personality && (!draft.onboarding || draft.ownerName);
+}
+
+function personaQuestionV2(draft, targetTitle) {
+  const locale = draft.locale;
+  if (draft.editMenu) return say(locale, "What would you like to change?", "Что хочешь изменить?", "Що хочеш змінити?");
+  if (draft.editorField === "name") return say(locale, "What should I be called?", "Как меня назвать?", "Як мене назвати?");
+  if (draft.editorField === "personality") return say(locale, "What should my character be? Describe how I should talk and behave.",
+    "Каким будет мой характер? Опиши, как мне общаться и вести себя.", "Яким буде мій характер? Опиши, як мені спілкуватися й поводитися.");
+  if (draft.onboarding && (!draft.ownerName || !draft.name)) {
+    if (draft.namesClarification === "owner") return "What should I call you?";
+    if (draft.namesClarification === "bot") return "What do you want to call me?";
+    if (draft.namesClarification) return "Tell me both names — for example, ‘I’m Alex, your name is River’.";
+    return "> connection open\nYou there? Looks like I made it through.\n\nWho’s on the other end? What should I call you, and what do you want to call me?";
+  }
+  if (!draft.name) return say(locale, "What name should I use?", "Какое имя мне использовать?", "Яке ім’я мені використовувати?");
+  if (!draft.language || draft.editorField === "language") return draft.onboarding && !draft.editorField ?
+    "All right. I have a name now.\n\nBefore we go further — what language should I reply in?" :
+    say(locale, "What language should I reply in?", "На каком языке мне отвечать?", "Якою мовою мені відповідати?");
+  if (!draft.personality) return say(locale,
+    `Okay${draft.ownerName ? ", " + literal(draft.ownerName) : ""}. I’m ${literal(draft.name)}.\n\nNow describe me as if we already knew each other. How do I talk, what makes me laugh, and how do I act when things get serious?\n\nA couple of lines in your own words is enough.`,
+    `Хорошо${draft.ownerName ? ", " + literal(draft.ownerName) : ""}. Я ${literal(draft.name)}.\n\nТеперь опиши меня так, будто мы уже знакомы. Как я разговариваю, над чем смеюсь и как веду себя, когда разговор серьёзный?\n\nПары строк своими словами достаточно.`,
+    `Добре${draft.ownerName ? ", " + literal(draft.ownerName) : ""}. Я ${literal(draft.name)}.\n\nТепер опиши мене так, ніби ми вже знайомі. Як я розмовляю, над чим сміюся і як поводжуся, коли розмова серйозна?\n\nДостатньо кількох рядків своїми словами.`);
+  return (targetTitle ? literal(targetTitle) + "\n\n" : "") + say(locale,
+    `**Here’s what we have**\n\n**Name:** ${literal(draft.name)}\n**Language:** ${languageText(locale, draft.language)}\n**Character:** ${literal(draft.personality)}\n\nSave this profile?`,
+    `**Вот что получилось**\n\n**Имя:** ${literal(draft.name)}\n**Язык:** ${languageText(locale, draft.language)}\n**Характер:** ${literal(draft.personality)}\n\nСохраняем?`,
+    `**Ось що вийшло**\n\n**Ім’я:** ${literal(draft.name)}\n**Мова:** ${languageText(locale, draft.language)}\n**Характер:** ${literal(draft.personality)}\n\nЗберігаємо?`);
+}
+
+function beginPersonaField(draft, field) {
+  return { ...draft, flowVersion: 2, editMenu: false, editorField: field,
+    editorBefore: { name: draft.name, personality: draft.personality, language: draft.language, locale: draft.locale } };
+}
+
+function editPersona(draft, text, extracted) {
+  if (draft.flowVersion !== 2 && !draft.editorField && !draft.editMenu) return editPersonaLegacy(draft, text);
+  const value = text.trim();
+  if (!value || value.startsWith("/")) return;
+  const compact = !draft.editorField && (!draft.name || !draft.language) && /(?:call (?:me|yourself)|your name is|назовись|називайся|назвися)\s+/iu.exec(value);
+  if (compact && (!draft.onboarding || !/^call me\s/iu.test(compact[0]))) {
+    const supplied = {};
+    editPersonaLegacy(supplied, value.slice(compact.index));
+    if (supplied.name) {
+      if (draft.name) {
+        draft.name = supplied.name;
+        if (supplied.language) { draft.language = supplied.language; draft.locale = supplied.locale; }
+      } else Object.assign(draft, supplied);
+    }
+    if (draft.onboarding) initialNames(value, draft, extracted);
+    return;
+  }
+  if (draft.editorField) {
+    const field = draft.editorField;
+    if (field === "language") {
+      const language = readLanguage(value);
+      if (!language) return;
+      draft.language = language;
+      draft.locale = language === "match-request" ? draft.accountLocale || draft.locale : language;
+    } else if ((field === "name" && validName(value)) || (field === "personality" && value.length <= 1200)) draft[field] = value;
+    else return;
+    delete draft.editorField; delete draft.editorBefore;
+    return;
+  }
+  if (draft.editMenu) return;
+  if (draft.onboarding && (!draft.ownerName || !draft.name)) {
+    initialNames(value, draft, extracted);
+    return;
+  }
+  if (!draft.name) { if (validName(value)) draft.name = value; return; }
+  if (!draft.language) {
+    const language = readLanguage(value);
+    if (language) { draft.language = language; draft.locale = language === "match-request" ? draft.accountLocale || draft.locale : language; }
+    return;
+  }
+  if (!draft.personality) { if (value.length <= 1200) draft.personality = value; return; }
+  if (/^(?:change|edit|поменяй|измени|зміни)/iu.test(value)) {
+    const field = /language|язык|мов/iu.test(value) ? "language" : /name|имя|ім[’'ʼ]я/iu.test(value) ? "name" : /personality|character|характер/iu.test(value) ? "personality" : null;
+    if (field) Object.assign(draft, beginPersonaField(draft, field));
   }
 }
 
@@ -157,7 +268,7 @@ function readMode(feature, text) {
 export function createSetup({ store, games, telegram, featureMode, classifyTurn, checkFeature }) {
   const controls = createSetupControls({ store, telegram });
   let editMessageId;
-  async function observe(update) {
+  async function observe(update, bot = { id: store.state.botId }) {
     const event = update.my_chat_member ?? update.message;
     if (!isGroup(event?.chat) || !Number.isSafeInteger(event.chat.id) || !event.chat.title) return;
     const membership = update.my_chat_member;
@@ -165,36 +276,47 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn,
     const { id, title } = event.chat;
     const wasKnown = store.group(id);
     const leaving = membership && !activeMember(membership.new_chat_member);
-    const arriving = membership && activeMember(membership.new_chat_member) &&
-      !activeMember(membership.old_chat_member);
-    if (!wasKnown || wasKnown.title !== title || membership) {
-      store.change(state => {
-        const group = state.groups[id] ?? { configured: false, awaitingProfile: true };
-        state.groups[id] = { ...group, title };
-        if (leaving) state.groups[id].active = false;
-        if (arriving) {
-          state.groups[id].active = true;
-          if (!group.configured) Object.assign(state.groups[id], {
-            awaitingProfile: true, notificationId: null, notificationAttempted: false,
-          });
-        }
-      });
-    }
-    const group = store.group(id);
-    if (leaving || group.notificationId || group.notificationAttempted || (!group.awaitingProfile && wasKnown)) return;
-    store.change(state => { state.groups[id].notificationAttempted = true; });
-    const locale = store.state.locale;
-    const text = say(locale,
-      `I joined “${title}”. Which profile should I use there? Reply to this message with a profile name, or ask me to create one.`,
-      `Вижу группу «${title}». Какой профиль использовать в ней? Ответь на это сообщение названием профиля или попроси создать новый.`,
-      `Бачу групу «${title}». Який профіль використовувати в ній? Відповідай на це повідомлення назвою профілю або попроси створити новий.`);
-    try {
-      const sent = await telegram("sendMessage", { chat_id: store.ownerId, text: text + "\n\n" + profileList(locale),
-        reply_markup: controls.markup(profileRows(String(id)), { group: String(id) }) });
-      if (Number.isSafeInteger(sent?.message_id)) {
-        store.change(state => { state.groups[id].notificationId = sent.message_id; });
+    const arriving = membership && activeMember(membership.new_chat_member) && !activeMember(membership.old_chat_member);
+    if (!wasKnown || wasKnown.title !== title || membership) store.change(state => {
+      const group = state.groups[id] ?? { configured: false, awaitingProfile: true };
+      state.groups[id] = { ...group, title };
+      if (leaving) state.groups[id].active = false;
+      if (arriving) {
+        state.groups[id].active = true;
+        if (!group.configured) Object.assign(state.groups[id], { awaitingProfile: true, notificationId: null, notificationStage: null });
       }
-    } catch { /* Binding stays pending if Telegram cannot deliver a private message. */ }
+    });
+    const group = store.group(id);
+    if (leaving || group.configured || (!group.awaitingProfile && wasKnown)) return;
+    await showGroupConnection(String(id), bot, store.state.locale);
+  }
+
+  async function showGroupConnection(id, bot, locale, force = false) {
+    const group = store.group(id);
+    if (!group?.title || group.active === false) return;
+    const ready = Boolean(bot?.id && await allowedGroup(id, bot, "assign"));
+    const stage = ready ? "profile" : "admin";
+    if (!force && (group.notificationStage === stage && group.notificationId ||
+      group.notificationAttemptStage === stage && group.notificationAttemptedAt && Date.now() - group.notificationAttemptedAt < 60000)) return;
+    const text = ready ? say(locale,
+      `**Group “${literal(group.title)}” connected ✅**\n\nWhich profile should I use here? Choose an existing one or create another.`,
+      `**Группа «${literal(group.title)}» подключена ✅**\n\nКакой профиль использовать здесь? Выбери уже созданный или создай другой для этой группы.`,
+      `**Групу «${literal(group.title)}» підключено ✅**\n\nЯкий профіль використовувати тут? Вибери створений або створи інший для цієї групи.`) : say(locale,
+      `I’m already in **“${literal(group.title)}”** 👋\n\nMake me an administrator of that group, then we can continue.`,
+      `Я уже в группе **«${literal(group.title)}»** 👋\n\nОсталось назначить меня администратором. После этого продолжим настройку.`,
+      `Я вже в групі **«${literal(group.title)}»** 👋\n\nЗалишилося призначити мене адміністратором. Потім продовжимо налаштування.`);
+    const rows = ready ? [...Object.entries(store.state.profiles).map(([profile, record]) =>
+      [button(say(locale, "Use ", "Использовать ", "Використати ") + profileTitle(record), "useProfile", { profile })]),
+      [button(say(locale, "Create another profile", "Создать другой профиль", "Створити інший профіль"), "createForGroup")]] :
+      [[button(say(locale, "Check rights", "Проверить права", "Перевірити права"), "checkRights")]];
+    store.change(state => { state.groups[id].notificationAttemptedAt = Date.now(); state.groups[id].notificationAttemptStage = stage; });
+    try {
+      const sent = await sendPanel(text, rows, { group: id });
+      if (Number.isSafeInteger(sent?.message_id)) store.change(state => {
+        state.groups[id].notificationId = sent.message_id;
+        state.groups[id].notificationStage = stage;
+      });
+    } catch { /* Discovery remains in My groups; a later event/user retry can recover. */ }
   }
 
   const setSession = session => store.change(state => {
@@ -215,20 +337,41 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn,
     return Object.entries(store.state.profiles).map(([profile, record], index) =>
       [button(`${index + 1}. ${profileTitle(record)}`, "profile", { profile, group })]);
   }
+  function newPersona(locale, values = {}) {
+    const onboarding = !store.state.defaultProfile;
+    return { kind: "persona", flowVersion: 2, accountLocale: store.state.telegramLocale || locale,
+      onboarding, locale: onboarding ? "en" : locale, ...values };
+  }
+  function welcomeRows(locale) {
+    return [[button(say(locale, "Add to group", "Добавить в группу", "Додати до групи"), "addGroup")],
+      [button(say(locale, "View features", "Посмотреть функции", "Переглянути функції"), "catalogue")]];
+  }
   function rootRows(bot, locale) {
     return [[button(say(locale, "My groups", "Мои группы", "Мої групи"), "groups")],
       [button(say(locale, "Profiles", "Профили", "Профілі"), "profiles")],
-      [{ text: say(locale, "Add to group", "Добавить в группу", "Додати до групи"), url: `https://t.me/${bot.username}?startgroup=setup` }],
+      [{ text: say(locale, "Add to group", "Добавить в группу", "Додати до групи"), action: { type: "addGroup" } }],
       [button(say(locale, "How it works", "Как это устроено", "Як це влаштовано"), "intro")]];
   }
   function sectionRows(locale) {
     return [...setupSections.map(([section, title]) => [button(say(locale, ...title), "section", { section })]),
       [button(say(locale, "Change personality", "Сменить личность", "Змінити особистість"), "chooseProfile")],
-      [button(say(locale, "Finish", "Завершить", "Завершити"), "finish")]];
+      [button(say(locale, "Later", "Позже", "Пізніше"), "finish")]];
   }
   function draftRows(session, locale) {
     const rows = [];
     if (session.kind === "persona") {
+      if (session.editMenu) return [
+        [button(say(locale, "My name", "Моё имя", "Моє ім’я"), "personaField", { field: "name" })],
+        [button(say(locale, "Character", "Характер", "Характер"), "personaField", { field: "personality" })],
+        [button(say(locale, "Language", "Язык", "Мова"), "personaField", { field: "language" })],
+        [button(say(locale, "Back", "Назад", "Назад"), "personaBack")]];
+      const languagePending = session.editorField === "language" || (session.flowVersion === 2 && !session.language && session.name && (!session.onboarding || session.ownerName));
+      if (languagePending) rows.push([inputButton("English", "English"), inputButton("Русский", "Русский"), inputButton("Українська", "Українська")],
+        [inputButton(say(locale, "Match the speaker’s language", "Язык собеседника", "Мова співрозмовника"), "match")]);
+      if (session.editorField) return [...rows, [button(say(locale, "Back", "Назад", "Назад"), "personaBack")]];
+      if (personaComplete(session)) return [[inputButton(say(locale, "Save profile", "Сохранить профиль", "Зберегти профіль"), "save"),
+        button(say(locale, "Edit", "Изменить", "Змінити"), "personaMenu")]];
+      if (session.flowVersion === 2) return rows;
       if (!session.language && session.name && session.personality) {
         rows.push([inputButton("English", "English"), inputButton("Русский", "Русский"), inputButton("Українська", "Українська")]);
       }
@@ -275,26 +418,29 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn,
     if (draftKinds.has(session?.kind) && !session.paused) return draftRows(session, locale);
     if (session?.kind === "discover") return [[button(say(locale, "Show me", "Да, расскажи", "Так, розкажи"), "intro"), button(say(locale, "Later", "Позже", "Пізніше"), "finish")]];
     if (session?.kind === "invitation") return [[button(say(locale, "Configure features", "Настроить функции", "Налаштувати функції"), "group", { group: session.group }), button(say(locale, "Later", "Позже", "Пізніше"), "finish")]];
+    if (session?.kind === "welcome") return welcomeRows(locale);
+    if (session?.kind === "catalogue") return [[button(say(locale, "Add to group", "Добавить в группу", "Додати до групи"), "addGroup")], [button(say(locale, "Back", "Назад", "Назад"), "intro")]];
     return session?.group && store.group(session.group)?.configured ? sectionRows(locale) : rootRows(bot, locale);
   }
   async function sendPanel(text, rows, { group, draft = false } = {}) {
     const target = store.group(group);
-    const heading = target ? `${target.title} (${group})` : "";
-    if (heading && !text.startsWith(heading)) text = heading + "\n\n" + text;
+    const heading = target ? `${literal(target.title)} (${group})` : "";
+    const duplicateTitle = target && groupEntries().some(([id, item]) => id !== String(group) && normalize(item.title) === normalize(target.title));
+    if (heading && !text.includes(heading) && (!text.includes(literal(target.title)) || duplicateTitle && !text.includes(`(${group})`))) text = heading + "\n\n" + text;
     const markup = controls.markup(rows, { group, draft });
     // Edit only a confirmed callback's original private message. Notifications
     // and ordinary setup replies always create their own message.
     if (editMessageId && text.length <= 3900) {
-      try { return await telegram("editMessageText", { chat_id: store.ownerId, message_id: editMessageId, text, reply_markup: markup }); }
+      try { return await telegram("editMessageText", { chat_id: store.ownerId, message_id: editMessageId, text: renderTelegramHtml(text), parse_mode: "HTML", reply_markup: markup }); }
       catch { /* Deleted/uneditable message: the same state is shown anew. */ }
     }
     while (text.length > 3900) {
       const split = text.lastIndexOf("\n", 3900);
       const length = split > 0 ? split : 3899;
-      await telegram("sendMessage", { chat_id: store.ownerId, text: text.slice(0, length) });
+      await telegram("sendMessage", { chat_id: store.ownerId, text: renderTelegramHtml(text.slice(0, length)), parse_mode: "HTML" });
       text = text.slice(length).trimStart();
     }
-    return telegram("sendMessage", { chat_id: store.ownerId, text, reply_markup: markup });
+    return telegram("sendMessage", { chat_id: store.ownerId, text: renderTelegramHtml(text), parse_mode: "HTML", reply_markup: markup });
   }
   const pendingDraft = session => draftKinds.has(session?.kind) ? session : draftKinds.has(session?.resume?.kind) ? session.resume : null;
   const keepDraft = draft => {
@@ -333,7 +479,7 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn,
   }
 
   function profileList(locale) {
-    const entries = Object.values(store.state.profiles).map(profile => "• " + profileTitle(profile));
+    const entries = Object.values(store.state.profiles).map(profile => "• " + literal(profileTitle(profile)));
     return say(locale, "Available profiles", "Доступные профили", "Доступні профілі") + "\n" +
       (entries.join("\n") || say(locale, "Create a new profile to get started.", "Начни с сообщения «создай новый профиль».", "Почни з повідомлення «створи новий профіль»."));
   }
@@ -362,7 +508,7 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn,
     return say(locale, "Which group? Type its name or number.", "Какая группа? Напиши её название или номер.", "Яка група? Напиши її назву або номер.") +
       "\n" + groups.map(([id, group], index) => {
         const sameTitle = groups.some(([other, item]) => other !== id && normalize(item.title) === normalize(group.title));
-        return `${index + 1}. ${group.title}${sameTitle ? ` (${id})` : ""}`;
+        return `${index + 1}. ${literal(group.title)}${sameTitle ? ` (${id})` : ""}`;
       }).join("\n");
   }
 
@@ -374,25 +520,30 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn,
 
   function groupFeatureStatus(id, key, locale) {
     const group = store.group(id);
+    if (key === "status") return `🟢 ${featureName(key, locale)} — **${say(locale, "available", "доступна", "доступна")}**`;
     const mode = nativeMode(id, key);
-    return `${featureName(key, locale)} — ${modeLabel(mode, locale)}` +
-      (group.featureChecks?.[key]?.ok === false && !["off", "unavailable"].includes(mode) ? " · " + modeLabel("error", locale) : "");
+    const unavailable = featureMode(id, key) === "unavailable";
+    const active = !unavailable && !["off", "setup", "unavailable"].includes(mode);
+    let label = say(locale, active ? "active" : "inactive", active ? "активно" : "неактивно", active ? "активно" : "неактивно");
+    if (unavailable) label += " · " + modeLabel("unavailable", locale);
+    else if (mode === "setup") label += " · " + modeLabel("setup", locale);
+    else if (active && key === "memory") label += ", " + modeLabel(mode, locale);
+    else if (active && key === "analysis") label += say(locale, ", on request", ", по запросу", ", за запитом");
+    else if (active && key === "download") label += say(locale, ", automatically", ", автоматически", ", автоматично");
+    if (active && group.featureChecks?.[key]?.ok === false) label += " · " + modeLabel("error", locale);
+    return `${active ? group.featureChecks?.[key]?.ok === false ? "🟡" : "🟢" : "⚪"} ${featureName(key, locale)} — **${label}**`;
   }
 
   function groupSummary(id, locale) {
     const group = store.group(id);
     const profile = group.character?.persona ?? store.state.profiles[group.profile ?? store.state.defaultProfile] ?? group.persona;
-      const roster = group.assemble?.games.map(game => {
-      const animation = game.animationReference || game.animationPath ?
-        say(locale, "animation on", "с анимацией", "з анімацією") : say(locale, "no animation", "без анимации", "без анімації");
-      return `${game.name} — ${game.players.map(player => "@" + player).join(", ")} (${animation})`;
-    }).join("\n");
-    return [
-      `${group.title} (${id})`,
-      `${featureName("profile", locale)} — ${profile ? profileTitle(profile) : say(locale, "default", "общий", "загальний")}`,
-      ...setupSections.flatMap(([, , features]) => features).map(key => groupFeatureStatus(id, key, locale)),
-      roster,
-    ].filter(Boolean).join("\n");
+    return [say(locale, `**Settings for “${literal(group.title)}”**`, `**Настройки группы «${literal(group.title)}»**`, `**Налаштування групи «${literal(group.title)}»**`) + ` (${id})`,
+      say(locale, "Profile: ", "Профиль: ", "Профіль: ") + `**${literal(profile ? profileTitle(profile) : "default")}**`,
+      say(locale, "Here’s what is enabled now. You can configure the other features when you need them.",
+        "Вот что сейчас включено. Остальные функции можно настроить, когда понадобятся.",
+        "Ось що зараз увімкнено. Решту функцій можна налаштувати, коли знадобляться."),
+      ...setupSections.map(([, title, ids]) => `**${say(locale, ...title)}**\n\n` + ids.map(key => groupFeatureStatus(id, key, locale)).join("\n")),
+      say(locale, "Choose a section to start with.", "Выбери раздел, с которого начнём.", "Вибери розділ, з якого почнемо.")].join("\n\n");
   }
 
   function groupQuestion(draft, locale) {
@@ -401,39 +552,39 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn,
     if (modeFeatures.includes(draft.feature)) {
       if (featureMode(draft.group, draft.feature) === "unavailable" && draft.mode !== "off") return featureDetail(draft.feature, locale) + "\n" + modeLabel("unavailable", locale) + ".";
       if (!draft.mode) return modeOptions(draft.feature, locale);
-      return `${group.title}
+      return `${literal(group.title)}
 ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         say(locale, "Save?", "Сохранить?", "Зберегти?");
     }
     if (draft.operation !== "set") {
       const enabling = draft.operation === "enable";
       const label = featureName(draft.feature, locale);
-      return say(locale, `${group.title} — ${enabling ? "enable" : "disable"} ${label}? Say “save” to confirm.`,
-        `${group.title} — ${enabling ? "включить" : "выключить"} «${label}»? Напиши «сохрани» для подтверждения.`,
-        `${group.title} — ${enabling ? "увімкнути" : "вимкнути"} «${label}»? Напиши «збережи» для підтвердження.`);
+      return say(locale, `${literal(group.title)} — ${enabling ? "enable" : "disable"} ${label}? Say “save” to confirm.`,
+        `${literal(group.title)} — ${enabling ? "включить" : "выключить"} «${label}»? Напиши «сохрани» для подтверждения.`,
+        `${literal(group.title)} — ${enabling ? "увімкнути" : "вимкнути"} «${label}»? Напиши «збережи» для підтвердження.`);
     }
     switch (draft.feature) {
       case "assemble":
         if (!draft.game) return say(locale, "Which game?", "Какая игра?", "Яка гра?") + "\n" + games.map(game => game.name).join(" · ");
         if (!draft.players) return say(locale, "Who plays? Send their @usernames.", "Кто играет? Напиши их @имена.", "Хто грає? Напиши їхні @імена.");
         if (draft.animation === undefined) return say(locale, 'Send a GIF, or say “no animation”.', 'Пришли GIF или напиши «без анимации».', 'Надішли GIF або напиши «без анімації».');
-        return say(locale, `${group.title} — call ${draft.players.map(name => "@" + name).join(", ")} for ${games.find(game => game.id === draft.game).name}${draft.animation ? " with a GIF" : ""}. Save and enable?`,
-          `${group.title} — сбор на ${games.find(game => game.id === draft.game).name}. Зову ${draft.players.map(name => "@" + name).join(", ")}${draft.animation ? " с GIF" : " без анимации"}. Сохранить и включить?`,
-          `${group.title} — збір на ${games.find(game => game.id === draft.game).name}. Кличу ${draft.players.map(name => "@" + name).join(", ")}${draft.animation ? " з GIF" : " без анімації"}. Зберегти й увімкнути?`);
+        return say(locale, `${literal(group.title)} — call ${draft.players.map(name => "@" + name).join(", ")} for ${games.find(game => game.id === draft.game).name}${draft.animation ? " with a GIF" : ""}. Save and enable?`,
+          `${literal(group.title)} — сбор на ${games.find(game => game.id === draft.game).name}. Зову ${draft.players.map(name => "@" + name).join(", ")}${draft.animation ? " с GIF" : " без анимации"}. Сохранить и включить?`,
+          `${literal(group.title)} — збір на ${games.find(game => game.id === draft.game).name}. Кличу ${draft.players.map(name => "@" + name).join(", ")}${draft.animation ? " з GIF" : " без анімації"}. Зберегти й увімкнути?`);
       case "reaction":
         if (!draft.terms) return say(locale, "What phrases should trigger the reaction? Separate them with commas.", "На какие фразы реагировать? Перечисли их через запятую.", "На які фрази реагувати? Перелічи їх через кому.");
         if (!draft.animation) return say(locale, "Send the GIF you want me to reply with.", "Пришли GIF, которым я буду отвечать.", "Надішли GIF, яким я відповідатиму.");
-        return say(locale, `${group.title} — react to ${draft.terms.join(", ")} with this GIF. Save and enable?`,
-          `${group.title} — отвечаю этим GIF на фразы «${draft.terms.join("», «")}». Сохранить и включить?`,
-          `${group.title} — відповідаю цим GIF на фрази «${draft.terms.join("», «")}». Зберегти й увімкнути?`);
+        return say(locale, `${literal(group.title)} — react to ${draft.terms.map(literal).join(", ")} with this GIF. Save and enable?`,
+          `${literal(group.title)} — отвечаю этим GIF на фразы «${draft.terms.map(literal).join("», «")}». Сохранить и включить?`,
+          `${literal(group.title)} — відповідаю цим GIF на фрази «${draft.terms.map(literal).join("», «")}». Зберегти й увімкнути?`);
       case "sticker":
         if (!draft.packName) return say(locale, "Send the link to your existing sticker pack.", "Пришли ссылку на свой существующий стикерпак.", "Надішли посилання на свій наявний стікерпак.");
-        return say(locale, `${group.title} — connect ${draft.packName}. Save and enable?`, `${group.title} — подключаю ${draft.packName}. Сохранить и включить?`, `${group.title} — підключаю ${draft.packName}. Зберегти й увімкнути?`);
+        return say(locale, `${literal(group.title)} — connect ${draft.packName}. Save and enable?`, `${literal(group.title)} — подключаю ${draft.packName}. Сохранить и включить?`, `${literal(group.title)} — підключаю ${draft.packName}. Зберегти й увімкнути?`);
       case "moderation":
         return draft.userIds?.length ? say(locale,
-          `${group.title} — permitted administrator IDs: ${draft.userIds.join(", ")}. The bot needs restriction permission. Save and enable?`,
-          `${group.title} — разрешённые ID администраторов: ${draft.userIds.join(", ")}. Боту нужно право ограничивать участников. Сохранить и включить?`,
-          `${group.title} — дозволені ID адміністраторів: ${draft.userIds.join(", ")}. Боту потрібне право обмежувати учасників. Зберегти й увімкнути?`) :
+          `${literal(group.title)} — permitted administrator IDs: ${draft.userIds.join(", ")}. The bot needs restriction permission. Save and enable?`,
+          `${literal(group.title)} — разрешённые ID администраторов: ${draft.userIds.join(", ")}. Боту нужно право ограничивать участников. Сохранить и включить?`,
+          `${literal(group.title)} — дозволені ID адміністраторів: ${draft.userIds.join(", ")}. Боту потрібне право обмежувати учасників. Зберегти й увімкнути?`) :
           say(locale, "Select administrators below or send their numeric Telegram IDs separated by spaces.",
             "Выбери администраторов ниже или пришли их цифровые Telegram ID через пробел.",
             "Вибери адміністраторів нижче або надішли їхні цифрові Telegram ID через пробіл.");
@@ -530,8 +681,8 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
   function profileSummary(id, locale) {
     const profile = store.state.profiles[id];
     return [
-      profileTitle(profile),
-      `${profile.name} — ${profile.personality ?? say(locale, "private personality configured on the server", "частная личность, подключённая на сервере", "приватна особистість, підключена на сервері")}`,
+      literal(profileTitle(profile)),
+      `${literal(profile.name)} — ${literal(profile.personality ?? say(locale, "private personality configured on the server", "частная личность, подключённая на сервере", "приватна особистість, підключена на сервері"))}`,
       languageText(locale, profile.language),
       say(locale, "Only personality changes. Group features, players and history are retained.", "Меняется только личность. Функции, игроки и история группы сохраняются.", "Змінюється лише особистість. Функції, гравці й історія групи зберігаються."),
     ].join("\n");
@@ -544,12 +695,12 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     const id = draft.profile ?? store.state.defaultProfile;
     const selected = store.state.profiles[id];
     if (!selected) return profileList(locale);
-    const name = profileTitle(selected);
+    const name = literal(profileTitle(selected));
     if (draft.global) return say(locale, `Make ${name} the default profile? Save?`,
       `Сделать ${name} общим профилем? Сохранить?`, `Зробити ${name} загальним профілем? Зберегти?`);
     const selectedGroup = store.group(draft.group);
     const duplicate = groupEntries().some(([id, item]) => id !== draft.group && normalize(item.title) === normalize(selectedGroup.title));
-    const title = selectedGroup.title + (duplicate ? ` (${draft.group})` : "");
+    const title = literal(selectedGroup.title) + (duplicate ? ` (${draft.group})` : "");
     return say(locale, `Apply ${name} in ${title}? Features, players, rules and history are retained.\n\n`,
       `В группе «${title}» применю профиль «${name}». Функции, игроки, правила и история сохранятся.\n\n`,
       `У групі «${title}» застосую профіль «${name}». Функції, гравці, правила й історія збережуться.\n\n`) +
@@ -560,7 +711,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     const affected = draft.editId ? groupEntries().filter(([, group]) => !group.character &&
       (group.profile ?? store.state.defaultProfile) === draft.editId).map(([, group]) => group.title) : [];
     return personaQuestion(draft, store.group(draft.target)?.title) + (affected.length ? "\n\n" + say(draft.locale,
-      "Updates personality in: ", "Обновит личность в группах: ", "Оновить особистість у групах: ") + affected.join(", ") : "");
+      "Updates personality in: ", "Обновит личность в группах: ", "Оновить особистість у групах: ") + affected.map(literal).join(", ") : "");
   };
 
   async function editGroup(draft, text, animation, bot, locale) {
@@ -575,7 +726,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         next.group = group;
         if (next.view) { setSession({ kind: "menu", group, resume: next.resume }); return groupSummary(group, locale); }
         if (next.createPersona) {
-          const persona = { kind: "persona", locale, target: group, resume: next.resume };
+          const persona = newPersona(locale, { target: group, resume: next.resume });
           setSession(persona);
           return askPersona(persona);
         }
@@ -611,7 +762,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         stickerConflict(store.state, next.group, { sticker })) {
         return say(locale, "That pack is already linked to another group.", "Этот пак уже привязан к другой группе.", "Цей пак уже прив’язаний до іншої групи.");
       }
-      const title = configuration(next).title;
+      const title = literal(configuration(next).title);
       updateGroup(next);
       return say(locale, `Saved for ${title}. What else should we set up?`,
         `Сохранено для «${title}». Что ещё настроим?`,
@@ -666,7 +817,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
           "Профиль с таким названием уже есть. Попроси создать профиль с другим названием.",
           "Профіль із такою назвою вже є. Попроси створити профіль з іншою назвою.");
       }
-      const draft = keepDraft({ kind: "persona", locale, target, label });
+      const draft = keepDraft(newPersona(locale, { target, name: label }));
       setSession(draft);
       return askPersona(draft);
     }
@@ -711,7 +862,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         "This personality is connected from a private server file. Create a new profile for a version you can edit here.",
         "Эта личность подключена из частного файла на сервере. Создай новый профиль, чтобы редактировать свою версию здесь.",
         "Ця особистість підключена з приватного файлу на сервері. Створи новий профіль, щоб редагувати свою версію тут.");
-      const draft = keepDraft({ ...store.state.profiles[editId], kind: "persona", editId });
+      const draft = keepDraft({ ...store.state.profiles[editId], kind: "persona", flowVersion: 2, accountLocale: store.state.telegramLocale || locale, editId });
       setSession(draft);
       return askPersona(draft);
     }
@@ -739,7 +890,11 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         `Щоб змінити, напиши «налаштуй ${featureName(feature, locale).toLowerCase()}» та вибери групу.`) : "";
       return detail + selected + hint;
     }
-    return catalogueRequest.test(text) ? showCatalogue(locale) : null;
+    if (catalogueRequest.test(text)) {
+      setSession(keepDraft({ kind: "catalogue" }));
+      return showCatalogue(locale);
+    }
+    return null;
   }
 
   async function menuOrChat(text, bot, locale, animation) {
@@ -747,7 +902,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     if (!candidate) return null;
     if (classifyTurn) {
       try {
-        const intent = readTurnIntent(await classifyTurn({ kind: "menu", paused: false, question: "No pending field. Is this a request about the bot's features/settings, or ordinary conversation?", message: text.slice(0, 4000) }));
+        const { intent } = readTurnIntent(await classifyTurn({ kind: "menu", paused: false, question: "No pending field. Is this a request about the bot's features/settings, or ordinary conversation?", message: text.slice(0, 4000) }));
         if (intent !== "setup") return null;
       } catch { return null; } // No draft to change; the normal AI path reports its own failure.
     }
@@ -779,6 +934,11 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       return false;
     }
     if (text.startsWith("/") && !command) return false;
+    if (privateChat && /^(en|ru|uk)(?:-|$)/i.test(message.from.language_code || "")) {
+      const accountLocale = message.from.language_code.slice(0, 2).toLowerCase();
+      if (store.state.telegramLocale !== accountLocale) store.change(state => { state.telegramLocale = accountLocale; });
+    }
+    let extractedNames;
     let session = store.state.session;
     const locale = session?.kind === "persona" ? session.locale : store.state.locale;
     const reply = async response => {
@@ -786,7 +946,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       const current = store.state.session;
       const draft = draftKinds.has(current?.kind) && !current.paused;
       const group = current?.group;
-      const heading = draft && group ? store.group(group)?.title + ` (${group})\n\n` : "";
+      const heading = draft && group ? literal(store.group(group)?.title) + ` (${group})\n\n` : "";
       await sendPanel(heading + response, currentRows(bot, current?.locale ?? store.state.locale), { group, draft });
       return true;
     };
@@ -848,7 +1008,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         return reply(draftQuestion(draft, draft.locale ?? locale));
       }
       if (!store.state.defaultProfile) {
-        const draft = { kind: "persona", makeDefault: true, locale: "en" };
+        const draft = { kind: "persona", flowVersion: 2, onboarding: true, makeDefault: true, locale: "en", accountLocale: store.state.telegramLocale || "en" };
         setSession(draft);
         return reply(askPersona(draft));
       }
@@ -878,7 +1038,10 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       if (!message._setupButton && !yes.test(text) && !(message.animation && expectedAnimation) && classifyTurn) {
         let intent;
         try {
-          intent = readTurnIntent(await classifyTurn({ kind: pending.kind, paused: Boolean(pending.paused), question: currentQuestion.slice(0, 3500), message: text.slice(0, 4000) }));
+          const turn = readTurnIntent(await classifyTurn({ kind: pending.kind, paused: Boolean(pending.paused), question: currentQuestion.slice(0, 3500), message: text.slice(0, 4000),
+            names: pending.onboarding && (!pending.ownerName || !pending.name) ? { ownerMissing: !pending.ownerName, botMissing: !pending.name } : undefined }));
+          intent = turn.intent;
+          if (intent === "answer" && pending.onboarding) extractedNames = turn;
         } catch {
           setSession({ ...pending, paused: true });
           return reply(say(locale, "I couldn’t interpret that turn because the AI check failed. Your draft is safe. Try /setup again when the AI connection is ready.",
@@ -907,10 +1070,13 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     }
 
     if (session.kind === "persona") {
-      if (session.name && session.personality && session.language && yes.test(text)) {
+      if (personaComplete(session) && !session.editorField && !session.editMenu && yes.test(text)) {
         if (session.target && !await allowedGroup(session.target, bot)) return reply(groupPrompt(locale));
         const { name, personality, language } = session;
-        if (Object.entries(store.state.profiles).some(([id, item]) => id !== session.editId && normalize(profileTitle(item)) === normalize(session.label || name))) {
+        const firstProfile = !store.state.defaultProfile;
+        const previous = store.state.profiles[session.editId];
+        const profileLabel = previous?.label && previous.label !== previous.name ? previous.label : session.flowVersion !== 2 && session.label ? session.label : name;
+        if (Object.entries(store.state.profiles).some(([id, item]) => id !== session.editId && normalize(profileTitle(item)) === normalize(profileLabel))) {
           if (session.label) return reply(say(locale, "That profile label is already in use. Ask me to create a profile with another label.",
             "Профиль с таким названием уже есть. Попроси создать профиль с другим названием.",
             "Профіль із такою назвою вже є. Попроси створити профіль з іншою назвою."));
@@ -919,21 +1085,27 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         store.change(state => {
           const id = session.editId ?? randomUUID();
           state.profiles[id] = {
-            ...state.profiles[id], name, label: session.label || name, personality, language, locale,
+            ...state.profiles[id], name,
+            label: profileLabel,
+            personality, language, locale: session.locale,
             revision: randomUUID(),
           };
           if (session.makeDefault || !state.defaultProfile) state.defaultProfile = id;
-          state.locale = locale;
-          state.session = session.target ? { kind: "assignment", group: session.target, profile: id, resume: session.resume } : session.resume ?? { kind: "discover" };
+          if (session.onboarding && session.ownerName) state.owner = { displayName: session.ownerName };
+          state.locale = session.locale;
+          state.session = session.target ? { kind: "assignment", group: session.target, profile: id, resume: session.resume } : session.resume ?? { kind: "welcome" };
         });
         if (session.target) return reply(say(locale, "> profile saved\n\n", "> профиль сохранён\n\n", "> профіль збережено\n\n") +
           assignmentQuestion(store.state.session, locale));
         if (session.resume) return reply(say(locale, "Profile saved. Your earlier draft is safe; say “continue setup” to return.", "Профиль сохранён. Предыдущий черновик сохранён; напиши «продолжим настройку», чтобы вернуться.", "Профіль збережено. Попередню чернетку збережено; напиши «продовжимо налаштування», щоб повернутися."));
-        return reply(say(locale, "> profile saved\nWant to see what I can do?", "> профиль сохранён\nХочешь, расскажу, что я умею?", "> профіль збережено\nХочеш, розкажу, що я вмію?"));
+        return reply(firstProfile ? introduction(session.locale) : say(session.locale,
+          `**Profile “${literal(name)}” saved.**`, `**Профиль «${literal(name)}» сохранён.**`, `**Профіль «${literal(name)}» збережено.**`));
       }
       const next = { ...session };
-      editPersona(next, text);
-      if (session.name && session.personality && !session.language && !next.language && text) {
+      editPersona(next, text, extractedNames);
+      const languageStep = session.editorField === "language" || (session.name && !session.language &&
+        (!session.onboarding || session.ownerName) && (session.flowVersion === 2 || session.personality));
+      if (languageStep && !next.language && text) {
         return reply(say(locale, "Choose English, Russian, Ukrainian, or the language of whoever writes to me.",
           "Выбери английский, русский, украинский или язык собеседника.",
           "Вибери англійську, російську, українську або мову співрозмовника."));
@@ -970,12 +1142,10 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
           state.defaultProfile = next.profile;
           state.defaultRevision = randomUUID();
         }
-        state.session = next.group ? { kind: "invitation", group: next.group, resume: next.resume } : next.resume ?? { kind: "menu" };
+        state.session = next.group ? { kind: "menu", group: next.group, resume: next.resume } : next.resume ?? { kind: "menu" };
       });
       if (!next.group) return reply(say(locale, "Default personality saved.", "Общая личность сохранена.", "Спільну особистість збережено."));
-      return reply(say(locale, `Profile assignment saved for ${store.group(next.group)?.title ?? "the default"}. Would you like to configure this group's features?`,
-        `Профиль назначен для «${store.group(next.group)?.title ?? "установки"}». Хочешь перейти к настройке функций этой группы?`,
-        `Профіль призначено для «${store.group(next.group)?.title ?? "інсталяції"}». Хочеш перейти до налаштування функцій цієї групи?`));
+      return reply(groupSummary(next.group, locale));
     }
     if (session.kind === "group") return reply(await editGroup(session, text, message.animation?.file_id, bot, locale));
     if (session.kind === "discover") {
@@ -990,9 +1160,12 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     const available = featureMode(group, feature);
     if (available === "unavailable") return available;
     const settings = store.group(group);
-    if (modeFeatures.includes(feature)) return settings?.modes?.[feature] ?? (feature === "memory" ? "manual" : feature === "minigames" ? "off" : "on");
+    if (modeFeatures.includes(feature)) return settings?.modes?.[feature] ?? (feature === "minigames" ? "off" : available ?? (feature === "memory" ? "manual" : "on"));
     if (!settings?.[feature] && !(feature === "reaction" && settings?.rules?.length)) return "setup";
-    return settings.disabled?.[feature] ? "off" : "on";
+    if (settings.disabled?.[feature]) return "off";
+    if (feature === "assemble" && !(settings.assemble?.games ?? []).some(game => game.enabled !== false && game.players?.length)) return settings.assemble?.games?.length ? "off" : "setup";
+    if (feature === "reaction" && !settings.reaction && !settings.rules?.some(rule => rule.enabled !== false)) return "off";
+    return "on";
   }
 
   const moderationRequirements = locale => say(locale,
@@ -1015,9 +1188,17 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     const settings = store.group(group);
     const rows = [];
     const mode = group ? nativeMode(group, feature) : "setup";
+    const childActivationNeeded = mode === "off" && !settings?.disabled?.[feature] && ["assemble", "reaction"].includes(feature);
+    if (childActivationNeeded) notice = [notice, feature === "assemble" ? say(locale,
+      "Choose a game below, add players and enable its call.",
+      "Выбери игру ниже, добавь игроков и включи сбор для неё.",
+      "Вибери гру нижче, додай гравців і ввімкни збір для неї.") : say(locale,
+      "Choose a phrase below and enable its rule.",
+      "Выбери фразу ниже и включи её правило.",
+      "Вибери фразу нижче й увімкни її правило.")].filter(Boolean).join("\n\n");
     if (group && settings?.configured && editableGroupFeature(feature)) {
       if (mode !== "unavailable") {
-        if (mode !== "setup") rows.push([button(mode === "off" ? say(locale, "Enable", "Включить", "Увімкнути") : say(locale, "Disable", "Выключить", "Вимкнути"), "toggle", { feature })]);
+        if (mode !== "setup" && !childActivationNeeded) rows.push([button(mode === "off" ? say(locale, "Enable", "Включить", "Увімкнути") : say(locale, "Disable", "Выключить", "Вимкнути"), "toggle", { feature })]);
         if (feature === "memory") rows.push([button(say(locale, "Change mode", "Изменить режим", "Змінити режим"), "configure", { feature })]);
         if (!modeFeatures.includes(feature)) rows.push([button(say(locale, "Configure", "Настроить", "Налаштувати"), "configure", { feature })]);
       }
@@ -1031,7 +1212,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     }
     rows.push([button(say(locale, "How to test", "Как проверить", "Як перевірити"), "test", { feature })]);
     rows.push([button(say(locale, "Back", "Назад", "Назад"), group ? "group" : "intro", { group })]);
-    const title = settings ? `${settings.title} (${group})\n\n` : "";
+    const title = settings ? `${literal(settings.title)} (${group})\n\n` : "";
     await sendPanel(title + featureDetail(feature, locale) + "\n\n" +
       (notice ? notice + "\n\n" : "") + say(locale, "State: ", "Состояние: ", "Стан: ") + modeLabel(mode, locale) +
       (settings?.featureChecks?.[feature]?.ok === false && !["off", "unavailable"].includes(mode) ? " · " + modeLabel("error", locale) : ""), rows, { group });
@@ -1057,7 +1238,48 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
   async function nativeAction(action, group, bot, locale) {
     switch (action.type) {
       case "intro":
-        return sendPanel(catalogue(locale, feature => featureMode(undefined, feature)), rootRows(bot, locale));
+        setSession(keepDraft({ kind: "welcome" }));
+        return sendPanel(introduction(locale), welcomeRows(locale));
+      case "catalogue":
+        setSession(keepDraft({ kind: "catalogue" }));
+        return sendPanel(showCatalogue(locale), currentRows(bot, locale));
+      case "addGroup":
+        setSession(keepDraft({ kind: "connectGroup" }));
+        return sendPanel(say(locale,
+          "**Connect your first group**\n\n1. Tap Choose group and add me to the chat.\n2. Open that group’s settings → Administrators and make me an administrator.\n\nI’ll message you here when it’s ready. We’ll choose a profile and configure the group.",
+          "**Подключим первую группу**\n\n1. Нажми «Выбрать группу» и добавь меня в нужный чат.\n2. Открой настройки этой группы → Администраторы и назначь меня администратором.\n\nКогда всё будет готово, я напишу тебе сюда. Выберем профиль и настроим функции для этой группы.",
+          "**Підключимо першу групу**\n\n1. Натисни «Вибрати групу» й додай мене до потрібного чату.\n2. Відкрий налаштування цієї групи → Адміністратори й признач мене адміністратором.\n\nКоли все буде готово, я напишу тобі сюди. Виберемо профіль і налаштуємо функції групи."),
+          [[{ text: say(locale, "Choose group", "Выбрать группу", "Вибрати групу"), url: `https://t.me/${bot.username}?startgroup=setup` }],
+           [button(say(locale, "Back", "Назад", "Назад"), "intro")]]);
+      case "checkRights": return showGroupConnection(group, bot, locale, true);
+      case "createForGroup":
+        if (!await allowedGroup(group, bot, "assign")) return showGroupConnection(group, bot, locale, true);
+        setSession(keepDraft(newPersona(locale, { target: group })));
+        return sendPanel(askPersona(store.state.session), draftRows(store.state.session, locale), { group, draft: true });
+      case "useProfile":
+        if (!store.state.profiles[action.profile] || !await allowedGroup(group, bot, "assign")) return showGroupConnection(group, bot, locale, true);
+        setSession(keepDraft({ kind: "assignment", group, profile: action.profile }));
+        return handle({ chat: { id: store.ownerId, type: "private" }, from: { id: store.ownerId }, text: "save", _setupButton: true }, bot);
+      case "personaMenu": {
+        const draft = store.state.session;
+        if (draft?.kind !== "persona") return;
+        setSession({ ...draft, editMenu: true });
+        return sendPanel(askPersona(store.state.session), draftRows(store.state.session, locale), { draft: true });
+      }
+      case "personaField": {
+        const draft = store.state.session;
+        if (draft?.kind !== "persona" || !["name", "personality", "language"].includes(action.field)) return;
+        setSession(beginPersonaField(draft, action.field));
+        return sendPanel(askPersona(store.state.session), draftRows(store.state.session, locale), { draft: true });
+      }
+      case "personaBack": {
+        const draft = store.state.session;
+        if (draft?.kind !== "persona") return;
+        const next = { ...draft, ...(draft.editorBefore || {}), editMenu: Boolean(draft.editorField) };
+        delete next.editorField; delete next.editorBefore;
+        setSession(next);
+        return sendPanel(askPersona(store.state.session), draftRows(store.state.session, next.locale), { draft: true });
+      }
       case "profiles": {
         const rows = Object.entries(store.state.profiles).map(([profile, item]) => [button(profileTitle(item), "editProfile", { profile })]);
         rows.push([button(say(locale, "Create profile", "Создать профиль", "Створити профіль"), "createProfile")],
@@ -1065,17 +1287,14 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         return sendPanel(profileList(locale), rows);
       }
       case "createProfile":
-        setSession(keepDraft({ kind: "persona", locale }));
+        setSession(keepDraft(newPersona(locale)));
         return sendPanel(askPersona(store.state.session), draftRows(store.state.session, locale), { draft: true });
       case "editProfile": {
         const profile = store.state.profiles[action.profile];
         if (!profile) return;
         if (profile.catalogKey) return sendPanel(profileSummary(action.profile, locale), [[button(say(locale, "Create editable profile", "Создать свой профиль", "Створити свій профіль"), "createProfile")]]);
-        setSession(keepDraft({ ...profile, kind: "persona", editId: action.profile, locale }));
-        return sendPanel(askPersona(store.state.session), [[inputButton(say(locale, "Change name", "Изменить имя", "Змінити ім’я"), "change name")],
-          [inputButton(say(locale, "Change character", "Изменить характер", "Змінити характер"), "change personality")],
-          [inputButton(say(locale, "Change language", "Изменить язык", "Змінити мову"), "change language")],
-          ...draftRows(store.state.session, locale)], { draft: true });
+        setSession(keepDraft({ ...profile, kind: "persona", flowVersion: 2, accountLocale: store.state.telegramLocale || locale, editId: action.profile, locale }));
+        return sendPanel(askPersona(store.state.session), draftRows(store.state.session, locale), { draft: true });
       }
       case "groups": {
         const rows = groupEntries().map(([id, item]) => [button(`${id} · ${item.title}`, "group", { group: id })]);
@@ -1083,12 +1302,13 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
       }
       case "group": {
         if (!await allowedGroup(group, bot)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
-        if (!store.group(group).configured) return nativeAction({ type: "chooseProfile" }, group, bot, locale);
+        if (!store.group(group).configured || !await allowedGroup(group, bot, true)) return showGroupConnection(group, bot, locale, true);
         setSession(keepDraft({ kind: "menu", group }));
         return sendPanel(groupSummary(group, locale), sectionRows(locale), { group });
       }
       case "chooseProfile":
-        return sendPanel(store.group(group)?.title + ` (${group})\n\n` + profileList(locale), profileRows(group), { group });
+        if (!store.group(group)?.configured) return showGroupConnection(group, bot, locale, true);
+        return sendPanel(literal(store.group(group)?.title) + ` (${group})\n\n` + profileList(locale), profileRows(group), { group });
       case "profile": {
         if (!store.state.profiles[action.profile] || !await allowedGroup(group, bot)) return;
         const draft = keepDraft({ kind: "assignment", group, profile: action.profile });
@@ -1101,7 +1321,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         if (!section) return;
         const rows = section[2].map(feature => [button(featureName(feature, locale) + " · " + modeLabel(nativeMode(group, feature), locale), "feature", { feature })]);
         rows.push([button(say(locale, "Back", "Назад", "Назад"), "group", { group })]);
-        return sendPanel(`${store.group(group).title} (${group})\n\n` + say(locale, ...section[1]), rows, { group });
+        return sendPanel(`${literal(store.group(group).title)} (${group})\n\n` + say(locale, ...section[1]), rows, { group });
       }
       case "feature": return showFeature(group, action.feature, bot, locale);
       case "configure": return configureFeature(group, action.feature, bot, locale);
@@ -1133,7 +1353,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
             if (feature === "memory" && mode !== "off") target.lastMemoryMode = mode;
           } else {
             target.disabled ??= {};
-            target.disabled[feature] = mode !== "off";
+            target.disabled[feature] = !target.disabled[feature];
           }
         });
         return showFeature(group, feature, bot, locale);
@@ -1173,7 +1393,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
           [button(say(locale, "Delete game settings", "Удалить настройку игры", "Видалити налаштування гри"), "deleteGame", { game: game.id })],
           [button(say(locale, "Preview", "Предпросмотр", "Попередній перегляд"), "game", { game: game.id })],
           [button(say(locale, "Back", "Назад", "Назад"), "feature", { feature: "assemble" })]];
-        return sendPanel(`${store.group(group).title} (${group})\n\n${game.name}\n${game.players.map(name => "@" + name).join(", ")}`, rows, { group });
+        return sendPanel(`${literal(store.group(group).title)} (${group})\n\n${literal(game.name)}\n${game.players.map(name => "@" + name).join(", ")}`, rows, { group });
       }
       case "gameField": {
         if (!await allowedGroup(group, bot, true)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
@@ -1184,14 +1404,14 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         delete draft[action.field];
         if (action.field === "animation") delete draft.animationPath;
         setSession(draft);
-        return sendPanel(`${store.group(group).title} (${group})\n\n` + groupQuestion(draft, locale), draftRows(draft, locale), { group, draft: true });
+        return sendPanel(`${literal(store.group(group).title)} (${group})\n\n` + groupQuestion(draft, locale), draftRows(draft, locale), { group, draft: true });
       }
       case "rule": {
         const rule = store.group(group)?.rules?.find(item => item.id === action.rule);
         if (!rule) return;
         const label = rule.action.type === "animation" ? "GIF" : rule.action.type === "persona" ? featureName("profile", locale) : featureName(rule.action.type, locale);
-        return sendPanel(`${store.group(group).title} (${group})\n\n${rule.phrase} → ${label}\n` +
-          modeLabel(rule.enabled === false ? "off" : "on", locale) + "\n" + (rule.announcement || ""), [
+        return sendPanel(`${literal(store.group(group).title)} (${group})\n\n${literal(rule.phrase)} → ${label}\n` +
+          modeLabel(rule.enabled === false ? "off" : "on", locale) + "\n" + literal(rule.announcement || ""), [
           [button(say(locale, "Change action", "Изменить действие", "Змінити дію"), "ruleField", { rule: rule.id, field: "action" })],
           ...(rule.action.type === "persona" ? [] : [[button(say(locale, "Change access", "Изменить доступ", "Змінити доступ"), "ruleField", { rule: rule.id, field: "access" })]]),
           [button(say(locale, "Change announcement", "Изменить объявление", "Змінити оголошення"), "ruleField", { rule: rule.id, field: "announcement" })],
@@ -1274,7 +1494,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     if (consumed.invalid) return true;
     editMessageId = consumed.messageId;
     try {
-      await nativeAction(consumed.action, consumed.action.group ?? consumed.group, bot, store.state.locale);
+      await nativeAction(consumed.action, consumed.action.group ?? consumed.group, bot, store.state.session?.kind === "persona" ? store.state.session.locale : store.state.locale);
     } catch {
       await sendPanel(say(store.state.locale, "Could not apply this step. Your saved settings remain; open /setup and try again.",
         "Не удалось выполнить шаг. Сохранённые настройки остаются; открой /setup и попробуй снова.",
@@ -1289,7 +1509,12 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     handling = run;
     return run;
   }
-  return { handle: serialHandle, observe, settingIsOn, isSetupRequest,
+  return { handle: serialHandle, settingIsOn, isSetupRequest,
+    observe: (update, bot) => {
+      const run = handling.catch(() => {}).then(() => observe(update, bot));
+      handling = run;
+      return run;
+    },
     handleCallback: (query, bot) => {
       const run = handling.catch(() => {}).then(() => handleCallback(query, bot));
       handling = run;

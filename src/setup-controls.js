@@ -44,7 +44,8 @@ export function createSetupControls({ store, telegram, now = Date.now }) {
       (!panel.group || panel.groupDigest === groupDigest(store.group(panel.group))) &&
       (!panel.draftDigest || panel.draftDigest === setupDigest(store.state.session));
     await telegram("answerCallbackQuery", { callback_query_id: query.id,
-      ...(valid ? {} : { text: say(store.state.locale, "This menu expired. Open /setup.", "Меню устарело. Открой /setup.", "Меню застаріло. Відкрий /setup.") }) }).catch(() => {});
+      ...(valid ? {} : { text: say(store.state.session?.kind === "persona" ? store.state.session.locale : store.state.locale,
+        "This menu expired. Open /setup.", "Меню устарело. Открой /setup.", "Меню застаріло. Відкрий /setup.") }) }).catch(() => {});
     if (!valid) return { invalid: true };
     store.change(state => { delete state.setupPanels[match[1]]; });
     return { action, group: panel.group, messageId: query.message.message_id };

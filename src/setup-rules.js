@@ -1,3 +1,4 @@
+import { escapeTelegramMarkdown as literal } from "./telegram-format.js";
 import { randomUUID } from "node:crypto";
 import { isRulePhrase, normalizePhrase, validateMessageRules } from "./message-rules.js";
 import { profileTitle, selectProfile } from "./setup-profiles.js";
@@ -7,7 +8,7 @@ export const ruleListRequest = /(?:list|show|список|покажи|выве�
 
 export function createRuleEditor({ store, games, targetPrompt, resolveTarget, onDraft }) {
   const settings = draft => draft.profileId ? null : store.group(draft.group);
-  const title = draft => store.group(draft.group)?.title;
+  const title = draft => literal(store.group(draft.group)?.title);
   const saveDraft = onDraft ?? (draft => store.change(state => { state.session = draft; }));
   const label = (action, locale) => ({
     judge: say(locale, "review the dispute", "разобрать спор", "розібрати суперечку"),
@@ -18,7 +19,7 @@ export function createRuleEditor({ store, games, targetPrompt, resolveTarget, on
 
   function list(draft, locale) {
     const rules = settings(draft)?.rules ?? [];
-    return title(draft) + "\n" + (rules.map((rule, index) => `${index + 1}. ${rule.phrase} → ${label(rule.action, locale)}`).join("\n") ||
+    return title(draft) + "\n" + (rules.map((rule, index) => `${index + 1}. ${literal(rule.phrase)} → ${label(rule.action, locale)}`).join("\n") ||
       say(locale, "No message rules yet. Say “create a rule”.", "Правил пока нет. Напиши «создай правило».", "Правил поки немає. Напиши «створи правило»."));
   }
 
@@ -26,9 +27,9 @@ export function createRuleEditor({ store, games, targetPrompt, resolveTarget, on
     if (!settings(draft)) return targetPrompt(locale);
     if (draft.operation === "delete") {
       const existing = settings(draft).rules?.find(rule => rule.id === draft.deleteId);
-      return existing ? say(locale, `Delete “${existing.phrase}” from ${title(draft)}? Save?`,
-        `Удалить правило «${existing.phrase}» для «${title(draft)}»? Сохранить?`,
-        `Видалити правило «${existing.phrase}» для «${title(draft)}»? Зберегти?`) :
+      return existing ? say(locale, `Delete “${literal(existing.phrase)}” from ${title(draft)}? Save?`,
+        `Удалить правило «${literal(existing.phrase)}» для «${title(draft)}»? Сохранить?`,
+        `Видалити правило «${literal(existing.phrase)}» для «${title(draft)}»? Зберегти?`) :
         list(draft, locale) + "\n\n" + say(locale, "Which rule? Send its number or exact phrase.", "Какое правило удалить? Напиши номер или полную фразу.", "Яке правило видалити? Напиши номер або повну фразу.");
     }
     if (!draft.phrase) return say(locale,
@@ -41,7 +42,7 @@ export function createRuleEditor({ store, games, targetPrompt, resolveTarget, on
       "Що робити: розібрати суперечку, зібрати гравців, надіслати GIF чи змінити особистість?");
     if (draft.action.type === "persona" && !draft.action.profile) return say(locale, "Which personality? Reply with a profile name.",
       "Какую личность включать? Напиши название профиля.", "Яку особистість вмикати? Напиши назву профілю.") + "\n" +
-      Object.values(store.state.profiles).map(profile => "• " + profileTitle(profile)).join("\n");
+      Object.values(store.state.profiles).map(profile => "• " + literal(profileTitle(profile))).join("\n");
     if (draft.action.type === "assemble" && !draft.action.game) return say(locale, "Which game, or everyone?", "Какая игра или общий сбор?", "Яка гра чи загальний збір?") + "\n" + games.map(game => game.name).join(" · ");
     if (draft.action.type === "animation" && !draft.action.animation) return say(locale, "Send the GIF to use.", "Пришли нужный GIF.", "Надішли потрібний GIF.");
     if (!draft.access) return say(locale, "Who may trigger it: only you, or group members?", "Кто может запускать: только ты или участники группы?", "Хто може запускати: лише ти чи учасники групи?");
@@ -52,11 +53,11 @@ export function createRuleEditor({ store, games, targetPrompt, resolveTarget, on
     const replacement = (settings(draft).rules ?? []).some(rule => normalizePhrase(rule.phrase) === normalizePhrase(draft.phrase));
     return [
       title(draft),
-      say(locale, `Exact phrase: ${draft.phrase}`, `Полная фраза: ${draft.phrase}`, `Повна фраза: ${draft.phrase}`),
-      label(draft.action, locale) + (draft.action.profile ? " — " + profileTitle(store.state.profiles[draft.action.profile]) : draft.action.game ? " — " + draft.action.game : ""),
+      say(locale, `Exact phrase: ${literal(draft.phrase)}`, `Полная фраза: ${literal(draft.phrase)}`, `Повна фраза: ${literal(draft.phrase)}`),
+      label(draft.action, locale) + (draft.action.profile ? " — " + literal(profileTitle(store.state.profiles[draft.action.profile])) : draft.action.game ? " — " + draft.action.game : ""),
       draft.action.type === "persona" ? say(locale, "Personality and language only; feature settings and memory stay with this group.", "Меняются только личность и язык. Настройки функций и память группы сохраняются.", "Змінюються лише особистість і мова. Налаштування функцій і пам’ять групи зберігаються.") : "",
       draft.access === "owner" ? say(locale, "Only the owner can trigger this.", "Запускать может только владелец.", "Запускати може лише власник.") : say(locale, "Group members can trigger this within the feature's permissions.", "Запускать могут участники с учётом прав самой функции.", "Запускати можуть учасники з урахуванням прав самої функції."),
-      draft.announcement ? say(locale, `Public announcement:\n${draft.announcement}`, `Сообщение в группе:\n${draft.announcement}`, `Повідомлення у групі:\n${draft.announcement}`) : say(locale, "No extra announcement.", "Без дополнительного сообщения.", "Без додаткового повідомлення."),
+      draft.announcement ? say(locale, `Public announcement:\n${literal(draft.announcement)}`, `Сообщение в группе:\n${literal(draft.announcement)}`, `Повідомлення у групі:\n${literal(draft.announcement)}`) : say(locale, "No extra announcement.", "Без дополнительного сообщения.", "Без додаткового повідомлення."),
       replacement ? say(locale, "This replaces the existing rule for that phrase.", "Существующее правило этой фразы будет заменено.", "Поточне правило цієї фрази буде замінено.") : "",
       settings(draft).disabled?.reaction ? say(locale, "Phrase reactions will be enabled.", "Реакции на фразы будут включены.", "Реакції на фрази будуть увімкнені.") : "",
       say(locale, "Save?", "Сохранить?", "Зберегти?"),
