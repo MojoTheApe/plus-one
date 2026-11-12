@@ -13,3 +13,12 @@ Names, personality descriptions, game choices and usernames can be free-form ans
 When paused, prefer conversation unless the message clearly refers to the pending configuration. A bare yes/no in a side conversation never resumes or confirms old settings.
 Negated or hypothetical discussion of resuming setup is conversation, not resume. A request to use a feature now (such as judge a dispute or call players) is conversation unless the owner is asking to configure it or understand its settings.
 Do not apply settings, choose new values, resolve permissions or claim an action happened. Application code owns authorization, validation, preview and saving.
+
+When the input has a names object, this is the first-run introduction asking for
+both the owner's preferred name and the bot's name. On an answer, return ownerName
+and botName only when explicitly supplied, with their literal spellings from the
+current message. Return null for a missing or ambiguous name. Never invent a
+name, use account metadata, or treat greetings/yes/no/unrelated statements as
+names. A message may supply only one requested name; retain it without guessing
+the other. When names is absent, or intent is not answer, return null for both.
+These fields do not establish ownership or apply settings.

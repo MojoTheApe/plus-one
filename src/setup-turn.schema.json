@@ -1,6 +1,10 @@
 {
   "type": "object",
-  "properties": { "intent": { "type": "string", "enum": ["answer", "conversation", "resume", "setup"] } },
-  "required": ["intent"],
+  "properties": {
+    "intent": { "type": "string", "enum": ["answer", "conversation", "resume", "setup"] },
+    "ownerName": { "type": ["string", "null"] },
+    "botName": { "type": ["string", "null"] }
+  },
+  "required": ["intent", "ownerName", "botName"],
   "additionalProperties": false
 }

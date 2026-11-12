@@ -11,8 +11,9 @@ Give your installation agent this repository and follow
 1. Choose where/how to run: local Docker, VPS Docker, or the documented native path.
 2. Install, choose Codex CLI or Anthropic API, authenticate privately and verify AI.
 3. Prepare the local speech model and media tools.
-4. Create your Telegram bot, enable group joining and disable Group Privacy.
-5. Set its private token and the owner's numeric Telegram ID; verify before starting.
+4. Follow one complete Telegram checklist: create the bot, enable group joining,
+   disable Group Privacy and obtain your own numeric user ID.
+5. Supply token/owner ID together and confirm once; verify and start.
 6. Open the bot as the owner and press Start. Continue setup in Telegram.
 
 ```sh
@@ -27,10 +28,13 @@ live-search and scoped-history-tool connections are not implemented yet.
 
 ## Profiles and groups
 
-Create a profile with name, character and language. Accept or skip the short
-introduction and ask questions about any feature. One personality can be used in
+The first wake-up asks what to call you and the bot, then language and character.
+Preview, Save profile or Edit one field without repeating the others. Your preferred
+name stays private; the bot's name is its profile title. A short introduction offers
+Add to group or a separate feature catalogue. Ask questions about any feature. One personality can be used in
 several groups. Add the bot to a group and make it an administrator. It privately
-asks which profile to use, then offers the group's settings.
+asks which profile to use, then shows every group function's actual active/inactive
+state and any missing setup/connection. Choose a section or return later.
 
 Profiles contain personality only. Each group owns its functions, players, rules,
 pack, history and memory. Switching personality preserves those settings. Editing

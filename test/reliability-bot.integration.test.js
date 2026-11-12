@@ -66,6 +66,20 @@ test('portable startup requires the owner before any Telegram or AI operation', 
   }), /numeric Telegram user ID before starting/);
 });
 
+test('preferred owner name is remembered privately and never enters a group prompt or personality', async t => {
+  const f = await fixture(t, 'neutral', 88);
+  const dm = text => f.handle({ text, chat: { id: 88, type: 'private' } });
+  await dm('/start'); await dm('My name is DistinctOwner; your name is Marina, calm and clear in English'); await dm('save');
+  await f.restart();
+  await dm('Do you remember my name?');
+  assert.match(f.prompts.at(-1), /preferred name "DistinctOwner"/);
+  const group = { id: -990, type: 'supergroup', title: 'Alpha' };
+  await f.handle({ text: 'hello', chat: group });
+  await dm('use profile Marina in Alpha'); await dm('save');
+  await f.handle({ text: '@ReliabilityTestBot hello', chat: group });
+  assert.doesNotMatch(f.prompts.at(-1), /DistinctOwner/);
+});
+
 test("ordinary answer uses one AI call for semantic language and general source resolution", async t => {
   const f = await fixture(t);
   await f.handle({ text: "@ReliabilityTestBot дай текст цього треку", reply_to_message: { message_id: 5, from: { id: 99 }, text: "https://unknown-service.example/song/123" } });
@@ -402,7 +416,7 @@ test("owner completes Operator setup after a restart and edits two independent g
   const dm = (text, extra = {}) => f.handle({
     text, chat: { id: 88, type: "private" }, is_topic_message: false, message_thread_id: undefined, ...extra,
   });
-  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   const alpha = { id: -501, type: "supergroup", title: "Alpha" };
   const beta = { id: -502, type: "supergroup", title: "Спокойный чат" };
   await dm("/setup", { chat: { id: 90, type: "private" }, from: { id: 90 } });
@@ -410,25 +424,24 @@ test("owner completes Operator setup after a restart and edits two independent g
   await f.handle({ text: "/setup", chat: alpha });
   assert.ok(f.calls.filter(call => call.method === "sendMessage").every(call => call.payload.chat_id === 88));
   await dm("/start");
-  assert.equal(last(), "> connection open\nYou there? Looks like I made it through. What do you want to call me?");
-  await dm("Искра");
-  assert.match(last(), /Now tell me what I’m like/);
-  await f.restart();
-  await dm("/setup");
-  assert.match(last(), /Describe me like you’d describe someone you know/);
-  await dm("Общайся дружелюбно, спокойно и коротко.");
-  assert.match(last(), /What language should I reply in\?/);
+  assert.match(last(), /Who’s on the other end/);
+  await dm("Я Owner, тебя зовут Искра");
+  assert.match(last(), /Before we go further/);
   await dm("отвечай на русском");
-  assert.match(last(), /Я Искра/);
-  assert.match(last(), /Сохранить или хочешь что-то изменить/);
+  assert.match(last(), /Теперь опиши меня/);
+  await f.restart(); await dm("/setup");
+  assert.match(last(), /Теперь опиши меня/);
+  await dm("Общайся дружелюбно, спокойно и коротко.");
+  assert.match(last(), /Имя: Искра/);
+  assert.match(last(), /Сохраняем/);
   await dm("да, но пока подожди");
-  assert.match(last(), /Сохранить или хочешь что-то изменить/);
+  assert.match(last(), /Сохраняем/);
   await dm("да, сохрани");
-  assert.equal(last(), "> профиль сохранён\nХочешь, расскажу, что я умею?");
-  await dm("хочу посмотреть что дальше");
+  assert.match(last(), /Ты создал мой первый профиль/);
+  await dm("покажи список функций");
   assert.ok(f.calls.some(call => call.payload.reply_markup?.inline_keyboard?.length));
   assert.match(last(), /Общение и память/);
-  assert.match(last(), /Голосовые — нужно подключить\nРасшифровываю все/);
+  assert.match(last(), /Голосовые[\s\S]*нужно подключить/);
   assert.doesNotMatch(last(), /Fortnite|Helldivers|Rocket League/);
   await dm("расскажи про голосовые");
   assert.match(last(), /Все доступные голосовые/);
@@ -454,14 +467,16 @@ test("owner completes Operator setup after a restart and edits two independent g
 
   await dm("создай новый профиль в Спокойный чат");
   await dm("назовись Lumen, be friendly and concise in English");
-  assert.match(last(), /For Спокойный чат\nI’m Lumen/);
+  assert.match(last(), /Спокойный чат[\s\S]*Name: Lumen/);
   await dm("yes");
-  assert.match(last(), /profile saved/);
+  assert.match(last(), /profile saved|first profile/);
   await dm("yes");
   await dm("show group profile Спокойный чат");
-  assert.match(last(), /Bot personality — Lumen/);
+  assert.match(last(), /Profile: Lumen/);
   assert.doesNotMatch(last(), /@alpha_player/);
-  assert.match(last(), /@beta_player/);
+  const scoped = new (await import("node:sqlite")).DatabaseSync(f.root + "/runtime/setup.sqlite", { readOnly: true });
+  try { assert.deepEqual(JSON.parse(scoped.prepare("SELECT document FROM setup WHERE id=1").get().document).groups[beta.id].assemble.games[0].players, ["beta_player"]); }
+  finally { scoped.close(); }
   await dm("configure game calls in Спокойный чат for Fortnite @beta_player, no animation");
   await dm("save");
 
@@ -491,29 +506,31 @@ test("owner completes Operator setup after a restart and edits two independent g
   assert.match(last(), /Збір не налаштовано/);
   await dm("/setup");
   await dm("show group profile Спокойный чат");
-  assert.match(last(), /Game calls — off/);
-  assert.match(last(), /Fortnite — @beta_player \(no animation\)/);
+  assert.match(last(), /Game calls — inactive/);
+  const preserved = new (await import("node:sqlite")).DatabaseSync(f.root + "/runtime/setup.sqlite", { readOnly: true });
+  try { assert.deepEqual(JSON.parse(preserved.prepare("SELECT document FROM setup WHERE id=1").get().document).groups[beta.id].assemble.games[0].players, ["beta_player"]); }
+  finally { preserved.close(); }
   const profileTitle = { id: -503, type: "supergroup", title: "Profile" };
   const firstGaming = { id: -504, type: "supergroup", title: "Gaming" };
   const secondGaming = { id: -505, type: "supergroup", title: "Gaming" };
   for (const chat of [profileTitle, firstGaming, secondGaming]) await f.handle({ text: "hello", chat });
   await dm("create new profile");
-  await dm("call me Echo, friendly and clear in English");
-  assert.match(last(), /^I’m Echo/);
+  await dm("My name is Owner; your name is Echo, friendly and clear in English");
+  assert.match(last(), /Name: Echo/);
   await dm("yes");
   await dm("yes");
   await dm("show group profile Спокойный чат");
-  assert.match(last(), /Bot personality — Lumen/);
+  assert.match(last(), /Profile: Lumen/);
   await dm("show group profile Profile");
-  assert.match(last(), /Bot personality — Искра/);
+  assert.match(last(), /Profile: Искра/);
   await dm("create new profile in Gaming");
   assert.match(last(), /Which group/);
   assert.match(last(), /Gaming \(-504\)/);
   assert.match(last(), /Gaming \(-505\)/);
   await dm("-505");
   assert.match(last(), /What name should I use/);
-  await dm("call me Slate, calm and clear in English");
-  assert.match(last(), /^For Gaming\nI’m Slate/);
+  await dm("My name is Owner; your name is Slate, calm and clear in English");
+  assert.match(last(), /Gaming[\s\S]*Name: Slate/);
   await dm("yes");
   await dm("/start");
   assert.match(last(), /talk to me or open \/setup/);
@@ -536,7 +553,7 @@ test("plain Start diagnoses ownership without AI and preserves game deep links",
 test("owner can chat through first setup, resume after restart and explicitly save", async t => {
   const f = await fixture(t, "neutral", 88);
   const dm = (text, extra = {}) => f.handle({ text, chat: { id: 88, type: "private" }, ...extra });
-  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   const state = async () => {
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(f.root + "/runtime/setup.sqlite", { readOnly: true });
@@ -559,11 +576,11 @@ test("owner can chat through first setup, resume after restart and explicitly sa
   assert.match(f.prompts.at(-1), /paused a configuration draft/);
   assert.equal((await state()).session.name, undefined);
   await dm("продолжим настройку");
-  assert.match(last(), /What do you want to call me/);
-  await dm("Spark");
-  await dm("Warm, concise and curious.");
+  assert.match(last(), /what do you want to call me/);
+  await dm("My name is Owner; your name is Spark");
   await dm("Russian");
-  assert.match(last(), /Я Spark/);
+  await dm("Warm, concise and curious.");
+  assert.match(last(), /Имя: Spark/);
   await dm(chat);
   await f.restart();
   await dm("Да");
@@ -571,22 +588,22 @@ test("owner can chat through first setup, resume after restart and explicitly sa
   assert.equal((await state()).session.paused, true);
   await dm("Сохраняй");
   assert.equal(Object.keys((await state()).profiles).length, 0, "a save after side chat returns to the preview first");
-  assert.match(last(), /Мой характер и поведение/);
+  assert.match(last(), /Характер:/);
   await dm("вернёмся к настройке");
-  assert.match(last(), /Мой характер и поведение\nWarm, concise and curious/);
+  assert.match(last(), /Характер: Warm, concise and curious/);
   await dm("Сохраняй");
-  assert.match(last(), /профиль сохранён/);
+  assert.match(last(), /профиль|Профиль/);
   const saved = await state();
   assert.equal(saved.profiles[saved.defaultProfile].name, "Spark");
   assert.equal(saved.profiles[saved.defaultProfile].settings, undefined, "personality has no editable feature settings");
-  await dm("Да");
-  assert.match(last(), /Сборы игроков — нужно настроить\nЗову настроенных игроков/);
+  await dm("покажи список функций");
+  assert.match(last(), /Сборы игроков[\s\S]*Зову настроенных игроков/);
   await dm("Как добавить нужных игроков?");
   assert.match(last(), /Telegram-имена|Telegram/);
   assert.match(last(), /настрой сборы игроков.*выбери группу/);
   await dm("Как твои дела?");
   assert.equal(last(), "Из-за рассеяния света.");
-  assert.equal((await state()).session.kind, "menu");
+  assert.equal((await state()).session.kind, "catalogue");
   await dm(story);
   assert.equal(last(), "Из-за рассеяния света.");
   await dm("/flappy"); assert.match(last(), /не подключена/);
@@ -600,7 +617,7 @@ test("owner can chat through first setup, resume after restart and explicitly sa
 test("game, rule and assignment drafts survive side conversations and nested setup", async t => {
   const f = await fixture(t, "neutral", 88);
   const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
-  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   const state = async () => {
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(f.root + "/runtime/setup.sqlite", { readOnly: true });
@@ -610,7 +627,7 @@ test("game, rule and assignment drafts survive side conversations and nested set
   const chat = "Кстати, я читал историю про игроков. Обсудим?";
   f.setSetupTurn(async input => ({ intent: input.message === chat ? "conversation" : input.message === "Давай продолжим" ? "resume" : input.kind === "menu" ? "setup" : "answer" }));
   f.setAnswer(async () => ({ text: JSON.stringify({ action: "reply", text: "Давай обсудим." }), searchStatus: { succeeded: false } }));
-  await dm("/start"); await dm("call me Cedar, calm and friendly in Russian"); await dm("сохраняй");
+  await dm("/start"); await dm("My name is Owner; your name is Cedar, calm and friendly in Russian"); await dm("сохраняй");
   const alpha = { id: -961, type: "supergroup", title: "Alpha" };
   const beta = { id: -962, type: "supergroup", title: "Beta" };
   await f.handle({ text: "hello", chat: alpha }); await f.handle({ text: "hello", chat: beta });
@@ -622,7 +639,7 @@ test("game, rule and assignment drafts survive side conversations and nested set
   await dm(chat); assert.equal(last(), "Давай обсудим.");
   assert.equal((await state()).session.game, "fortnite");
   await dm("создай новый профиль");
-  await dm("Echo"); await dm("Спокойный и дружелюбный."); await dm("Русский"); await dm("Сохраняй");
+  await dm("Echo"); await dm("Русский"); await dm("Спокойный и дружелюбный."); await dm("Сохраняй");
   assert.match(last(), /Предыдущий черновик сохранён/);
   await dm("Да");
   assert.equal((await state()).groups[alpha.id].assemble, undefined);
@@ -656,12 +673,12 @@ test("game, rule and assignment drafts survive side conversations and nested set
 test("failed AI turn classification preserves draft and saved settings", async t => {
   const f = await fixture(t, "neutral", 88);
   const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
-  await dm("/start"); await dm("Spark");
+  await dm("/start"); await dm("My name is Owner; your name is Spark");
   f.setSetupTurn(async () => { throw new Error("connection unavailable"); });
   await dm("Let's talk about something else.");
   assert.match(f.calls.at(-1).payload.text, /AI check failed.*draft is safe/);
   await f.restart(); await dm("/setup");
-  assert.match(f.calls.at(-1).payload.text, /I’m Spark.*what I’m like/);
+  assert.match(f.calls.at(-1).payload.text, /Before we go further/);
   f.setSetupTurn(async () => ({ intent: "unexpected" }));
   await dm("another topic");
   assert.match(f.calls.at(-1).payload.text, /AI check failed/);
@@ -671,7 +688,7 @@ test("failed AI turn classification preserves draft and saved settings", async t
 test("negative resume and informational detours never make a later yes save an old preview", async t => {
   const f = await fixture(t, "neutral", 88);
   const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
-  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   const state = async () => {
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(f.root + "/runtime/setup.sqlite", { readOnly: true });
@@ -684,7 +701,7 @@ test("negative resume and informational detours never make a later yes save an o
   ]);
   f.setSetupTurn(async input => ({ intent: conversation.has(input.message) ? "conversation" : input.kind === "menu" ? "setup" : "answer" }));
   f.setAnswer(async () => ({ text: JSON.stringify({ action: "reply", text: "We can talk." }), searchStatus: { succeeded: false } }));
-  await dm("/start"); await dm("Draft"); await dm("Calm and concise."); await dm("English");
+  await dm("/start"); await dm("My name is Owner; your name is Draft"); await dm("English"); await dm("Calm and concise.");
   for (const text of [...conversation, "How can I create a new profile?", "How can I use profile Draft?"]) {
     const before = f.classified.length;
     await dm(text);
@@ -693,16 +710,16 @@ test("negative resume and informational detours never make a later yes save an o
     assert.equal((await state()).session.name, "Draft");
     await dm("yes");
     assert.equal(Object.keys((await state()).profiles).length, 0, text + " must not leave an active confirmation");
-    await dm("continue setup"); assert.match(last(), /My character and behavior/);
+    await dm("continue setup"); assert.match(last(), /Character:/);
   }
-  await dm("save"); assert.match(last(), /profile saved/);
+  await dm("save"); assert.match(last(), /profile saved|first profile/);
   assert.equal(Object.keys((await state()).profiles).length, 1);
 });
 
 test("ordinary feature questions stay conversational and saved-profile inspection keeps its scope", async t => {
   const f = await fixture(t, "neutral", 88);
   const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
-  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   const ordinary = new Set([
     "Tell me about JavaScript features",
     "Расскажи про возможности Photoshop",
@@ -710,7 +727,7 @@ test("ordinary feature questions stay conversational and saved-profile inspectio
   ]);
   f.setSetupTurn(async input => ({ intent: ordinary.has(input.message) ? "conversation" : input.kind === "menu" ? "setup" : "answer" }));
   f.setAnswer(async () => ({ text: JSON.stringify({ action: "reply", text: "Ordinary answer." }), searchStatus: { succeeded: false } }));
-  await dm("/start"); await dm("call me Gaming, calm and clear in English"); await dm("save"); await dm("yes");
+  await dm("/start"); await dm("My name is Owner; your name is Gaming, calm and clear in English"); await dm("save"); await dm("yes");
   for (const text of ordinary) {
     const before = f.prompts.length;
     await dm(text);
@@ -723,7 +740,7 @@ test("ordinary feature questions stay conversational and saved-profile inspectio
   await dm("What's enabled in profile Gaming?");
   assert.match(last(), /Only personality changes/);
   const before = f.classified.length;
-  await dm("/setup"); assert.match(last(), /Available features/);
+  await dm("/setup"); assert.match(last(), /Here’s how I can help/);
   assert.equal(f.classified.length, before, "explicit bot command remains deterministic");
 });
 
@@ -735,7 +752,7 @@ test("download defaults apply only after assignment, require admin and preserve 
   const attempts = [];
   const download = async url => { attempts.push(url); throw new Error("fixture download unavailable"); };
   f.setDownloader(download);
-  await dm("/start"); await dm("call me Cedar, calm and friendly in English"); await dm("save");
+  await dm("/start"); await dm("My name is Owner; your name is Cedar, calm and friendly in English"); await dm("save");
   await f.handle({ text: "hello", chat: alpha }); await f.handle({ text: "hello", chat: beta });
   const link = "https://www.instagram.com/reel/fixture_default/";
   await f.handle({ text: link, chat: alpha }); assert.equal(attempts.length, 0);
@@ -751,23 +768,23 @@ test("download defaults apply only after assignment, require admin and preserve 
   await f.handle({ text: link, chat: alpha }); await f.handle({ text: link, chat: beta });
   assert.equal(attempts.length, 1, "saved off and unassigned second group stay off across restart");
   await dm("/setup"); await dm("show group profile Alpha");
-  assert.match(f.calls.filter(call => call.method === "sendMessage").at(-1).payload.text, /Media downloads — off/);
+  assert.match(f.calls.filter(call => call.method === "sendMessage").at(-1).payload.text, /Media downloads — (?:<b>)?inactive/);
 });
 
 test("the existing Claude backend uses conversational setup and reports unsupported connections", async t => {
   const f = await fixture(t, "neutral", 88, async () => {}, "claude");
   const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
-  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   f.setSetupTurn(async input => ({ intent: input.message === "Как твои дела?" ? "conversation" : input.kind === "menu" ? "setup" : "answer" }));
   f.setAnswer(async () => ({ text: JSON.stringify({ action: "reply", text: "Я на связи." }), searchStatus: { succeeded: false } }));
   await dm("/start"); assert.match(last(), /^> connection open/);
-  await dm("Cedar"); await dm("Спокойный и любопытный.");
+  await dm("My name is Owner; your name is Cedar");
   await dm("Как твои дела?"); assert.equal(last(), "Я на связи.");
-  await f.restart(); await dm("продолжим настройку"); assert.match(last(), /What language/);
-  await dm("Русский"); await dm("Сохраняй"); await dm("Да");
-  assert.match(last(), /Поиск в интернете — нужно подключить/);
-  assert.match(last(), /Анализ фото и видео — нужно подключить/);
-  assert.match(last(), /Сборы игроков — нужно настроить/);
+  await f.restart(); await dm("продолжим настройку"); assert.match(last(), /what language/);
+  await dm("Русский"); await dm("Спокойный и любопытный."); await dm("Сохраняй"); await dm("покажи список функций");
+  assert.match(last(), /Поиск в интернете[^\n]*нужно подключить/);
+  assert.match(last(), /Анализ фото и видео[^\n]*нужно подключить/);
+  assert.match(last(), /Сборы игроков[^\n]*Зову/);
   await dm("настрой сборы в профиле Cedar"); assert.match(last(), /Функции принадлежат группе/);
   await f.handle({ text: "hello", chat: { id: -984, type: "supergroup", title: "Alpha" } });
   await dm("use profile Cedar in Alpha"); await dm("save"); await dm("later");
@@ -781,11 +798,11 @@ test("confirmed reactions, stickers and feature modes apply only to the selected
   const dm = (text, extra = {}) => f.handle({ text, chat: { id: 88, type: "private" }, ...extra });
   const alpha = { id: -601, type: "supergroup", title: "Понедельник" };
   const beta = { id: -602, type: "supergroup", title: "Вторник" };
-  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
   await dm("/start");
-  await dm("назовись Искра, отвечай коротко и по-русски");
-  assert.match(last(), /Сохранить или хочешь что-то изменить/);
+  await dm("Меня зовут Owner; назовись Искра, отвечай коротко и по-русски");
+  assert.match(last(), /Сохраняем/);
   await dm("сохрани");
   await dm("да");
   await f.handle({ text: "hello", chat: alpha });
@@ -833,9 +850,9 @@ test("confirmed reactions, stickers and feature modes apply only to the selected
   await dm("сохрани");
   await f.handle({ text: "/remember marker scope stays private", chat: beta });
   await dm("расскажи про память Понедельник");
-  assert.match(last(), /Память — выключено/);
+  assert.match(last(), /Память — неактивно/);
   await dm("расскажи про память Вторник");
-  assert.match(last(), /Память — по просьбе/);
+  assert.match(last(), /Память — активно, по просьбе/);
   await f.handle({ text: "/memory", chat: beta });
   assert.match(last(), /marker scope stays private/);
   await dm("включи память Понедельник");
@@ -848,32 +865,32 @@ test("full profiles can be prepared before groups and switched privately by the 
   const f = await fixture(t, "neutral", 88);
   const dm = (text, extra = {}) => f.handle({ text, chat: { id: 88, type: "private" }, ...extra });
   const privateMessages = () => f.calls.filter(call => call.method === "sendMessage" && call.payload.chat_id === 88);
-  const last = () => privateMessages().at(-1)?.payload.text;
+  const last = () => privateMessages().at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   const alpha = { id: -801, type: "supergroup", title: "Friends" };
   const beta = { id: -802, type: "supergroup", title: "Friends" };
 
   await dm("/start");
-  await dm("Base");
-  await dm("Quiet and concise.");
+  await dm("My name is Owner; your name is Base");
   await dm("English");
+  await dm("Quiet and concise.");
   await dm("yes");
   await dm("/start");
 
-  await dm('create new profile "Gaming"');
-  await dm("Spark");
-  await dm("Friendly and playful.");
+  await dm('create new profile "Spark"');
+  await dm("My name is Owner; your name is Spark");
   await dm("English");
-  assert.match(last(), /Profile “Gaming”/);
+  await dm("Friendly and playful.");
+  assert.match(last(), /Name: Spark/);
   await dm("yes");
   await dm("later");
-  await dm("configure game calls in profile Gaming for Fortnite @game_player, no animation");
+  await dm("configure game calls in profile Spark for Fortnite @game_player, no animation");
   assert.match(last(), /Features belong to a group/);
   await dm("save");
-  await dm('configure phrase reactions in profile Gaming: wake up', { animation: { file_id: "profile-gif" } });
+  await dm('configure phrase reactions in profile Spark: wake up', { animation: { file_id: "profile-gif" } });
   await dm("save");
   await dm("/start");
   await dm("please show all available profiles");
-  assert.match(last(), /Available profiles\n• Base\n• Gaming/);
+  assert.match(last(), /Available profiles\n• Base\n• Spark/);
   assert.doesNotMatch(last(), /Fortnite|game_player|profile-gif/);
 
   const beforeOther = f.calls.length;
@@ -881,14 +898,14 @@ test("full profiles can be prepared before groups and switched privately by the 
   const denied = f.calls.slice(beforeOther).filter(call => call.method === "sendMessage");
   assert.equal(denied.length, 1);
   assert.equal(denied[0].payload.chat_id, 99);
-  assert.doesNotMatch(denied[0].payload.text, /Gaming|Spark/);
+  assert.doesNotMatch(denied[0].payload.text, /Spark|Spark/);
 
   await dm("create new profile");
   await dm("Draft");
   for (const chat of [alpha, beta]) {
     await f.update({ my_chat_member: { chat, from: { id: 900 }, old_chat_member: { status: "left" }, new_chat_member: { status: "member" } } });
   }
-  const notifications = privateMessages().filter(call => call.payload.text.startsWith("I joined"));
+  const notifications = privateMessages().filter(call => call.payload.text.includes("Group “Friends” connected"));
   assert.equal(notifications.length, 2);
   assert.ok(notifications.every(call => call.payload.chat_id === 88));
   const beforeOwnerList = f.calls.length;
@@ -900,7 +917,7 @@ test("full profiles can be prepared before groups and switched privately by the 
   assert.ok(f.calls.slice(callsBeforeBinding).every(call => call.method !== "sendAnimation"));
   assert.doesNotMatch(f.calls.filter(call => call.method === "sendMessage").at(-1).payload.text, /@game_player/);
   await dm("/setup");
-  assert.match(last(), /I’m Draft/);
+  assert.match(last(), /What language/);
   await dm("cancel");
 
   // Use the older notification, even after another group was discovered.
@@ -909,21 +926,21 @@ test("full profiles can be prepared before groups and switched privately by the 
   const document = JSON.parse(database.prepare("SELECT document FROM setup WHERE id=1").get().document);
   database.close();
   assert.ok(document.groups[alpha.id].notificationId !== document.groups[beta.id].notificationId);
-  await dm("Gaming", { reply_to_message: { message_id: document.groups[alpha.id].notificationId } });
+  await dm("Spark", { reply_to_message: { message_id: document.groups[alpha.id].notificationId } });
   assert.match(last(), /Friends \(-801\)/);
   assert.doesNotMatch(last(), /@game_player/);
   await dm("save");
   await dm("configure game calls for Fortnite @game_player, no animation"); await dm("save");
 
   const publicBefore = f.calls.length;
-  await f.handle({ text: "use profile Gaming", chat: beta });
+  await f.handle({ text: "use profile Spark", chat: beta });
   const switchReplies = f.calls.slice(publicBefore).filter(call => call.method === "sendMessage");
   assert.ok(switchReplies.length && switchReplies.every(call => call.payload.chat_id === 88));
   assert.match(last(), /Friends \(-802\)/);
   await dm("save");
   await dm("configure game calls for Fortnite @beta_player, no animation"); await dm("save");
 
-  await dm("edit profile Gaming");
+  await dm("edit profile Spark");
   await dm("change character");
   await dm("Calm and analytical.");
   await dm("save");
@@ -939,7 +956,7 @@ test("full profiles can be prepared before groups and switched privately by the 
   assert.equal(profiles.length, 2);
   assert.ok(profiles.every(([, instruction]) => instruction.includes("Calm and analytical.")));
 
-  await f.handle({ text: "use profile Gaming", chat: alpha });
+  await f.handle({ text: "use profile Spark", chat: alpha });
   await dm("save");
   profiles.length = 0;
   await f.handle({ text: "@ReliabilityTestBot hello", chat: alpha });
@@ -960,25 +977,25 @@ test("targeted profile creation previews all changes and new-group replies retai
   const f = await fixture(t, "neutral", 88);
   const dm = (text, extra = {}) => f.handle({ text, chat: { id: 88, type: "private" }, ...extra });
   const messages = () => f.calls.filter(call => call.method === "sendMessage");
-  const last = () => messages().at(-1)?.payload.text;
+  const last = () => messages().at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   const alpha = { id: -811, type: "supergroup", title: "Monday" };
   const beta = { id: -812, type: "supergroup", title: "Tuesday" };
   const member = (chat, oldStatus, status) => f.update({ my_chat_member: {
     chat, from: { id: 900 }, old_chat_member: { status: oldStatus }, new_chat_member: { status },
   } });
   await dm("/start");
-  await dm("call me Base, calm and clear in English");
+  await dm("My name is Owner; your name is Base, calm and clear in English");
   await dm("save");
   await member(alpha, "left", "member");
   await dm("use profile Base in Monday"); await dm("save");
   await dm("configure game calls in Monday for Fortnite @monday_player, no animation");
   await dm("save");
   await dm("create new profile in Monday");
-  await dm("call me Echo, friendly and clear in English");
+  await dm("My name is Owner; your name is Echo, friendly and clear in English");
   await dm("save");
   assert.match(last(), /profile saved[\s\S]*Apply Echo in Monday/);
   assert.match(last(), /Features, players, rules and history are retained/);
-  assert.doesNotMatch(last(), /Game calls — off/);
+  assert.doesNotMatch(last(), /Game calls — inactive/);
   await f.handle({ text: "/assemble fort", chat: alpha });
   assert.match(last(), /@monday_player/);
   await dm("save");
@@ -987,15 +1004,15 @@ test("targeted profile creation previews all changes and new-group replies retai
 
   await member(beta, "left", "member");
   const notification = messages().at(-1);
-  assert.match(notification.payload.text, /I joined “Tuesday”/);
+  assert.match(notification.payload.text, /Group “Tuesday” connected/);
   const sqlite = await import("node:sqlite");
   const database = new sqlite.DatabaseSync(f.root + "/runtime/setup.sqlite", { readOnly: true });
   const document = JSON.parse(database.prepare("SELECT document FROM setup WHERE id=1").get().document);
   database.close();
   await dm("create new profile „Night“", { reply_to_message: { message_id: document.groups[beta.id].notificationId } });
-  assert.match(last(), /What name should I use/);
-  await dm("call me Spark, playful and clear in English");
-  assert.match(last(), /Profile “Night”[\s\S]*For Tuesday/);
+  assert.match(last(), /What language/);
+  await dm("My name is Owner; your name is Night, playful and clear in English"); await dm("Playful and clear.");
+  assert.match(last(), /Tuesday[\s\S]*Name: Night/);
   await dm("save");
   assert.match(last(), /Apply Night in Tuesday/);
   await dm("save");
@@ -1003,8 +1020,8 @@ test("targeted profile creation previews all changes and new-group replies retai
   await dm("create new profile „Night“");
   assert.match(last(), /label is already in use/);
   await dm('create new profile "Weekend"');
-  assert.match(last(), /What name should I use/);
-  await dm("call me Spark, quiet and clear in English");
+  assert.match(last(), /What language/);
+  await dm("My name is Owner; your name is Weekend, quiet and clear in English"); await dm("Quiet and clear.");
   await dm("save");
   await dm("show all available profiles");
   assert.match(last(), /• Night\n• Weekend/);
@@ -1022,15 +1039,15 @@ test("owner confirms a phrase rule that changes only one group's personality and
   const alpha = { id: -941, type: "supergroup", title: "Alpha" };
   const beta = { id: -942, type: "supergroup", title: "Beta" };
   const sent = () => f.calls.filter(call => call.method === "sendMessage");
-  const last = () => sent().at(-1)?.payload.text;
+  const last = () => sent().at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   const state = async () => {
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(f.root + "/runtime/setup.sqlite", { readOnly: true });
     try { return JSON.parse(db.prepare("SELECT document FROM setup WHERE id=1").get().document); }
     finally { db.close(); }
   };
-  await dm("/start"); await dm("call me Base, calm and direct in English"); await dm("save");
-  await dm("create new profile"); await dm("call me Cedar, playful and clear in English"); await dm("save");
+  await dm("/start"); await dm("My name is Owner; your name is Base, calm and direct in English"); await dm("save");
+  await dm("create new profile"); await dm("My name is Owner; your name is Cedar, playful and clear in English"); await dm("save");
   for (const chat of [alpha, beta]) await f.handle({ text: "hello", chat });
   await dm("use profile Base in Alpha"); await dm("save");
   await dm("configure game calls in Alpha for Fortnite @alpha_player, no animation"); await dm("save");
@@ -1100,8 +1117,8 @@ test("owner confirms a phrase rule that changes only one group's personality and
 test("a paused Russian rule draft allows a new profile request", async t => {
   const f = await fixture(t, "neutral", 88);
   const dm = text => f.handle({ text, chat: { id: 88, type: "private" } });
-  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
-  await dm("/start"); await dm("call me Cedar, calm and friendly in Russian"); await dm("save");
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  await dm("/start"); await dm("My name is Owner; your name is Cedar, calm and friendly in Russian"); await dm("save");
   await f.handle({ text: "hello", chat: { id: -945, type: "supergroup", title: "Alpha" } });
   await dm("use profile Cedar in Alpha"); await dm("save");
   await dm("создай правило в Alpha"); await dm("вечерняя смена");
@@ -1119,8 +1136,8 @@ test("a paused Russian rule draft allows a new profile request", async t => {
   await dm("/start"); assert.match(last(), /на связи/);
   await dm("создай новый профиль"); assert.match(last(), /зовут|имя/);
   await dm("Вектор");
-  await dm("Дружелюбный и спокойный, без пафоса");
   await dm("На русском");
+  await dm("Дружелюбный и спокойный, без пафоса");
   await dm("сохранить"); assert.match(last(), /сохран/);
   await dm("выведи список всех профилей"); assert.match(last(), /Вектор/);
 });
@@ -1141,7 +1158,7 @@ test("explicit legacy import preserves old memory while new same-title groups st
     await fs.writeFile(root + "/memory/chats/legacy-room.md", "# Existing group\n- legacy chat marker\n");
     await fs.writeFile(root + "/memory/04_FACTS.md", "- legacy global marker\n");
   });
-  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   await f.handle({ text: "/memory", chat: alpha }); assert.match(last(), /legacy user marker[\s\S]*legacy global marker/);
   await f.handle({ text: "/memory chat", chat: alpha }); assert.match(last(), /legacy chat marker/);
   await f.handle({ text: "hello", chat: beta });
@@ -1156,8 +1173,8 @@ test("saved phrases invoke the existing assembly, animation and judge actions wi
   const f = await fixture(t, "neutral", 88);
   const dm = (text, extra = {}) => f.handle({ text, chat: { id: 88, type: "private" }, ...extra });
   const group = { id: -961, type: "supergroup", title: "Friends" };
-  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text;
-  await dm("/start"); await dm("call me Base, calm and clear in English"); await dm("save");
+  const last = () => f.calls.filter(call => call.method === "sendMessage").at(-1)?.payload.text?.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  await dm("/start"); await dm("My name is Owner; your name is Base, calm and clear in English"); await dm("save");
   await f.handle({ text: "hello", chat: group });
   await dm("use profile Base in Friends"); await dm("save");
   await dm("configure game calls in Friends for Fortnite @test_player, no animation"); await dm("save");
@@ -1194,7 +1211,7 @@ test('all group voices enter scoped history without unsolicited replies, while a
   const dm = text => f.handle({ text, chat: { id: 88, type: 'private' } });
   const alpha = { id: -981, type: 'supergroup', title: 'Voice Alpha' };
   const beta = { id: -982, type: 'supergroup', title: 'Voice Beta' };
-  await dm('/start'); await dm('call me Cedar, calm and clear in English'); await dm('save'); await dm('later');
+  await dm('/start'); await dm('My name is Owner; your name is Cedar, calm and clear in English'); await dm('save'); await dm('later');
   await f.handle({ text: 'hello', chat: alpha }); await f.handle({ text: 'hello', chat: beta });
   await dm('use profile Cedar in Voice Alpha'); await dm('save'); await dm('later');
   await dm('use profile Cedar in Voice Beta'); await dm('save'); await dm('later');
@@ -1240,7 +1257,7 @@ test('background voice failures stay silent and a replied-to failure is explaine
   const f = await fixture(t, 'neutral', 88, async () => {}, 'codex', true);
   const dm = text => f.handle({ text, chat: { id: 88, type: 'private' } });
   const group = { id: -983, type: 'supergroup', title: 'Voice errors' };
-  await dm('/start'); await dm('call me Cedar, calm and clear in English'); await dm('save'); await dm('later');
+  await dm('/start'); await dm('My name is Owner; your name is Cedar, calm and clear in English'); await dm('save'); await dm('later');
   await f.handle({ text: 'hello', chat: group }); await dm('use profile Cedar in Voice errors'); await dm('save'); await dm('later');
   f.setTranscriber(async () => { throw new Error('fixture model unavailable'); });
   const before = f.calls.filter(call => call.method === 'sendMessage' && call.payload.chat_id === group.id).length;
@@ -1255,7 +1272,7 @@ test('native callbacks reach setup before game callbacks and alter only their na
   const f = await fixture(t, 'neutral', 88);
   const dm = text => f.handle({ text, chat: { id: 88, type: 'private' } });
   const group = { id: -985, type: 'supergroup', title: 'Native controls' };
-  await dm('/start'); await dm('call me Cedar, calm and clear in English'); await dm('save'); await dm('later');
+  await dm('/start'); await dm('My name is Owner; your name is Cedar, calm and clear in English'); await dm('save'); await dm('later');
   await f.handle({ text: 'hello', chat: group }); await dm('use profile Cedar in Native controls'); await dm('save'); await dm('later'); await dm('/setup');
   let gameCallbacks = 0;
   f.setCallback(async () => { gameCallbacks++; });
@@ -1281,7 +1298,7 @@ test('group moderation authorizes configured administrators only and retains its
   const alpha = { id: -986, type: 'supergroup', title: 'Moderation Alpha' };
   const beta = { id: -987, type: 'supergroup', title: 'Moderation Beta' };
   f.setMemberLookup(({ user_id }) => ({ status: user_id === 909 ? 'member' : 'administrator', can_restrict_members: true }));
-  await dm('/start'); await dm('call me Cedar, calm and clear in English'); await dm('save'); await dm('later');
+  await dm('/start'); await dm('My name is Owner; your name is Cedar, calm and clear in English'); await dm('save'); await dm('later');
   for (const chat of [alpha, beta]) {
     await f.handle({ text: 'hello', chat }); await dm('use profile Cedar in ' + chat.title); await dm('save'); await dm('later');
   }
@@ -1299,7 +1316,7 @@ test('voice kick resolves known targets and default-linked groups never inherit 
   const alpha = { id: -988, type: 'supergroup', title: 'Voice moderation' };
   const beta = { id: -989, type: 'supergroup', title: 'Default moderation' };
   f.setMemberLookup(({ user_id }) => ({ status: user_id === 909 ? 'member' : 'administrator', can_restrict_members: true }));
-  await dm('/start'); await dm('call me Cedar, calm and clear in English'); await dm('save'); await dm('later');
+  await dm('/start'); await dm('My name is Owner; your name is Cedar, calm and clear in English'); await dm('save'); await dm('later');
   for (const chat of [alpha, beta]) {
     await f.handle({ text: 'hello', chat }); await dm('use default in ' + chat.title); await dm('save'); await dm('later');
     await f.handle({ text: 'A recent target message', chat, from: { id: 909, username: 'TargetPerson' } });

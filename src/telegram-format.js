@@ -4,6 +4,9 @@ const escape = text => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;')
 const plain = text => String(text).replace(/<[^>]*>/g, '').replace(/[*_`]/g, '');
 const decode = text => String(text).replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 
+// User-supplied fields embedded in authored Markdown must remain literal.
+export const escapeTelegramMarkdown = value => String(value ?? '').replace(/[\u0001\u0002]/g, '').replace(/[\\`*_<>\[\]()]/g, '\\$&');
+
 // One renderer owns both model Markdown and transport-generated HTML. Only
 // known inline markup survives; link targets are always public HTTP(S) URLs.
 export function renderTelegramHtml(text) {
@@ -18,6 +21,7 @@ export function renderTelegramHtml(text) {
     return hold(`<a href="${escape(url).replace(/"/g, '&quot;')}">${escape(visible)}</a>`);
   };
   let prepared = String(text).replace(/[\u0001\u0002]/g, '');
+  prepared = prepared.replace(/\\([\\`*_<>\[\]()])/g, (_m, char) => hold(escape(char)));
   prepared = prepared.replace(/<(code|pre)>([\s\S]*?)<\/\1>/gi, (_m, tag, content) => hold(`<${tag.toLowerCase()}>${escape(decode(content))}</${tag.toLowerCase()}>`));
   prepared = prepared.replace(/`([^`\n]+)`/g, (_m, content) => hold(`<code>${escape(content)}</code>`));
   prepared = prepared.replace(/<a\s+href=["']([^"']+)["']\s*>([\s\S]*?)<\/a>/gi, (_m, url, label) => link(label, url));

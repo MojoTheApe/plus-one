@@ -98,14 +98,18 @@ export function modeOptions(feature, locale) {
 }
 export function introduction(locale) {
   return say(locale,
-    'Profiles define my name, character and language. Reuse one in several groups; each group has independent features, players, rules, history and memory. Switching personality keeps those settings. Ask about any feature. Add me to a group, choose its profile and make me an administrator to configure features.',
-    'Профиль задаёт моё имя, характер и язык. Одну личность можно использовать в нескольких группах. У каждой группы свои функции, игроки, правила, история и память. Смена личности сохраняет эти настройки. Спроси о любой функции. Для настройки добавь меня в группу, выбери её профиль и назначь меня администратором.',
-    'Профіль задає моє ім’я, характер і мову. Одну особистість можна використовувати в кількох групах. Кожна група має власні функції, гравців, правила, історію й пам’ять. Зміна особистості зберігає ці налаштування. Запитай про будь-яку функцію. Для налаштування додай мене до групи, вибери її профіль і признач мене адміністратором.');
+    '**You created my first profile 👋**\n\nA profile is the name, character and language you just chose for me. For example, you can create a serious profile for work and a more sociable one with a sense of humour for friends. The same profile can be used in several groups.\n\nI have different features: answering questions, understanding voices, downloading linked posts and gathering players. You choose which features each group needs — a work chat and a group of friends may need different ones.\n\nYou can also switch profiles within a group to suit the situation. Its settings stay in place — you will not need to reconnect features.\n\nExplore what I can do or add me to your first group. I will help configure it here, in our private chat.',
+    '**Ты создал мой первый профиль 👋**\n\nПрофиль — это моё имя, характер и язык, которые ты только что выбрал. Например, для рабочего чата можно создать серьёзный профиль, а для компании друзей — более общительный, с юмором. Один и тот же профиль можно использовать в нескольких группах.\n\nУ меня есть разные функции: я могу отвечать на вопросы, понимать голосовые, скачивать публикации по ссылкам и собирать компанию для игр. Для каждой группы ты выбираешь, какие возможности ей нужны — у рабочего чата и группы друзей они могут отличаться.\n\nВнутри одной группы тоже можно переключаться между профилями под ситуацию. При этом её настройки сохранятся — заново подключать функции не придётся.\n\nМожешь сначала посмотреть, что я умею, или добавить меня в первую группу. Дальше помогу настроить её здесь, в личном чате.',
+    '**Ти створив мій перший профіль 👋**\n\nПрофіль — це моє ім’я, характер і мова, які ти щойно вибрав. Наприклад, для робочого чату можна створити серйозний профіль, а для друзів — більш товариський, із гумором. Один профіль можна використовувати в кількох групах.\n\nЯ маю різні функції: відповідаю на запитання, розумію голосові, завантажую публікації за посиланнями й збираю компанію для ігор. Для кожної групи ти вибираєш потрібні можливості — робочому чату й друзям можуть знадобитися різні.\n\nУ межах однієї групи теж можна перемикати профілі за ситуацією. Її налаштування збережуться — повторно підключати функції не доведеться.\n\nМожеш переглянути мої можливості або додати мене до першої групи. Допоможу налаштувати її тут, у приватному чаті.');
 }
 export function catalogue(locale, getMode = () => undefined) {
-  const lines = setupSections.map(([, title, ids]) => [say(locale, ...title), ...ids.map(id => {
-    const mode = getMode(id) ?? (['assemble','reaction','sticker','moderation'].includes(id) ? 'setup' : id === 'minigames' ? 'off' : 'on');
-    return featureName(id, locale) + ' — ' + modeLabel(mode, locale) + '\n' + say(locale, ...help[id][0]);
+  const lines = setupSections.map(([, title, ids]) => [`**${say(locale, ...title)}**`, ...ids.map(id => {
+    const unavailable = getMode(id) === 'unavailable';
+    const suffix = unavailable ? ' · ' + modeLabel('unavailable', locale) : id === 'minigames' ? ' · ' + say(locale, 'separate connection', 'отдельное подключение', 'окреме підключення') : '';
+    return `• **${featureName(id, locale)}.** ` + say(locale, ...help[id][0]) + suffix;
   })].join('\n\n'));
-  return [say(locale, 'Available features', 'Возможности', 'Можливості'), introduction(locale), featureName('profile', locale) + ' — ' + modeLabel('on', locale) + '\n' + say(locale, ...help.profile[0]), ...lines].join('\n\n');
+  return [say(locale, '**Here’s how I can help**', '**Вот чем я могу помочь**', '**Ось чим я можу допомогти**'), ...lines,
+    say(locale, 'Ask me about any feature. We will enable and configure features after connecting a group.',
+      'Можешь спросить подробнее о любой функции. Включать и настраивать их будем после подключения группы.',
+      'Можеш запитати докладніше про будь-яку функцію. Вмикати й налаштовувати їх будемо після підключення групи.')].join('\n\n');
 }

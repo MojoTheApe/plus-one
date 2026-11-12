@@ -11,14 +11,26 @@ mandatory order for a fresh installation; do not request every credential upfron
    Help the user authenticate privately. Run --ai-only without Telegram credentials;
    resolve AI errors before proceeding. Run --media-only to load the speech model
    and check tools, without starting a poller.
-3. Only after AI passes, guide creation in BotFather: allow groups (Group Joining),
-   disable Group Privacy, obtain the new bot token. Explain that the owner later
-   needs to make the bot an administrator in each group.
-4. Ask who owns this installation and obtain their numeric Telegram user ID.
-   A username alone cannot establish ownership. Keep token/keys/login private,
-   outside Git; never print them or reuse another installation's credentials.
-5. Run the Telegram/full non-polling check. Start only after Telegram, AI and owner
+3. Only after AI/media pass, send ONE complete Telegram instruction, in the
+   user's language: open https://t.me/BotFather, /newbot, choose name and unique
+   username ending in bot, copy the token; /setjoingroups -> select that bot ->
+   Enable; /setprivacy -> select the same bot -> Disable. Explain that this lets
+   it receive ordinary group messages/voices. From the future owner's account,
+   open https://t.me/userinfobot, press Start and copy the numeric account ID.
+   Explain that this is neither their @username nor the bot's ID. Ask for token,
+   owner ID and Ready together, or one OK after the two private input fields.
+   State the exact private input location for this installation. Do not split
+   this checklist into questions waiting for a reply after every setting.
+4. After that one confirmation, save token/owner ID privately and run the
+   Telegram/full non-polling check. A numeric ID is ownership configuration,
+   not proof of the human's identity. Correct only the reported failed item;
+   retain completed steps. Keep token/keys/login outside Git/logs, never echo
+   secrets or reuse another installation's credentials. Explain that the owner
+   later makes the bot administrator in each selected group.
+5. Start only after Telegram, AI and owner
    are configured. Give the private bot link and instruct the owner to press Start.
+   Confirm actual startup, then send one final message: the bot is configured and
+   running, open its personal link, press Start and create the first profile.
    The installation-agent stage ends here; personality/group setup happens in Telegram.
 
 Use a distinct instance directory and Compose project per bot. Never start two
