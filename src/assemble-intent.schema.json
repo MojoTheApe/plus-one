@@ -4,7 +4,7 @@
   "required": ["action", "game", "confident", "language"],
   "properties": {
     "action": { "type": "string", "enum": ["none", "call", "choose", "global"] },
-    "game": { "enum": [null, "fortnite", "rocket-league", "arc-riders", "helldivers-2"] },
+    "game": { "type": ["string", "null"] },
     "confident": { "type": "boolean" },
     "language": { "enum": ["ukrainian", "english", "mixed", "ambiguous", "russian"] }
   }

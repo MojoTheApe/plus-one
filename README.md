@@ -34,17 +34,21 @@ name stays private; the bot's name is its profile title. A short introduction of
 Add to group or a separate feature catalogue. Ask questions about any feature. One personality can be used in
 several groups. Add the bot to a group and make it an administrator. It privately
 asks which profile to use, then shows every group function's actual active/inactive
-state and any missing setup/connection. Choose a section or return later.
+state and any missing setup/connection. Choose a function directly or return later.
 
 Profiles contain personality only. Each group owns its functions, players, rules,
 pack, history and memory. Switching personality preserves those settings. Editing
 a shared profile previews affected groups and updates their linked personality.
 Feature edits require a joined group, assigned profile and required rights.
 
-Use `/setup` for My groups, Profiles, feature sections and cards. Choose with
-buttons or natural requests; supply custom lists/text/files in messages. Complex
-changes have a preview and confirmation. Drafts survive side conversation and
-restart. Disabling retains parameters; expired buttons cannot save old previews.
+Use `/setup` for My groups, Profiles and a flat list of group functions. Choose a
+function, then describe what you want in your own words; several details can be
+sent together, with files separately. The bot explains the feature and asks only
+what is missing. Simple switches apply immediately; complex changes have a
+private preview and Save. Ask questions without losing your draft, then continue
+or correct the same saved item. All features guards unsaved changes. Drafts
+survive side conversation and restart. Disabling retains parameters; expired
+buttons cannot save old previews. Duplicate group names get private menu labels.
 
 ## Included capabilities
 
@@ -59,12 +63,24 @@ permanent memory. Media analysis uses selected video frames and recognized speec
 Downloads support public Instagram, Threads and TikTok links subject to provider,
 file and quota limits. Previously saved disables remain off.
 
-Game calls need group-specific players; phrase rules need their exact phrase,
-action and access settings. Link an existing pack belonging to your bot for
-administrator sticker edits. Moderation needs group-specific permitted operators
-and restriction rights. Mini Apps start off and require
-[separate game connections](docs/runtime/MINI_APPS.md). A working AI connection or
-an enabled setting alone is not proof that every external service works.
+Create gatherings for any games your group plays: name the game, players,
+optional GIF/caption and command. For example, a Minecraft command called Crew
+can be launched with `/assemble Crew` or from the group's game picker. Optional
+launch phrases reference that same command; casual game discussion stays quiet.
+Phrase actions can also review disputes, send a prepared message/GIF or change
+profile, with explicit matching and actor permissions. Profile changes are
+owner-only. GIF files and eligible short MP4s are prepared as animations; failure
+retains the other draft values.
+
+Create a new sticker pack from a title, first image and emoji, or connect a pack
+editable by your bot. Administrators retain individual sticker controls.
+Moderation needs group-specific permitted operators and restriction rights.
+Mini Apps start off and need separate hosted services/public HTTPS addresses.
+Their card explains the steps and prepares a request for your installation agent;
+[technical game instructions](docs/runtime/MINI_APPS.md) are supplementary.
+Local diagnostics and an enabled setting do not establish actual AI login, speech
+model availability or a successful Telegram game launch. Each function has a
+concrete manual test for its current group and saved configuration.
 
 See [how the bot works](src/bot-guide.md) for capabilities, boundaries and setup
 logic. `/ping` checks availability and owner-only `/status` reports diagnostics.

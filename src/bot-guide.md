@@ -39,10 +39,11 @@ the catalogue is separate. Questions/help are available before adding a group. F
 requires a selected joined group, assigned profile and bot administrator rights.
 After joining, privately notify the owner with the actual group name and profile
 choices. If admin rights are missing, show the named-group Check rights action.
-After assignment show all group functions under five sections: state, optional
-mode and separate missing setup/connection/error. Already configured off remains
-off without a false setup requirement. Status is read-only available. Section
-buttons/Later lead onward. Failure to deliver
+After assignment show a flat list of14 group functions with direct buttons and
+their current state. Distinguish missing setup, unavailable connection and a known
+failed attempt. Already configured off remains off. Status is read-only available.
+Use group names; optional private menu labels distinguish duplicate names.
+Failure to deliver
 a notification does not erase the discovered group. /setup reopens settings.
 Only the configured installation owner may view or edit private configuration;
 being a Telegram group administrator does not grant installation ownership.
@@ -71,18 +72,30 @@ limits can prevent downloading. Previously saved disabled settings stay disabled
 
 ## Additional setup
 
-Game calls: choose a supported game, list its @usernames, optionally attach a GIF,
-review and save. Players are group-specific. Edit players/GIF separately. Calling
+Game calls: describe any game this group plays, @usernames, optional GIF and caption.
+Explicitly ask what to call its command unless the owner already supplied that
+name. There is no required preset game catalogue. Ask only missing details, offer
+optional launch phrases and actor/matching choices, then privately preview/save.
+Each group has its own commands and players. Corrections retain the same command
+identity; phrase actions reference it, never copy its payload. The picker, manual
+/assemble command and explicit bot requests use this record. Casual game names
+do not summon anyone without a saved enabled phrase rule. Calling
 everyone needs a complete verified member roster; the bot cannot enumerate all
 unseen existing members. A configuration preview must not summon anyone.
 
-Phrase rules: exact whole phrase, bounded action (judge, call, GIF, personality),
-parameters, permitted actor and optional announcement, then preview/save.
+Phrase actions: one or more alternative phrases, whole-message or contains-whole-
+words matching, a bounded action (judge, saved gathering, GIF, message, personality),
+permitted actor and optional announcement, then preview/save. Optional phrases
+added within gathering/judging setup appear in this same list. Disabled/deleted
+gatherings and disabled judging cannot execute dependent rules.
 Personality actions are owner-only. Quotes, forwards and code cannot trigger rules.
 
-Sticker packs: link an existing regular pack belonging to this bot; one active
-group per pack. Group administrators may add/remove individual stickers. No
-arbitrary pack creation or whole-pack deletion is promised.
+Sticker packs: connect an existing regular pack editable by this bot, or create
+one from a title, prepared first image and emoji after a private preview and
+explicit Create. Creation recovers the same journalled pack after interruption;
+never create duplicates or connect an unrelated set. One active group per pack.
+Group administrators may add/remove individual stickers; whole-pack deletion is
+not offered.
 
 Moderation: select permitted group administrators, review, then enable. The bot
 also needs permission to restrict members. Use /kick by reply or a known recent
@@ -91,16 +104,27 @@ status and action authorization are separate checks.
 
 Mini Apps (Duel, Flappy Bird, Occupiers) are off initially and require their own
 services, reachable public HTTPS addresses, BotFather registration and the chosen
-game's public IDs/room or record state. See docs/runtime/MINI_APPS.md for concrete
-per-game setup. A local page alone is insufficient for Telegram users. Never put
+game's public IDs/room or record state. Explain requirements inline to a
+nontechnical owner and give a copyable request to their installation agent, rather
+than requiring a technical document. Reuse suitable hosting/addresses and discuss
+costs before purchases. A local page alone is insufficient for Telegram users. Never put
 the bot token in a game client. Connecting a game does not automatically enable
 it in every group.
 
 ## Controls and limits
 
 Use buttons for navigation, switches and choices, and messages for user-supplied
-data/files. Scope every operation to its named group. Disabling retains saved
-parameters. Drafts support back/cancel and skipping optional inputs. Open menus
+data/files. Complex setup is a guided conversation, with multiple fields per
+message, out-of-order answers and natural corrections. Explain the feature first,
+ask only missing fields and return from help to the pending detail. Explain
+testing with actual saved group/command/phrase and expected effect. No action in
+the group runs from help or preview. GIF previews are real private sends; native
+animations reuse their ID, GIF documents/short videos are prepared/uploaded as
+animation. Failed files retain the draft and offer replacement/optional skip.
+Scope every operation to its named group. Disabling retains saved parameters.
+Direct All features opens an unsaved-change recovery prompt; explicit cancel
+discards only the draft. After save ask naturally if anything should change;
+corrections reopen the same item, and Done returns to the group overview. Open menus
 do not consume unrelated conversation. Stale buttons must not save old previews
 or act on a newly selected group. /ping checks availability; owner-only /status
 reports dependencies. An enabled preference is not a successful external test.

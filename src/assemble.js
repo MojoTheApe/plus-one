@@ -49,9 +49,10 @@ export function validateGames(games) {
   });
 }
 
-export function isAssembleCandidate(text, acceptRussian = false) {
+export function isAssembleCandidate(text, acceptRussian = false, games = []) {
   const value = normalize(text);
   if (!value || value.length > 4096 || value.split(/\s+/u).length > 700 || value.startsWith("/")) return false;
+  if (games.some(game => [game.name, game.commandName, ...(game.aliases ?? [])].filter(Boolean).some(name => value.includes(normalize(name))))) return true;
   const tokens = value.match(/[\p{L}\p{N}]+/gu) || [];
   if (acceptRussian && tokens.some(token => /^(?:собер[иём]|созов[иём]|играть|поигра\p{L}*)$/u.test(token))) return true;
   return tokens.some((t) => /^(?:fort\p{L}*|форт\p{L}*|rocket\p{L}*|рокет\p{L}*|ракет\p{L}*|rl|рл|fn|arc|ark|арк\p{L}*|арочк\p{L}*|raiders|riders|рейдер\p{L}*|райдер\p{L}*|helldiver\p{L}*|hell|хел+дайвер\p{L}*|дайвер\p{L}*|демократ\p{L}*|жук\p{L}*|жуків|жучк\p{L}*|hd|hd2|хв|хд|хд2|all|everyone|everybody|announcement\p{L}*|увага|всі|всіх|всім|всех|всем|усі|усіх|усім|оголошенн\p{L}*|объявлен\p{L}*|тег\p{L}*|пінг\p{L}*|зібр\p{L}*|збер\p{L}*)$/u.test(t)) ||
@@ -71,10 +72,10 @@ export function parseAssembleIntent(text, games, acceptRussian = false) {
 }
 
 export class AssembleRouter {
-  constructor({ games, classify, stateFile, sendCall, sendGlobal, sendMenu, sendNotice, answerCallback, clearMenu, canChoose, getContext = async () => ({}), now = Date.now, cooldownMs = 60000, acceptRussian = false, getGroupAssembly }) {
+  constructor({ games, classify, stateFile, sendCall, sendGlobal, sendMenu, sendNotice, answerCallback, clearMenu, canChoose, getContext = async () => ({}), now = Date.now, cooldownMs = 60000, acceptRussian = false, getGroupAssembly, chooseOnCommand = false }) {
     this.games = validateGames(games);
     if (typeof canChoose !== "function") throw new Error("Missing game-picker membership check");
-    Object.assign(this, { classify, stateFile, sendCall, sendGlobal, sendMenu, sendNotice, answerCallback, clearMenu, canChoose, getContext, now, cooldownMs, acceptRussian, getGroupAssembly });
+    Object.assign(this, { classify, stateFile, sendCall, sendGlobal, sendMenu, sendNotice, answerCallback, clearMenu, canChoose, getContext, now, cooldownMs, acceptRussian, getGroupAssembly, chooseOnCommand });
     this.state = null;
   }
 
@@ -112,7 +113,7 @@ export class AssembleRouter {
       return true;
     }
     const games = assembly?.games ?? [];
-    const gameOptions = this.getGroupAssembly ? { availableGames: games.map(({ id, name }) => ({ id, name })) } : {};
+    const gameOptions = this.getGroupAssembly ? { availableGames: games.map(({ id, name, commandName, aliases }) => ({ id, name, commandName, aliases })) } : {};
     let intent, menuToken = null;
     if (command) {
       if (command.name && command.name !== "assemble") return false;
@@ -121,12 +122,12 @@ export class AssembleRouter {
         return true;
       }
       const arg = normalize(command.args ?? command[1]);
-      const matches = game => [game.id, game.name, ...game.aliases].some(alias => normalize(alias) === arg);
+      const matches = game => [game.id, game.name, game.commandName, ...(game.aliases ?? [])].filter(Boolean).some(alias => normalize(alias) === arg);
       const game = games.find(matches);
       if (!arg) {
         // Removing a quoted game argument must never turn a longer message into a global call.
         if (normalize(text) !== normalize(value)) return false;
-        intent = { action: "global", game: null };
+        intent = { action: this.chooseOnCommand ? "choose" : "global", game: null };
       }
       else if (game) intent = { action: "call", game: game.id };
       else if (this.getGroupAssembly && this.games.some(matches)) {
@@ -137,7 +138,7 @@ export class AssembleRouter {
       if (!assembly) return false;
       // This broad, bounded prefilter only avoids classifying unrelated chat. AI decides intent.
       const otherMentions = (value.match(/@[A-Za-z0-9_]{5,32}/g) || []).filter((m) => m.slice(1).toLowerCase() !== username.toLowerCase());
-      if (otherMentions.length || !isAssembleCandidate(value, acceptRussian)) return false;
+      if (otherMentions.length || !isAssembleCandidate(value, acceptRussian, games)) return false;
       const reply = (message.reply_to_message?.text || message.reply_to_message?.caption || "").slice(0, 400);
       const ownMention = new RegExp("@" + username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "ig");
       const context = await this.getContext(message);
@@ -146,7 +147,7 @@ export class AssembleRouter {
       const menu = Object.entries(this.state.menus).find(([, item]) => item.chatId === message.chat.id &&
         item.threadId === assembleForumThread(message) && item.expiresAt > this.now() &&
         (references.has(item.menuMessageId) || references.has(item.messageId)));
-      const selectedGame = menu && games.find(game => [game.id, game.name, ...game.aliases].some(alias => normalize(alias) === normalize(value)));
+      const selectedGame = menu && games.find(game => [game.id, game.name, game.commandName, ...(game.aliases ?? [])].filter(Boolean).some(alias => normalize(alias) === normalize(value)));
       if (selectedGame && await this.canChoose(message.chat.id, message.from.id)) {
         menuToken = menu[0];
         intent = { action: "call", game: selectedGame.id };
@@ -205,13 +206,13 @@ export class AssembleRouter {
   async handleCallback(query) {
     if (!String(query.data || "").startsWith("assemble:")) return false;
     if (!query.from || query.from.is_bot) return true;
-    const match = /^assemble:([a-f0-9]{24}):(fortnite|rocket-league|arc-riders|helldivers-2)$/.exec(query.data);
+    const match = /^assemble:([a-f0-9]{24}):([A-Za-z0-9_-]{1,24})$/.exec(query.data);
     await this.load();
     const menu = match && this.state.menus[match[1]];
     const forum = Boolean(query.message?.chat?.is_forum || query.message?.is_topic_message);
     const correctMessage = menu && (menu.menuMessageId ? query.message?.message_id === menu.menuMessageId : query.message?.reply_to_message?.message_id === menu.messageId);
     if (!menu || menu.expiresAt <= this.now() || menu.chatId !== query.message?.chat?.id || !correctMessage || (forum && (menu.threadId || null) !== assembleForumThread(query.message))) {
-      await this.answerCallback(query.id, "Цей вибір уже неактивний. Напиши /assemble fort, rocket, arc або hd.");
+      await this.answerCallback(query.id, "Цей вибір уже неактивний. Відкрий новий список: /assemble.");
       return true;
     }
     if (!this.assemblyForChat(menu.chatId)?.games.some(game => game.id === match[2])) {

@@ -43,6 +43,19 @@ test("four validated rosters retain 12/12/6/11 players and deduplicate case-inse
   assert.throws(() => validateGames(invalid));
 });
 
+test('managed arbitrary game commands, aliases and picker use the current saved payload',async t=>{
+  const f=await fixture(t),custom={id:'g_custom',name:'Minecraft',commandName:'Crew',aliases:['blocks'],players:['player_one'],caption:'Build together',animationReference:'prepared-gif'};
+  const group={games:[custom]},router=new AssembleRouter({...f.options,getGroupAssembly:()=>group,chooseOnCommand:true});
+  await router.handleMessage(message('/assemble'),'FixtureBot','/assemble');assert.equal(f.calls.length,0);assert.equal(f.menus[0].choices[0].commandName,'Crew');
+  const token=f.menus[0].token;await router.handleCallback({id:'custom',from:{id:456},data:'assemble:'+token+':g_custom',message:{chat:{id:-100,type:'supergroup',is_forum:true},message_id:789,message_thread_id:99}});
+  assert.deepEqual(f.calls,['g_custom']);f.advance(61000);
+  custom.commandName='Builders';custom.players=['player_two'];
+  let sent;router.sendCall=async(_m,game)=>{sent=structuredClone(game);};
+  await router.handleMessage(message('/assemble Builders'),'FixtureBot','/assemble Builders');assert.equal(sent.commandName,'Builders');assert.deepEqual(sent.players,['player_two']);assert.equal(sent.caption,'Build together');
+  f.advance(61000);await router.handleMessage(message('/assemble blocks'),'FixtureBot','/assemble blocks');assert.equal(sent.animationReference,'prepared-gif');
+  group.games=[];f.advance(61000);sent=null;await router.call(message('go'),'g_custom');assert.equal(sent,null);
+});
+
 test('replay: HD selects an existing game menu through its original invitation, once', async t => {
   const f=await fixture(t,verdict('choose',null));
   await f.router.handleMessage(message('Будем во что катать?'),'MyBot','Будем во что катать?');

@@ -30,8 +30,8 @@ export function historyPage(items,{cursor=0,limit=100,maxChars=24000}={}){
   for(;index<items.length&&page.length<cap;index++){const i={...items[index],text:items[index].text.slice(0,5000)};const len=JSON.stringify(i).length;if(page.length&&used+len>maxChars)break;page.push(i);used+=len;}
   return {items:page,total:items.length,nextCursor:index<items.length?index:null,truncatedMessages:page.filter(i=>i.text.length===5000).length};
 }
-export function responseDecision(raw,{mustReply=true}={}){
-  return deliveryDecision(raw,{mustReply});
+export function responseDecision(raw,{mustReply=true,assemblyGames}={}){
+  return deliveryDecision(raw,{mustReply,assemblyGames});
 }
 export function dialoguePolicy(options={}){return deliveryContract(options);}
 export {replyChain,scopedItems};
