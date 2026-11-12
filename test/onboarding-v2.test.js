@@ -210,6 +210,29 @@ test('group observations cannot edit an unrelated callback message while access 
   assert.match(f.panel().text, /Beta/);
 });
 
+test('same-title group notifications disambiguate identity in connection and admin recovery', async t => {
+  const f = await fixture(t); f.seed();
+  f.store.change(s => {
+    for (const id of ['-300', '-400']) s.groups[id] = { title: 'Friends', active: true, configured: false, awaitingProfile: true };
+    s.session = { kind: 'persona', name: 'OtherDraft', locale: 'en' };
+  });
+  f.setAdmin(false);
+  const update = (id, oldStatus, status) => ({ my_chat_member: { chat: { id, title: 'Friends', type: 'supergroup' }, old_chat_member: { status: oldStatus }, new_chat_member: { status } } });
+  await f.setup.observe(update(-300, 'left', 'member'), bot);
+  assert.match(f.panel().text, /Friends \(-300\)/);
+  const first = f.panel();
+  await f.setup.observe(update(-400, 'left', 'member'), bot);
+  assert.match(f.panel().text, /Friends \(-400\)/);
+  f.setAdmin(true); await f.click('Check rights', first);
+  assert.match(f.panel().text, /Friends \(-300\)[\s\S]*connected/);
+  await f.click('Use Marina');
+  assert.equal(f.store.group('-300').profile, 'base');
+  assert.equal(f.store.group('-400').profile, undefined);
+  assert.equal(f.store.state.session.resume.name, 'OtherDraft');
+  await f.setup.observe(update(-400, 'member', 'administrator'), bot);
+  assert.match(f.panel().text, /Friends \(-400\)[\s\S]*connected/);
+});
+
 test('failed promotion notices are throttled and a group-bound user retry recovers them', async t => {
   const f = await fixture(t); f.seed(); f.setAdmin(false);
   const update = (oldStatus, status) => ({ my_chat_member: { chat: { id: -400, title: 'Beta', type: 'supergroup' }, old_chat_member: { status: oldStatus }, new_chat_member: { status } } });
@@ -245,4 +268,44 @@ test('overview separates configured-off, missing data, unavailable connections a
   assert.ok(text.includes('**Unsafe** &lt;b&gt;group&lt;/b&gt;'));
   assert.ok(!text.includes('<b>Unsafe</b>'));
   assert.equal(f.panel().reply_markup.inline_keyboard.flat().at(-1).text, 'Later');
+});
+
+test('inactive game and phrase children have an actionable path without overriding individual disables', async t => {
+  for (const feature of ['assemble', 'reaction']) for (const globallyDisabled of [false, true]) await t.test(`${feature}, global disabled=${globallyDisabled}`, async t => {
+    const f = await fixture(t); f.seed();
+    f.store.change(s => {
+      s.groups['-300'] = { title: 'Friends', active: true, configured: false };
+      assignGroupProfile(s, '-300', 'base', 'fixture');
+      s.groups['-300'].disabled = { [feature]: globallyDisabled };
+      if (feature === 'assemble') s.groups['-300'].assemble = { games: [{ id: 'fixture', name: 'Fixture game', players: ['alex'], enabled: false }] };
+      else s.groups['-300'].rules = [{ id: 'fixture', phrase: 'Fixture phrase', action: { type: 'judge' }, announcement: '<b>literal</b> [link](https://example.com)', enabled: false }];
+    });
+    await f.dm('/setup'); await f.click('My groups'); await f.click('-300');
+    await f.click(feature === 'assemble' ? 'Games' : 'Reactions and stickers');
+    await f.click(feature === 'assemble' ? 'Game calls' : 'Phrase reactions');
+    const child = () => feature === 'assemble' ? f.store.group('-300').assemble.games[0] : f.store.group('-300').rules[0];
+    assert.match(f.panel().text, /State: off/);
+    if (globallyDisabled) {
+      await f.click('Enable');
+      assert.equal(f.store.group('-300').disabled[feature], false);
+      assert.equal(child().enabled, false, 'global switch preserves individual disables');
+    }
+    assert.match(f.panel().text, feature === 'assemble' ? /Choose a game below/ : /Choose a phrase below/);
+    assert.ok(!f.panel().reply_markup.inline_keyboard.flat().some(b => b.text === 'Enable'), 'no ineffective aggregate Enable');
+    await f.click(feature === 'assemble' ? 'Fixture game' : 'Fixture phrase');
+    if (feature === 'reaction') {
+      assert.match(f.panel().text, /&lt;b&gt;literal&lt;\/b&gt;/);
+      assert.ok(!f.panel().text.includes('<a href='));
+    }
+    await f.click(feature === 'assemble' ? 'Enable call' : 'Enable rule');
+    assert.equal(child().enabled, true);
+    if (feature === 'reaction') await f.click('Back');
+    assert.match(f.panel().text, /State: on/);
+    await f.click('Disable');
+    assert.equal(f.store.group('-300').disabled[feature], true);
+    assert.equal(child().enabled, true, 'global disable preserves individual enables');
+    await f.click('Enable');
+    assert.equal(f.store.group('-300').disabled[feature], false);
+    assert.match(f.panel().text, /State: on/);
+  });
 });

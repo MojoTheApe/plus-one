@@ -425,7 +425,8 @@ export function createSetup({ store, games, telegram, featureMode, classifyTurn,
   async function sendPanel(text, rows, { group, draft = false } = {}) {
     const target = store.group(group);
     const heading = target ? `${literal(target.title)} (${group})` : "";
-    if (heading && !text.includes(heading) && !text.includes(literal(target.title))) text = heading + "\n\n" + text;
+    const duplicateTitle = target && groupEntries().some(([id, item]) => id !== String(group) && normalize(item.title) === normalize(target.title));
+    if (heading && !text.includes(heading) && (!text.includes(literal(target.title)) || duplicateTitle && !text.includes(`(${group})`))) text = heading + "\n\n" + text;
     const markup = controls.markup(rows, { group, draft });
     // Edit only a confirmed callback's original private message. Notifications
     // and ordinary setup replies always create their own message.
@@ -1187,9 +1188,17 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
     const settings = store.group(group);
     const rows = [];
     const mode = group ? nativeMode(group, feature) : "setup";
+    const childActivationNeeded = mode === "off" && !settings?.disabled?.[feature] && ["assemble", "reaction"].includes(feature);
+    if (childActivationNeeded) notice = [notice, feature === "assemble" ? say(locale,
+      "Choose a game below, add players and enable its call.",
+      "Выбери игру ниже, добавь игроков и включи сбор для неё.",
+      "Вибери гру нижче, додай гравців і ввімкни збір для неї.") : say(locale,
+      "Choose a phrase below and enable its rule.",
+      "Выбери фразу ниже и включи её правило.",
+      "Вибери фразу нижче й увімкни її правило.")].filter(Boolean).join("\n\n");
     if (group && settings?.configured && editableGroupFeature(feature)) {
       if (mode !== "unavailable") {
-        if (mode !== "setup") rows.push([button(mode === "off" ? say(locale, "Enable", "Включить", "Увімкнути") : say(locale, "Disable", "Выключить", "Вимкнути"), "toggle", { feature })]);
+        if (mode !== "setup" && !childActivationNeeded) rows.push([button(mode === "off" ? say(locale, "Enable", "Включить", "Увімкнути") : say(locale, "Disable", "Выключить", "Вимкнути"), "toggle", { feature })]);
         if (feature === "memory") rows.push([button(say(locale, "Change mode", "Изменить режим", "Змінити режим"), "configure", { feature })]);
         if (!modeFeatures.includes(feature)) rows.push([button(say(locale, "Configure", "Настроить", "Налаштувати"), "configure", { feature })]);
       }
@@ -1344,7 +1353,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
             if (feature === "memory" && mode !== "off") target.lastMemoryMode = mode;
           } else {
             target.disabled ??= {};
-            target.disabled[feature] = mode !== "off";
+            target.disabled[feature] = !target.disabled[feature];
           }
         });
         return showFeature(group, feature, bot, locale);
@@ -1384,7 +1393,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
           [button(say(locale, "Delete game settings", "Удалить настройку игры", "Видалити налаштування гри"), "deleteGame", { game: game.id })],
           [button(say(locale, "Preview", "Предпросмотр", "Попередній перегляд"), "game", { game: game.id })],
           [button(say(locale, "Back", "Назад", "Назад"), "feature", { feature: "assemble" })]];
-        return sendPanel(`${literal(store.group(group).title)} (${group})\n\n${game.name}\n${game.players.map(name => "@" + name).join(", ")}`, rows, { group });
+        return sendPanel(`${literal(store.group(group).title)} (${group})\n\n${literal(game.name)}\n${game.players.map(name => "@" + name).join(", ")}`, rows, { group });
       }
       case "gameField": {
         if (!await allowedGroup(group, bot, true)) return sendPanel(configurationPrompt(locale), rootRows(bot, locale));
@@ -1402,7 +1411,7 @@ ${featureName(draft.feature, locale)} — ${modeLabel(draft.mode, locale)}. ` +
         if (!rule) return;
         const label = rule.action.type === "animation" ? "GIF" : rule.action.type === "persona" ? featureName("profile", locale) : featureName(rule.action.type, locale);
         return sendPanel(`${literal(store.group(group).title)} (${group})\n\n${literal(rule.phrase)} → ${label}\n` +
-          modeLabel(rule.enabled === false ? "off" : "on", locale) + "\n" + (rule.announcement || ""), [
+          modeLabel(rule.enabled === false ? "off" : "on", locale) + "\n" + literal(rule.announcement || ""), [
           [button(say(locale, "Change action", "Изменить действие", "Змінити дію"), "ruleField", { rule: rule.id, field: "action" })],
           ...(rule.action.type === "persona" ? [] : [[button(say(locale, "Change access", "Изменить доступ", "Змінити доступ"), "ruleField", { rule: rule.id, field: "access" })]]),
           [button(say(locale, "Change announcement", "Изменить объявление", "Змінити оголошення"), "ruleField", { rule: rule.id, field: "announcement" })],
