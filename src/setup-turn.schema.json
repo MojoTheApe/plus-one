@@ -1,10 +1,320 @@
 {
   "type": "object",
   "properties": {
-    "intent": { "type": "string", "enum": ["answer", "conversation", "resume", "setup"] },
-    "ownerName": { "type": ["string", "null"] },
-    "botName": { "type": ["string", "null"] }
+    "intent": {
+      "type": "string",
+      "enum": [
+        "answer",
+        "conversation",
+        "resume",
+        "setup"
+      ]
+    },
+    "ownerName": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "botName": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "feature": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        null,
+        "chat",
+        "search",
+        "judge",
+        "history",
+        "memory",
+        "voice",
+        "analysis",
+        "download",
+        "assemble",
+        "minigames",
+        "reaction",
+        "sticker",
+        "moderation",
+        "status"
+      ]
+    },
+    "fields": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "gameName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commandName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "caption": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "announcement": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "packTitle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "packName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "emoji": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "groupLabel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messageText": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "aliases": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "phrases": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "players": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "addPlayers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "removePlayers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "operatorIds": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer"
+          }
+        },
+        "skipAnimation": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "skipCaption": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "skipPhrases": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "judge",
+            "assemble",
+            "animation",
+            "message",
+            "persona"
+          ]
+        },
+        "access": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "owner",
+            "members"
+          ]
+        },
+        "match": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "exact",
+            "contains"
+          ]
+        },
+        "field": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "gameName",
+            "commandName",
+            "caption",
+            "announcement",
+            "packTitle",
+            "packName",
+            "emoji",
+            "target",
+            "groupLabel",
+            "messageText",
+            "aliases",
+            "phrases",
+            "players",
+            "operatorIds",
+            "animation",
+            "access",
+            "match",
+            "firstSticker",
+            "stickerMode"
+          ]
+        },
+        "skipAnnouncement": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "stickerMode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "new",
+            "existing"
+          ]
+        },
+        "groupName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skipAliases": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "gameName",
+        "commandName",
+        "caption",
+        "announcement",
+        "packTitle",
+        "packName",
+        "emoji",
+        "target",
+        "groupLabel",
+        "messageText",
+        "aliases",
+        "phrases",
+        "players",
+        "addPlayers",
+        "removePlayers",
+        "operatorIds",
+        "skipAnimation",
+        "skipCaption",
+        "skipPhrases",
+        "action",
+        "access",
+        "match",
+        "field",
+        "skipAnnouncement",
+        "stickerMode",
+        "groupName",
+        "skipAliases"
+      ],
+      "additionalProperties": false
+    }
   },
-  "required": ["intent", "ownerName", "botName"],
+  "required": [
+    "intent",
+    "ownerName",
+    "botName",
+    "feature",
+    "fields"
+  ],
   "additionalProperties": false
 }

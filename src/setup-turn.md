@@ -22,3 +22,24 @@ name, use account metadata, or treat greetings/yes/no/unrelated statements as
 names. A message may supply only one requested name; retain it without guessing
 the other. When names is absent, or intent is not answer, return null for both.
 These fields do not establish ownership or apply settings.
+
+For kind feature or feature-menu, return feature only for a feature explicitly
+requested. Questions asking what a setting means, what is required, how to check
+it, or why it failed are conversation: do not extract values from them.
+For answers/corrections return fields with only the explicitly provided details:
+gameName, commandName (ask the owner; never guess from the game name), aliases,
+players (literal @usernames without @), addPlayers/removePlayers for corrections,
+caption (gathering text), phrases (alternative launch phrases), action
+(assemble/judge/animation/message/persona), target (literal saved command/profile
+name, never an ID), access (owner/members), match (exact/contains), messageText,
+announcement, stickerMode (new/existing), packTitle/packName/emoji, operatorIds or groupLabel. groupName is only an explicitly requested target group; never infer it from a game or a casual mention. Ambiguous/unknown group names remain literal for an application-owned choice. Use field when
+the owner asks to change that field without supplying its new value. Multiple
+details may be supplied in one message and in any order. Keep their literal
+spellings; never generate text, names, usernames, URLs or IDs. Null means omitted.
+skipAnimation/skipCaption/skipPhrases/skipAliases/skipAnnouncement may be true only for an explicit request to
+omit that optional input. The same words in a question are not a skip request.
+Ask no questions and claim no changes here; application code guides and validates.
+When feature fields are irrelevant or intent is resume, fields is null. A
+conversation may return only groupName when it asks about another explicit group;
+all setting fields remain null. For feature-menu, a request to change the selected saved item is setup;
+casual mentions, unrelated commands and use-now requests are conversation.

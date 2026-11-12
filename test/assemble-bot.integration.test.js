@@ -317,7 +317,7 @@ test("group game menus and AI actions only use games enabled in the current chat
     [{ id: "fortnite", name: "Fortnite" }, { id: "rocket-league", name: "Rocket League" }],
     [{ id: "fortnite", name: "Fortnite" }, { id: "arc-riders", name: "Arc Riders" }],
   ];
-  assert.deepEqual(f.prompts.map(prompt => JSON.parse(prompt.slice(prompt.indexOf("\n") + 1)).availableGames), choices);
+  assert.deepEqual(f.prompts.map(prompt => JSON.parse(prompt.slice(prompt.indexOf("\n") + 1)).availableGames.map(({id,name})=>({id,name}))), choices);
   const [alphaMenu, betaMenu] = f.calls.filter(call => call.payload.reply_markup?.inline_keyboard?.[0]?.length).map(call => call.payload.reply_markup.inline_keyboard[0]);
   assert.deepEqual(alphaMenu.map(button => button.text), ["Fortnite", "Rocket League"]);
   assert.deepEqual(betaMenu.map(button => button.text), ["Fortnite", "Arc Riders"]);
@@ -344,9 +344,7 @@ test("group game menus and AI actions only use games enabled in the current chat
       chat, reply_to_message: { message_id: 99, from: f.users.get(77), text: "Fortnite, Helldivers" },
     });
   }
-  assert.deepEqual(f.answerPrompts.map(prompt => JSON.parse(prompt.match(/Games enabled in this chat: (\[.*?\])\./)[1])), choices);
+  assert.deepEqual(f.answerPrompts.map(prompt => JSON.parse(prompt.match(/Games enabled in this chat: (\[.*?\])\./)[1]).map(({id,name})=>({id,name}))), choices.flatMap(choice=>[choice,choice]));
   const calls = f.calls.filter(call => call.method === "sendAnimation");
-  assert.deepEqual(calls.map(({ payload }) => [Number(payload.chat_id), payload.caption.match(/@\w+/g)]), [
-    [groupA.id, ["@AlphaPlayer"]], [groupB.id, ["@BetaPlayer"]],
-  ]);
+  assert.deepEqual(calls,[], 'an out-of-scope game invalidates the whole AI action');
 });

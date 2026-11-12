@@ -83,7 +83,7 @@ test('native group navigation toggles immediately, retains values, checks owner 
   const f = await fixture(t); f.seed();
   f.store.change(state => assignGroupProfile(state, '-300', 'base', 'first'));
   await f.dm('/setup');
-  await f.click('My groups'); await f.click('Alpha'); await f.click('Voice and media'); await f.click('Media downloads');
+  await f.click('My groups'); await f.click('Alpha'); await f.click('Media downloads');
   const oldCard = structuredClone(f.calls.filter(call => call.payload.reply_markup).at(-1).payload);
   await f.click('Disable', 202);
   assert.equal(f.store.group('-300').modes.download, 'on');
@@ -102,7 +102,7 @@ test('native group navigation toggles immediately, retains values, checks owner 
 test('feature writes recheck bot administrator rights without mutating settings', async t => {
   const f = await fixture(t); f.seed();
   f.store.change(state => assignGroupProfile(state, '-300', 'base', 'first'));
-  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Voice and media'); await f.click('Media downloads');
+  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Media downloads');
   f.setAdmin(false);
   await f.click('Disable');
   assert.equal(f.store.group('-300').modes.download, 'on');
@@ -150,10 +150,10 @@ test('stale save cannot become valid again after pausing and resuming the same d
 test('moderation picks real administrators and saves a group-specific allowlist only on confirmation', async t => {
   const f = await fixture(t); f.seed();
   f.store.change(state => assignGroupProfile(state, '-300', 'base', 'first'));
-  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Management'); await f.click('Moderation');
-  await f.click('Configure'); await f.click('Owner');
+  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Moderation');
+  await f.click('Add or configure'); await f.click('Owner');
   assert.equal(f.store.group('-300').moderation, undefined);
-  await f.click('Save and enable');
+  await f.click('Save');
   assert.deepEqual(f.store.group('-300').moderation, { userIds: [101] });
   assert.equal(f.store.group('-400').moderation, undefined);
 });
@@ -177,28 +177,24 @@ test('reenabling moderation verifies current restriction rights and administrato
     state.groups['-300'].moderation = { userIds: [101] };
     state.groups['-300'].disabled = { moderation: true };
   });
-  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Management'); await f.click('Moderation');
+  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Moderation');
   f.setRestrict(false); await f.click('Enable');
   assert.equal(f.store.group('-300').disabled.moderation, true);
-  assert.match(f.calls.at(-1).payload.text, /restriction permission/);
+  assert.match(f.calls.at(-1).payload.text, /restriction permissions/);
   f.setRestrict(true); f.setOperatorAdmin(false); await f.click('Enable');
   assert.equal(f.store.group('-300').disabled.moderation, true);
   f.setOperatorAdmin(true); await f.click('Enable');
   assert.equal(f.store.group('-300').disabled.moderation, false);
 });
 
-test('group home distinguishes missing configuration and mode Off uses an honest Save control', async t => {
-  const f = await fixture(t); f.seed();
-  f.store.change(state => assignGroupProfile(state, '-300', 'base', 'first'));
-  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha');
-  assert.match(f.calls.at(-1).payload.text, /Game calls — <b>inactive · set up first/);
-  assert.match(f.calls.at(-1).payload.text, /Moderation — <b>inactive · set up first/);
-  await f.click('Conversation and memory'); await f.click('Memory'); await f.click('Change mode'); await f.click('Off');
-  const labels = f.calls.at(-1).payload.reply_markup.inline_keyboard.flat().map(button => button.text);
-  assert.ok(labels.includes('Save'));
-  assert.ok(!labels.includes('Save and enable'));
-  await f.click('Save');
-  assert.equal(f.store.group('-300').modes.memory, 'off');
+test('group home shows direct states and memory modes apply immediately', async t => {
+  const f=await fixture(t);f.seed();f.store.change(s=>assignGroupProfile(s,'-300','base','first'));
+  await f.dm('/setup');await f.click('My groups');await f.click('Alpha');
+  const keys=f.calls.at(-1).payload.reply_markup.inline_keyboard.flat();
+  assert.ok(keys.some(x=>x.text==='Game calls · set up first'));
+  assert.ok(keys.some(x=>x.text==='Moderation · set up first'));
+  await f.click('Memory');await f.click('Off');assert.equal(f.store.group('-300').modes.memory,'off');
+  assert.ok(!f.calls.at(-1).payload.reply_markup.inline_keyboard.flat().some(x=>x.text==='Save'));
 });
 
 test('parameter-only game editing preserves both feature and individual disables', async t => {
@@ -208,8 +204,8 @@ test('parameter-only game editing preserves both feature and individual disables
     state.groups['-300'].assemble = { games: [{ id: 'fortnite', name: 'Fortnite', players: ['Old'], enabled: false }] };
     state.groups['-300'].disabled = { assemble: true };
   });
-  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Games'); await f.click('Game calls'); await f.click('Fortnite');
-  await f.click('Edit players'); await f.dm('@NewPlayer'); await f.click('Save');
+  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Game calls'); await f.click('Fortnite');
+  await f.click('Edit'); await f.dm('show fields'); await f.click('players'); await f.dm('@NewPlayer'); await f.click('Save');
   assert.equal(f.store.group('-300').disabled.assemble, true);
   assert.equal(f.store.group('-300').assemble.games[0].enabled, false);
   assert.deepEqual(f.store.group('-300').assemble.games[0].players, ['NewPlayer']);
@@ -221,40 +217,31 @@ test('editing players preserves an existing animation and disabling a game retai
     assignGroupProfile(state, '-300', 'base', 'first');
     state.groups['-300'].assemble = { games: [{ id: 'fortnite', name: 'Fortnite', aliases: ['fort'], players: ['OldPlayer'], animationReference: 'saved-gif' }] };
   });
-  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Games'); await f.click('Game calls'); await f.click('Fortnite');
-  await f.click('Edit players'); await f.dm('@NewPlayer'); await f.click('Save');
+  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Game calls'); await f.click('Fortnite');
+  await f.click('Edit'); await f.dm('show fields'); await f.click('players'); await f.dm('@NewPlayer'); await f.click('Save');
   assert.deepEqual(f.store.group('-300').assemble.games[0].players, ['NewPlayer']);
   assert.equal(f.store.group('-300').assemble.games[0].animationReference, 'saved-gif');
-  await f.click('Games'); await f.click('Game calls'); await f.click('Fortnite'); await f.click('Disable call');
+  await f.click('Disable gathering');
   assert.equal(f.store.group('-300').assemble.games[0].enabled, false);
   assert.deepEqual(f.store.group('-300').assemble.games[0].players, ['NewPlayer']);
-  assert.ok(!f.calls.some(call => call.method === 'sendAnimation'), 'configuration never summons anyone');
+  assert.ok(f.calls.filter(call=>call.method==='sendAnimation').every(call=>call.payload.chat_id===101),'media previews stay private');
 });
 
-test('long same-title groups keep distinct visible IDs in buttons', async t => {
-  const f = await fixture(t); f.seed();
-  f.store.change(state => { for (const group of Object.values(state.groups)) group.title = 'A'.repeat(200); });
-  await f.dm('/setup'); await f.click('My groups');
-  const keys = f.calls.at(-1).payload.reply_markup.inline_keyboard.flat();
-  assert.ok(keys.some(key => key.text.startsWith('-300')));
-  assert.ok(keys.some(key => key.text.startsWith('-400')));
+test('long duplicate group names receive distinct private menu labels without exposing IDs',async t=>{
+ const f=await fixture(t);f.seed();f.store.change(s=>{for(const g of Object.values(s.groups))g.title='A'.repeat(200);});
+ await f.dm('/setup');await f.click('My groups');const keys=f.calls.at(-1).payload.reply_markup.inline_keyboard.flat();
+ assert.ok(keys.some(x=>x.text.startsWith('1. ')));assert.ok(keys.some(x=>x.text.startsWith('2. ')));
+ assert.ok(keys.every(x=>!/-300|-400/.test(x.text)));
+ assert.notEqual(f.store.group('-300').menuLabel,f.store.group('-400').menuLabel);
 });
 
-test('Back during a single-field edit restores the requested field without deleting an existing GIF', async t => {
-  const f = await fixture(t); f.seed();
-  f.store.change(state => {
-    assignGroupProfile(state, '-300', 'base', 'first');
-    state.groups['-300'].assemble = { games: [{ id: 'fortnite', name: 'Fortnite', aliases: ['fort'], players: ['OldPlayer'], animationReference: 'old-gif' }] };
-  });
-  await f.dm('/setup'); await f.click('My groups'); await f.click('Alpha'); await f.click('Games'); await f.click('Game calls'); await f.click('Fortnite');
-  await f.click('Edit players'); await f.click('Back');
-  assert.equal(f.store.group('-300').assemble.games[0].animationReference, 'old-gif');
-  await f.click('Edit players'); await f.dm('@NewPlayer'); await f.click('Back');
-  assert.equal(f.store.state.session.players, undefined);
-  assert.equal(f.store.state.session.animation, 'old-gif');
-  assert.match(f.calls.at(-1).payload.text, /Alpha.*\(-300\)[\s\S]*Who plays/);
-  await f.dm('@NewPlayer'); await f.click('Save');
-  assert.equal(f.store.group('-300').assemble.games[0].animationReference, 'old-gif');
+test('direct return guards a single-field edit and preserves its saved GIF after restart',async t=>{
+ const f=await fixture(t);f.seed();f.store.change(s=>{assignGroupProfile(s,'-300','base','first');s.groups['-300'].assemble={games:[{id:'fortnite',name:'Fortnite',aliases:['fort'],players:['OldPlayer'],animationReference:'old-gif'}]};});
+ await f.dm('/setup');await f.click('My groups');await f.click('Alpha');await f.click('Game calls');await f.click('Fortnite');
+ await f.click('Edit');await f.dm('show fields');await f.click('players');await f.dm('@NewPlayer');await f.click('All features');
+ assert.equal(f.store.group('-300').assemble.games[0].animationReference,'old-gif');assert.deepEqual(f.store.group('-300').assemble.games[0].players,['OldPlayer']);
+ await f.restart();await f.click('Continue editing');await f.click('Save');
+ assert.equal(f.store.group('-300').assemble.games[0].animationReference,'old-gif');assert.deepEqual(f.store.group('-300').assemble.games[0].players,['NewPlayer']);
 });
 
 test('default-linked groups are included in shared-profile preview and show the edited identity', async t => {

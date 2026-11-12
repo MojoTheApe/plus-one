@@ -84,10 +84,14 @@ export class MemberRoster {
 
 export function mentionChunks(title, users, limit = 950) {
   const chunks = [];
-  let text = title + "\n", entities = [];
+  let text = '', entities = [];
+  for (const char of String(title) + '\n') {
+    if (text.length + char.length > limit) { chunks.push({ text, entities: [] }); text = ''; }
+    text += char;
+  }
   for (const user of users) {
     const label = user.username ? "@" + user.username : [user.first_name, user.last_name].filter(Boolean).join(" ").replace(/[\r\n]+/g, " ").slice(0, 80) || "Учасник";
-    if (text.length + label.length + 1 > limit && entities.length) { chunks.push({ text: text.trimEnd(), entities }); text = ""; entities = []; }
+    if (text.length + label.length + 1 > limit && text) { chunks.push({ text: text.trimEnd(), entities }); text = ""; entities = []; }
     entities.push({ type: user.username ? "mention" : "text_mention", offset: text.length, length: label.length, ...(!user.username ? { user: { id: user.id, is_bot: false, first_name: user.first_name || "Учасник" } } : {}) });
     text += label + " ";
   }

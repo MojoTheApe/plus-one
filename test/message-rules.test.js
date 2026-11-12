@@ -31,7 +31,7 @@ test('rule configuration rejects ambiguous phrases and unsafe actions', () => {
   assert.throws(() => validateMessageRules([rule, { ...rule, id: 'other', phrase: 'night shift seven' }]), /duplicate/);
   for (const changes of [
     { access: 'members' }, { phrase: '...' }, { action: { type: 'shell', command: 'anything' } },
-    { action: { type: 'assemble', game: 'unknown' } }, { action: { type: 'animation' } },
+    { action: { type: 'assemble', game: '../../unknown' } }, { action: { type: 'animation' } },
     { phrase: '/start' }, { phrase: '"quoted trigger"' }, { phrase: 'line\n> quoted' },
     { createdAt: 'not a date' }, { enabled: 'false' },
   ]) assert.throws(() => validateMessageRules([{ ...rule, ...changes }]));

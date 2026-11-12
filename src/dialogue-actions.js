@@ -2,7 +2,7 @@
 export const gameIds = ["fortnite", "rocket-league", "arc-riders", "helldivers-2"];
 const actions = new Set(["download", "analyze", "assemble", "judge"]);
 
-export function deliveryDecision(raw, { mustReply = true } = {}) {
+export function deliveryDecision(raw, { mustReply = true, assemblyGames } = {}) {
   let value;
   try { value = JSON.parse(String(raw).replace(/^```(?:json)?\s*|\s*```$/g, "")); } catch {}
   if (value?.action === "ignore" && !mustReply) return { action: "ignore", text: "", language: value.language };
@@ -15,7 +15,8 @@ export function deliveryDecision(raw, { mustReply = true } = {}) {
   if (actions.has(value?.action)) {
     if (value.targetMessageId != null && (!Number.isSafeInteger(value.targetMessageId) || value.targetMessageId <= 0)) return { action: "empty", text: "" };
     const games = Array.isArray(value.gameIds) ? [...new Set(value.gameIds)] : [];
-    if (value.action === "assemble" && (!Array.isArray(value.gameIds) || !games.length || games.some(g => ![...gameIds, "global"].includes(g)) || (games.includes("global") && games.length !== 1))) return { action: "empty", text: "" };
+    const allowed = assemblyGames === undefined ? gameIds : (assemblyGames ?? []).map(game => game.id);
+    if (value.action === "assemble" && (!Array.isArray(value.gameIds) || !games.length || games.some(g => ![...allowed, "global"].includes(g)) || (games.includes("global") && games.length !== 1))) return { action: "empty", text: "" };
     return { action: value.action, language: value.language, languageRefusal: value.languageRefusal === true, targetMessageId: value.targetMessageId || null, judgeScope: value.judgeScope === "all" ? "all" : "single", gameIds: games, text: "" };
   }
   // Retain compatibility with non-JSON backends; malformed protocol is never an action.
