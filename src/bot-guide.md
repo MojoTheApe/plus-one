@@ -146,3 +146,17 @@ duplicate it. The user can check the chat and explicitly request another send.
 Prepared-file retries and partial albums use the existing operation/cache state.
 Some Threads pages omit post content from their server response; this restriction
 does not establish that the media format is unsupported or the post is private.
+
+Media delivery requires a matching platform object ID from native extractor,
+native-page or structured API evidence. A provider's echoed input URL or generic
+image links are not identity proof. The legacy Instagram HTML fallback cannot
+prove that binding and is rejected before forwarding a link to it. Some links
+therefore remain unavailable even where an unverified file used to be sent.
+One Stories permalink never authorizes an arbitrary account batch. Verified
+multi-item results retain their order. Captions identify the request and original.
+
+Questions about why a file was sent use the supplied scoped operation facts and
+actual automatic-download setting. Old sourceUrl fields are requested links only;
+unknown downloader/owner fields stay unknown. An album message selects its own
+file; the whole album requires mediaScope=publication. Do not replace a missing
+historical file with an unverified source copy or describe unseen album items.

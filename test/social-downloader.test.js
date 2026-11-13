@@ -33,7 +33,7 @@ test('a Threads page with disabled server content reports its actual restriction
 });
 test('the primary downloader accepts a valid video without an audio track',async()=>{
   const result=await downloadSocialVideoWithYtDlp('https://www.instagram.com/reel/silent','/tmp/social',{
-    ...baseDeps(mockFs()),execFileAsync:async(_file,args)=>({stdout:args.includes('--dump-single-json')?JSON.stringify({duration:1}):''}),
+    ...baseDeps(mockFs()),execFileAsync:async(_file,args)=>({stdout:args.includes('--dump-single-json')?JSON.stringify({extractor_key:'Instagram',id:'silent',channel:'fixture',duration:1}):''}),
     findDownloadedVideo:async()=>({filePath:'/tmp/social/silent.mp4',size:100}),
     validateDownloadedVideo:async(_file,options)=>{assert.equal(options.requireAudio,false);return {hasAudio:false,duration:1};},
   });
@@ -62,10 +62,10 @@ test("selectFallback chooses providers in expected order", () => {
 
 test("downloadSocialVideo returns primary downloader result without fallback", async () => {
   const fsMock = mockFs();
-  const result = await downloadSocialVideo("https://example.com/video", {
+  const result = await downloadSocialVideo("https://www.instagram.com/reel/primary/", {
     ...baseDeps(fsMock),
     execFileAsync: async (_command, args) => {
-      if (args.includes("--dump-single-json")) return { stdout: JSON.stringify({ title: "primary", duration: 12 }) };
+      if (args.includes("--dump-single-json")) return { stdout: JSON.stringify({ extractor_key: "Instagram", id: "primary", title: "primary", duration: 12 }) };
       return { stdout: "" };
     },
     findDownloadedVideo: async (tempDir) => ({ filePath: `${tempDir}/video.mp4`, size: 1024 }),
@@ -123,7 +123,7 @@ test("stream validation triggers only one provider fallback and preserves both c
   await assert.rejects(downloadSocialVideo("https://www.tiktok.com/@u/video/1", {
     ...baseDeps(mockFs()),
     execFileAsync: async (_command, args) => args.includes("--dump-single-json")
-      ? { stdout: JSON.stringify({ duration: 2 }) } : { stdout: "" },
+      ? { stdout: JSON.stringify({ extractor_key: "TikTok", id: "1", uploader: "u", duration: 2 }) } : { stdout: "" },
     findDownloadedVideo: async () => ({ filePath: "/tmp/source.mp4", size: 100 }),
     validateDownloadedVideo: async () => { throw primary; },
     isTikTokUrl: () => true,
@@ -144,7 +144,7 @@ test("inspectSocialVideo and downloadSocialVideoWithYtDlp call yt-dlp with expec
     ...baseDeps(mockFs()),
     execFileAsync: async (command, args) => {
       calls.push({ command, args });
-      if (args.includes("--dump-single-json")) return { stdout: JSON.stringify({ title: "clip", duration: 5 }) };
+      if (args.includes("--dump-single-json")) return { stdout: JSON.stringify({ extractor_key: "Instagram", id: "abc", title: "clip", duration: 5 }) };
       return { stdout: "" };
     },
     findDownloadedVideo: async (tempDir) => ({ filePath: `${tempDir}/clip.mp4`, size: 4096 }),
@@ -152,7 +152,7 @@ test("inspectSocialVideo and downloadSocialVideoWithYtDlp call yt-dlp with expec
   };
 
   const url = "https://www.instagram.com/reel/abc";
-  assert.deepEqual(await inspectSocialVideo(url, deps), { title: "clip", duration: 5 });
+  assert.deepEqual(await inspectSocialVideo(url, deps), { extractor_key: "Instagram", id: "abc", title: "clip", duration: 5 });
   const result = await downloadSocialVideoWithYtDlp(url, "/tmp/social", deps);
 
   assert.equal(result.title, "clip");
@@ -242,65 +242,14 @@ test("fetchWithTimeout forwards abort signal to fetch implementation", async () 
   assert.equal(sawSignal, true);
 });
 
-test("downloadInstagramWithSnapinsta fetches token, downloads media, and validates video", async () => {
-  const fsMock = mockFs();
-  const calls = [];
-  const selected = [];
-  const result = await downloadInstagramWithSnapinsta("https://www.instagram.com/reel/abc/", "/tmp/social", {
-    ...baseDeps(fsMock),
-    fetch: async (url, options = {}) => {
-      calls.push({ url: String(url), options });
-      if (calls.length === 1) {
-        return mockTextResponse('<input name="token" value="snap-token">');
-      }
-      if (calls.length === 2) {
-        assert.equal(String(options.body), "url=https%3A%2F%2Fwww.instagram.com%2Freel%2Fabc%2F&action=post&token=snap-token");
-        return mockTextResponse(snapinstaActionFixture('<a href="https://cdn.example.com/video.mp4">download</a>'));
-      }
-      return mockResponse({
-        headers: {
-          "content-type": "video/mp4",
-          "content-length": "5",
-        },
-        chunks: [Buffer.from("video")],
-      });
-    },
-    selectMediaFiles: async (files, maxItems, sourceUrl) => {
-      selected.push({ files, maxItems, sourceUrl });
-      return files;
-    },
-  });
-
-  assert.equal(result.title, "Instagram video");
-  assert.equal(result.files[0].hasAudio, true);
-  assert.equal(calls[0].url, "https://snap.test/");
-  assert.equal(calls[1].url, "https://snap.test/action2.php");
-  assert.equal(calls[2].options.headers.referer, "https://snap.test");
-  assert.equal(selected[0].maxItems, 2);
-});
-
-test("downloadInstagramWithSnapinsta rejects token and empty media responses", async () => {
-  await assert.rejects(
-    downloadInstagramWithSnapinsta("https://www.instagram.com/reel/abc/", "/tmp/social", {
-      ...baseDeps(mockFs()),
-      fetch: async () => mockTextResponse("<html></html>"),
-    }),
-    /token not found/,
-  );
-
-  let requestCount = 0;
-  await assert.rejects(
-    downloadInstagramWithSnapinsta("https://www.instagram.com/reel/abc/", "/tmp/social", {
-      ...baseDeps(mockFs()),
-      fetch: async () => {
-        requestCount += 1;
-        return requestCount === 1
-          ? mockTextResponse('<input name="token" value="snap-token">')
-          : mockTextResponse(snapinstaActionFixture("<p>no media</p>"));
-      },
-    }),
-    /returned no media/,
-  );
+test("unbound Instagram fallback refuses the request before third-party transfer or any media download", async () => {
+  let calls=0;
+  for(const url of ['https://www.instagram.com/stories/fixture/64/','https://www.instagram.com/reel/abc/','https://www.instagram.com/p/abc/']) {
+    await assert.rejects(downloadInstagramWithSnapinsta(url,'/tmp/social',{
+      ...baseDeps(mockFs()),fetch:async()=>{calls++;throw new Error('Must not send the input to this unbound provider');},
+    }),{code:'MEDIA_SOURCE_UNVERIFIED'});
+  }
+  assert.equal(calls,0);
 });
 
 test("downloadThreadsFromPage fetches page, downloads media, and uses caption", async () => {
@@ -385,7 +334,7 @@ test("downloadTikTokWithFallbackApi downloads image carousels", async () => {
         return mockJsonResponse({
           code: 0,
           data: {
-            title: "Photo set",
+            id: "1", author: { unique_id: "u" }, title: "Photo set",
             images: ["https://cdn.example.com/a.jpg", "https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg"],
           },
         });
@@ -406,6 +355,28 @@ test("downloadTikTokWithFallbackApi downloads image carousels", async () => {
   assert.match(calls[0].url, /^https:\/\/tikwm\.test\/api\/\?url=/);
 });
 
+for (const provider of ['tiktok', 'threads']) {
+  test(`${provider}: a failed selected item cannot become a verified complete album; successful selection keeps native order and cap`, async () => {
+    const media = ['https://scontent.example.fbcdn.net/first.jpg','https://scontent.example.fbcdn.net/second.jpg','https://scontent.example.fbcdn.net/third.jpg'];
+    for (const fail of [true,false]) {
+      const calls=[],files=mockFs();
+      const deps={...baseDeps(files),fetch:async url=>{
+        calls.push(String(url));
+        if(calls.length===1) return provider==='tiktok'
+          ? mockJsonResponse({code:0,data:{id:'1',author:{unique_id:'u'},images:media}})
+          : mockTextResponse(`<script type="application/json">${JSON.stringify({code:'abc',user:{username:'u'},carousel_media:media.map(url=>({image_versions2:{candidates:[{url,width:100,height:100}]}}))})}</script>`);
+        if(fail&&String(url)===media[0])return mockResponse({ok:false,status:503});
+        return mockResponse({headers:{'content-type':'image/jpeg'},chunks:[Buffer.from(String(url).includes('first')?'first':'second')]});
+      }};
+      const retrieve=()=>provider==='tiktok'
+        ? downloadTikTokWithFallbackApi('https://www.tiktok.com/@u/photo/1','/tmp/social','',deps)
+        : downloadThreadsFromPage('https://www.threads.com/@u/post/abc','/tmp/social',deps);
+      if(fail){await assert.rejects(retrieve(),error=>error.status===503);assert.equal(calls.length,2);}
+      else{const result=await retrieve();assert.deepEqual(calls.slice(1),media.slice(0,2));assert.equal(result.files.length,2);assert.deepEqual(result.files.map(file=>files.writes.get(file.filePath).toString()),['first','second']);}
+    }
+  });
+}
+
 test("downloadTikTokWithFallbackApi downloads and validates video", async () => {
   const fsMock = mockFs();
   let requestCount = 0;
@@ -417,7 +388,7 @@ test("downloadTikTokWithFallbackApi downloads and validates video", async () => 
         return mockJsonResponse({
           code: 0,
           data: {
-            play: "https://cdn.example.com/video.mp4",
+            id: "1", author: { unique_id: "u" }, play: "https://cdn.example.com/video.mp4",
           },
         });
       }
@@ -434,6 +405,26 @@ test("downloadTikTokWithFallbackApi downloads and validates video", async () => 
   assert.equal(result.title, "Hint title");
   assert.equal(result.files[0].mediaKind, "video");
   assert.equal(result.files[0].hasAudio, true);
+});
+
+test('structured fallback checks the returned item and account before downloading any files',async()=>{
+  for(const data of [{id:'2',author:{unique_id:'u'}},{id:'1',author:{unique_id:'other'}},{title:'Only an echoed request'}]){
+    let calls=0;
+    await assert.rejects(downloadTikTokWithFallbackApi('https://www.tiktok.com/@u/video/1','/tmp/social','',{
+      ...baseDeps(mockFs()),fetch:async()=>{calls++;return mockJsonResponse({code:0,data:{...data,play:'https://cdn.example.com/unrelated.mp4'}});},
+    }),error=>['MEDIA_SOURCE_MISMATCH','MEDIA_SOURCE_UNVERIFIED'].includes(error.code));
+    assert.equal(calls,1);
+  }
+});
+
+test('a native preview-only page cannot stand in for post media or be served from a foreign redirect',async()=>{
+  const html='<meta property="og:url" content="https://www.threads.com/@u/post/abc"><meta property="og:image" content="https://scontent.example.fbcdn.net/avatar.jpg">';
+  for(const resolvedUrl of ['https://www.threads.com/@u/post/abc','https://unrelated.example/post/abc']){
+    let calls=0;
+    await assert.rejects(downloadThreadsFromPage('https://www.threads.com/@u/post/abc','/tmp/social',{
+      ...baseDeps(mockFs()),fetch:async()=>{calls++;return mockTextResponse(html,{url:resolvedUrl});},
+    }),{code:'MEDIA_SOURCE_UNVERIFIED'});assert.equal(calls,1);
+  }
 });
 
 test("downloadTikTokWithFallbackApi rejects disabled and empty API responses", async () => {
@@ -547,9 +538,4 @@ function mockTextResponse(body, { ok = true, status = 200, url = "" } = {}) {
     url,
     text: async () => body,
   };
-}
-
-function snapinstaActionFixture(html) {
-  const encoded = [...html].map((char) => String(char.charCodeAt(0))).join("a");
-  return `("${encoded}",1,"0123456789a",0,10,1)`;
 }

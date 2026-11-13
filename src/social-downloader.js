@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { mediaReference, nativeExtractorSource, verifiedMediaSource, sourceIdentityError } from "./media-source.js";
 import {
   isCircuitBreakerOpen,
   recordCircuitBreakerFailure,
@@ -8,7 +9,8 @@ import {
 } from "./helpers.js";
 import {
   extensionFromUrl,
-  extractSnapinstaMediaUrls,
+  extractHtmlMetaContent,
+  extractTargetThreadsPost,
   extractThreadsPostFromHtml,
   inferRemoteMediaKind,
   isThreadsSocialVideoUrl,
@@ -80,6 +82,13 @@ function httpFailure(message, status) {
 
 export async function downloadTikTokWithFallbackApi(url, tempDir, titleHint = "", deps) {
   if (!deps.tiktokFallbackApiUrl) throw new Error("TikTok fallback API is disabled");
+  let resolvedUrl = url;
+  if (!mediaReference(url)?.id) {
+    const redirect = await fetchWithTimeout(url, { method: "HEAD" }, deps.httpTimeoutMs, deps.fetch);
+    resolvedUrl = redirect.url || url;
+    await redirect.body?.cancel();
+    if (mediaReference(resolvedUrl)?.platform !== "tiktok" || !mediaReference(resolvedUrl)?.id) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "tiktok-api");
+  }
   const apiUrl = new URL(deps.tiktokFallbackApiUrl);
   apiUrl.searchParams.set("url", url);
 
@@ -100,33 +109,32 @@ export async function downloadTikTokWithFallbackApi(url, tempDir, titleHint = ""
   if (!body || body.code !== 0 || !body.data) {
     throw new Error(`TikTok fallback API returned no media: ${body?.msg || "unknown error"}`);
   }
+  if (body.data.aweme_id && body.data.id && String(body.data.aweme_id) !== String(body.data.id)) throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", "tiktok-api");
+  const source = verifiedMediaSource(url, { provider: "tiktok-api", resolvedUrl,
+    id: body.data.aweme_id || body.data.id, owner: body.data.author?.unique_id });
 
   const title = titleHint || (typeof body.data.title === "string" ? body.data.title : "");
   const maxItems = deps.getMaxMediaItems();
   const imageUrls = uniqueStrings(Array.isArray(body.data.images) ? body.data.images : []);
   if (imageUrls.length) {
-    let lastError = null;
     const files = [];
     for (const [index, imageUrl] of imageUrls.slice(0, maxItems).entries()) {
-      try {
-        const downloaded = await downloadRemoteMediaFile(
-          imageUrl,
-          tempDir,
-          `tiktok-image-${Date.now()}-${index + 1}`,
-          url,
-          "image",
-          deps,
-        );
-        downloaded.title = "TikTok image";
-        files.push(downloaded);
-      } catch (error) {
-        lastError = error;
-      }
+      const downloaded = await downloadRemoteMediaFile(
+        imageUrl,
+        tempDir,
+        `tiktok-image-${Date.now()}-${index + 1}`,
+        url,
+        "image",
+        deps,
+      );
+      downloaded.title = "TikTok image";
+      files.push(downloaded);
     }
 
     const selectedFiles = deps.uniqueMediaFiles(files).slice(0, maxItems);
-    if (!selectedFiles.length) throw lastError || new Error("TikTok fallback API returned no downloadable images");
+    if (!selectedFiles.length) throw new Error("TikTok fallback API returned no downloadable images");
     return {
+      source,
       tempDir,
       files: selectedFiles,
       title: title || "TikTok images",
@@ -156,6 +164,7 @@ export async function downloadTikTokWithFallbackApi(url, tempDir, titleHint = ""
   downloaded.height = video.height;
   downloaded.title = "TikTok video";
   return {
+    source,
     tempDir,
     files: [downloaded],
     title: title || downloaded.title,
@@ -178,6 +187,7 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
 
   const html = await response.text();
   const resolvedUrl = response.url || url;
+  if (mediaReference(resolvedUrl)?.platform !== "threads") throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
   if (/\/(?:accounts\/)?login(?:\/|\?|$)/iu.test(new URL(resolvedUrl).pathname)) {
     throw Object.assign(new Error("Threads redirected to login; authentication required"), { code: "AUTH_REQUIRED" });
   }
@@ -191,29 +201,35 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
     error.code = "THREADS_MEDIA_NOT_FOUND";
     throw error;
   }
+  const nativeMetaUrl = extractHtmlMetaContent(html, "og:url");
+  const identityUrl = mediaReference(resolvedUrl)?.id ? resolvedUrl : nativeMetaUrl;
+  const post = extractTargetThreadsPost(html, identityUrl);
+  const meta = mediaReference(nativeMetaUrl);
+  const nativeVideo = extractHtmlMetaContent(html, "og:video") || extractHtmlMetaContent(html, "og:video:url") || extractHtmlMetaContent(html, "twitter:player:stream");
+  // A generic OG image can be an avatar/preview. It does not establish that
+  // the provider actually exposed the requested post's media.
+  if (!post && (!nativeVideo || !meta?.id)) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+  const source = verifiedMediaSource(url, { provider: "threads-page", resolvedUrl: identityUrl,
+    id: post?.code || meta.id, owner: post?.user?.username || meta.owner });
 
-  let lastError = null;
   const files = [];
   const maxItems = deps.getMaxMediaItems();
-  for (const [index, mediaUrl] of mediaUrls.slice(0, Math.max(maxItems * 3, 6)).entries()) {
-    try {
-      const downloaded = await downloadRemoteMediaFile(mediaUrl, tempDir, `threads-media-${Date.now()}-${index + 1}`, resolvedUrl, "", deps);
-      if (downloaded.mediaKind === "video") {
-        const video = await deps.validateDownloadedVideo(downloaded.filePath, { requireAudio: false });
-        downloaded.hasAudio = video.hasAudio;
-        downloaded.duration = video.duration;
-        downloaded.width = video.width;
-        downloaded.height = video.height;
-      }
-      files.push(downloaded);
-    } catch (error) {
-      lastError = error;
+  for (const [index, mediaUrl] of mediaUrls.slice(0, maxItems).entries()) {
+    const downloaded = await downloadRemoteMediaFile(mediaUrl, tempDir, `threads-media-${Date.now()}-${index + 1}`, resolvedUrl, "", deps);
+    if (downloaded.mediaKind === "video") {
+      const video = await deps.validateDownloadedVideo(downloaded.filePath, { requireAudio: false });
+      downloaded.hasAudio = video.hasAudio;
+      downloaded.duration = video.duration;
+      downloaded.width = video.width;
+      downloaded.height = video.height;
     }
+    files.push(downloaded);
   }
 
   const selectedFiles = await deps.selectMediaFiles(files, maxItems, resolvedUrl);
-  if (!selectedFiles.length) throw lastError || new Error("Threads fetch returned no downloadable media");
+  if (!selectedFiles.length) throw new Error("Threads fetch returned no downloadable media");
   return {
+    source,
     tempDir,
     files: selectedFiles,
     title: extracted.caption || (selectedFiles.length > 1 ? "Threads media" : selectedFiles[0].title.replace(/^Instagram/, "Threads")),
@@ -221,60 +237,10 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
 }
 
 export async function downloadInstagramWithSnapinsta(url, tempDir, deps) {
-  const token = await fetchSnapinstaToken(deps);
-  const response = await fetchWithTimeout(
-    `${deps.snapinstaBaseUrl}/action2.php`,
-    {
-      method: "POST",
-      headers: {
-        accept: "*/*",
-        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-        referer: `${deps.snapinstaBaseUrl}/`,
-        "user-agent": "Mozilla/5.0 TelegramSocialVideoBot/1.0",
-      },
-      body: new URLSearchParams({
-        url,
-        action: "post",
-        token,
-      }),
-    },
-    deps.httpTimeoutMs,
-    deps.fetch,
-  );
-  if (!response.ok) {
-    throw httpFailure("third-party Instagram fetch failed", response.status);
-  }
-
-  const html = decodeSnapinstaActionResponse(await response.text());
-  const mediaUrls = extractSnapinstaMediaUrls(html);
-  if (!mediaUrls.length) throw new Error("third-party Instagram fetch returned no media");
-
-  let lastError = null;
-  const files = [];
-  const maxItems = deps.getMaxMediaItems();
-  for (const [index, mediaUrl] of mediaUrls.slice(0, Math.max(maxItems * 2, 3)).entries()) {
-    try {
-      const downloaded = await downloadRemoteMediaFile(mediaUrl, tempDir, `instagram-media-${Date.now()}-${index + 1}`, deps.snapinstaBaseUrl, "", deps);
-      if (downloaded.mediaKind === "video") {
-        const video = await deps.validateDownloadedVideo(downloaded.filePath, { requireAudio: false });
-        downloaded.hasAudio = video.hasAudio;
-        downloaded.duration = video.duration;
-        downloaded.width = video.width;
-        downloaded.height = video.height;
-      }
-      files.push(downloaded);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  const selectedFiles = await deps.selectMediaFiles(files, maxItems, url);
-  if (!selectedFiles.length) throw lastError || new Error("third-party Instagram fetch returned no downloadable media");
-  return {
-    tempDir,
-    files: selectedFiles,
-    title: selectedFiles.length > 1 ? "Instagram media" : selectedFiles[0].title,
-  };
+  // This legacy HTML adapter exposes arbitrary download links but no binding
+  // to a native item/owner. Do not send a private link to it or certify its
+  // files merely because they are decodable media. Native retrieval remains.
+  throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "snapinsta");
 }
 
 export async function fetchSnapinstaToken(deps) {
@@ -369,7 +335,8 @@ export async function downloadSocialVideo(url, deps) {
       if (!fallback) throw error;
       deps.logInfo(fallback.logEvent, { error: deps.cleanErrorMessage(error) });
       try {
-        return await runSocialVideoFallback(fallback.provider, () => fallback.download(tempDir), deps);
+        const result = await runSocialVideoFallback(fallback.provider, () => fallback.download(tempDir), deps);
+        return { ...result, previousFailure: error };
       } catch (fallbackError) {
         throw socialDownloadFailure(error, fallbackError, fallback.provider);
       }
@@ -420,6 +387,7 @@ export async function runSocialVideoFallback(provider, operation, deps) {
     return result;
   } catch (error) {
     if (deps.signal?.aborted) throw error;
+    if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error.code)) throw error;
     const nextState = recordCircuitBreakerFailure(
       state,
       {
@@ -446,6 +414,8 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
     error.actualDurationSeconds = duration;
     throw error;
   }
+  if (info._type === "playlist" || Array.isArray(info.entries)) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "yt-dlp");
+  const source = nativeExtractorSource(url, info);
 
   const maxMb = Math.max(1, Math.floor(deps.maxBytes / 1024 / 1024));
   const outputTemplate = path.join(tempDir, "%(title).80B.%(id)s.%(ext)s");
@@ -494,6 +464,7 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
   file.height = video.height;
 
   return {
+    source,
     tempDir,
     filePath: file.filePath,
     mediaKind: "video",

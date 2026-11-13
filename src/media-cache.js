@@ -14,13 +14,13 @@ export class MediaCache {
     this.queue = Promise.resolve();
   }
 
-  async put({ chatId, topicId = null, sourceMessageId, sourceUrl = "", files = [] }) {
+  async put({ chatId, topicId = null, sourceMessageId, sourceUrl = "", source = null, files = [] }) {
     return this.lock(async () => {
       const state = await this.read();
       await this.trim(state);
       const id = randomUUID(), destination = path.join(this.directory, id);
       const entry = { id, chatId, topicId, sourceMessageId, sourceUrl: String(sourceUrl).slice(0, 4096),
-        sentMessageIds: [], createdAt: this.now(), files: [], sourceFileCount: files.length };
+        source, sentMessageIds: [], bindings: [], createdAt: this.now(), files: [], sourceFileCount: files.length };
       await fs.mkdir(destination, { mode: 0o700 });
       try {
         let bytes = 0;
@@ -36,7 +36,7 @@ export class MediaCache {
           const copied = await fs.lstat(target);
           if (copied.size > this.maxFileBytes || bytes + copied.size > this.maxTotalBytes) { await fs.unlink(target); continue; }
           bytes += copied.size;
-          entry.files.push({ name, mediaKind: file.mediaKind, mimeType: file.mimeType,
+          entry.files.push({ name, index, mediaKind: file.mediaKind, mimeType: file.mimeType,
             title: String(file.title || "").slice(0, 1000), size: copied.size });
         }
         if (entry.files.length) state.entries.push(entry);
@@ -48,25 +48,41 @@ export class MediaCache {
     });
   }
 
-  async bind(entryId, sentMessageIds) {
+  async bind(entryId, sentMessageIds, { startIndex = 0 } = {}) {
     return this.lock(async () => {
       const state = await this.read();
       await this.trim(state);
       const entry = state.entries.find(item => item.id === entryId);
-      if (entry) entry.sentMessageIds = [...new Set([...entry.sentMessageIds, ...sentMessageIds.filter(Number.isSafeInteger)])].slice(-50);
+      if (entry) {
+        entry.sentMessageIds = [...new Set([...entry.sentMessageIds, ...sentMessageIds.filter(Number.isSafeInteger)])].slice(-50);
+        for (const [offset, messageId] of sentMessageIds.entries()) {
+          const index = startIndex + offset;
+          if (!Number.isSafeInteger(messageId) || messageId <= 0 || !entry.files.some(file => file.index === index)) continue;
+          entry.bindings = [...entry.bindings.filter(binding => binding.messageId !== messageId), { messageId, index }].slice(-50);
+        }
+      }
       await this.write(state);
       return entry ? this.expose(entry) : null;
     });
   }
 
-  async get({ chatId, topicId = null, messageId }) {
+  async get({ chatId, topicId = null, messageId, wholePublication = false }) {
     return this.lock(async () => {
       const state = await this.read();
       await this.trim(state);
       const entry = state.entries.slice().reverse().find(item => String(item.chatId) === String(chatId)
         && item.topicId === topicId && (item.sourceMessageId === messageId || item.sentMessageIds.includes(messageId)));
       await this.write(state);
-      return entry ? this.expose(entry) : null;
+      if (!entry) return null;
+      if (messageId === entry.sourceMessageId || wholePublication) return this.expose(entry);
+      let index = entry.bindings.find(binding => binding.messageId === messageId)?.index;
+      // A legacy single-file receipt is unambiguous; an old album without file
+      // bindings must be read from that exact Telegram message, not guessed.
+      if (index === undefined && entry.sourceFileCount === 1 && entry.files.length === 1) index = entry.files[0].index;
+      const file = entry.files.find(file => file.index === index);
+      const exposed = this.expose(entry);
+      return file ? { ...exposed, files: exposed.files.filter(item => item.index === index),
+        complete: true, selection: "item", selectedFileIndex: index } : null;
     });
   }
 
@@ -98,7 +114,9 @@ export class MediaCache {
       return { version: 1, entries: state.entries.filter(entry => entry && safeId.test(entry.id)
         && Number.isFinite(entry.createdAt) && Array.isArray(entry.files)).map(entry => ({ ...entry,
           topicId: entry.topicId ?? null, sentMessageIds: Array.isArray(entry.sentMessageIds) ? entry.sentMessageIds.filter(Number.isSafeInteger).slice(-50) : [],
-          files: entry.files.filter(file => file && safeName.test(file.name)).slice(0, 20) })) };
+          bindings: Array.isArray(entry.bindings) ? entry.bindings.filter(binding => Number.isSafeInteger(binding?.messageId) && binding.messageId > 0 && Number.isSafeInteger(binding.index) && binding.index >= 0 && binding.index < entry.sourceFileCount).slice(-50) : [],
+          files: entry.files.filter(file => file && safeName.test(file.name)).slice(0, 20)
+            .map(file => ({ ...file, index: Number.parseInt(file.name, 10) - 1 })) })) };
     } catch (error) { if (error.code === "ENOENT") return { version: 1, entries: [] }; throw error; }
   }
 
@@ -146,7 +164,7 @@ export class MediaCache {
   }
 
   expose(entry) {
-    return { ...entry, complete: entry.files.length === entry.sourceFileCount,
+    return { ...entry, complete: entry.files.length === entry.sourceFileCount, selection: "publication",
       files: entry.files.map(({ name, ...file }) => ({ ...file, filePath: path.join(this.directory, entry.id, name) })) };
   }
 }

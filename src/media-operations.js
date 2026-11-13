@@ -1,9 +1,17 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { mediaReference } from "./media-source.js";
+import { say } from "./helpers.js";
 
 const durationText = n => { const seconds = Math.ceil(n); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; };
 export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes = 48 * 1024 * 1024, stage = "download" } = {}) {
+  if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error?.code)) return {
+    code: error.code === "MEDIA_SOURCE_MISMATCH" ? "SOURCE_MISMATCH" : "SOURCE_UNVERIFIED", retryable: false, stage: "download", status: null,
+    reason: error.code === "MEDIA_SOURCE_MISMATCH"
+      ? "Отриманий матеріал не збігається з конкретною публікацією за посиланням. Не надсилаю підміну."
+      : "Завантажувач не підтвердив, що файли належать саме цій публікації. Не надсилаю неперевірений набір; можна надіслати сам потрібний файл.",
+  };
   if (error?.deliveryUnknown) return { code: "UPLOAD_UNKNOWN", retryable: true, stage: "upload", status: error.status || null,
     transportCode: error.transportCode || error.cause?.code || null,
     reason: "Не отримав підтвердження від Telegram. Файл міг уже з’явитися в чаті, тому автоматично його не дублюю. Перевір чат; якщо файлу немає, попроси повторити надсилання." };
@@ -20,7 +28,7 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
     const causes = error.attempts.slice(0, 6).map(attempt => ({ provider: String(attempt.provider || "downloader").slice(0, 32),
       ...mediaFailure(attempt.error, { maxDurationSeconds, maxUploadBytes, stage }) }));
     // Prefer the first useful cause, rather than the last, often empty, fallback.
-    const selected = causes.find(cause => !["UNKNOWN", "NO_MEDIA"].includes(cause.code)) || causes[0];
+    const selected = causes.find(cause => ["SOURCE_MISMATCH", "SOURCE_UNVERIFIED"].includes(cause.code)) || causes.find(cause => !["UNKNOWN", "NO_MEDIA"].includes(cause.code)) || causes[0];
     const { provider, ...failure } = selected;
     return { ...failure, causes, ...(Number.isFinite(error.elapsedSeconds) ? { elapsedSeconds: error.elapsedSeconds } : {}) };
   }
@@ -74,7 +82,19 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
     ...(Number.isFinite(error.actualBytes) ? { actualBytes: error.actualBytes } : {}) };
 }
 
-export function failureMessage(failure, id) {
+export function failureMessage(failure, id, locale = "uk") {
+  if (["SOURCE_UNVERIFIED", "SOURCE_MISMATCH"].includes(failure.code)) {
+    const reason = failure.code === "SOURCE_MISMATCH" ? say(locale,
+      "The retrieved material does not match the exact linked publication. I have not sent it.",
+      "Полученный материал не соответствует конкретной публикации по ссылке. Я его не отправил.",
+      "Отриманий матеріал не збігається з конкретною публікацією за посиланням. Я його не надіслав.") : say(locale,
+      "The downloader could not confirm that the files belong to this exact publication. I have not sent the unverified files. You can attach the original file.",
+      "Загрузчик не подтвердил, что файлы относятся именно к этой публикации. Непроверенные файлы не отправлены. Можно прикрепить исходный файл.",
+      "Завантажувач не підтвердив, що файли належать саме цій публікації. Неперевірені файли не надіслано. Можна прикріпити оригінальний файл.");
+    const nativeLogin = failure.causes?.some(cause => cause.provider === "yt-dlp" && cause.code === "AUTH_REQUIRED")
+      ? " " + say(locale, "The native extractor also reported that login is required.", "Основной загрузчик также сообщил, что требуется вход в аккаунт.", "Основний завантажувач також повідомив, що потрібен вхід в акаунт.") : "";
+    return `${reason}${nativeLogin}\n${failure.code}${id ? ` · ${id}` : ""}`;
+  }
   const stages = { download: "отримання медіа", prepare: "перевірка й підготовка", upload: "надсилання до Telegram" };
   const title = failure.code === "UPLOAD_UNKNOWN" ? "Не вдалося підтвердити надсилання медіа" : "Не вдалося надіслати медіа";
   const causes = failure.causes?.length > 1 ? "\n" + failure.causes.map(cause => `${cause.provider}: ${cause.reason}`).join("\n") : "";
@@ -128,10 +148,22 @@ export class MediaOperations {
     if (targets.length) return null;
     return allowLatest ? all.find(op => op.userId === message.from?.id && op.status !== "done") || null : null;
   }
+  async evidence(message, { referenceMessageIds = [], topicId = null } = {}) {
+    const references = new Set(referenceMessageIds.filter(Number.isSafeInteger));
+    return (await this.read()).filter(operation => String(operation.chatId) === String(message.chat.id) &&
+      (operation.topicId ?? operation.threadId ?? null) === topicId && operationReferences(operation).every(id => id < message.message_id) &&
+      operationReferences(operation).some(id => references.has(id)))
+      .slice(0, 4).map(operation => ({ id: operation.id, sourceMessageId: operation.sourceMessageId,
+        trigger: operation.trigger || null, lastRequest: operation.lastRequest || null, requestedUrl: mediaReference(operation.url)?.url || null,
+        sourceVerification: operation.source?.status || "unverified-legacy", verifiedSource: operation.source?.status === "verified" ? operation.source.resolved : null,
+        downloader: operation.downloader || operation.source?.provider || "not-recorded", attempts: operation.attempts || [],
+        status: operation.status, sentMessageIds: operation.sentMessageIds || [], deliveredFileCount: operation.deliveredFileCount || 0,
+        failure: operation.failure ? { code: operation.failure.code, stage: operation.failure.stage, reason: operation.failure.reason, causes: operation.failure.causes || [] } : null }));
+  }
 }
 
 function operationReferences(operation) {
   if (!operation) return [];
-  return [operation.sourceMessageId, operation.errorMessageId, operation.sentMessageId,
+  return [operation.sourceMessageId, operation.lastRequest?.messageId, operation.trigger?.messageId, operation.errorMessageId, operation.sentMessageId,
     ...(operation.sentMessageIds || []), ...(operation.referenceMessageIds || [])].filter(Number.isSafeInteger);
 }

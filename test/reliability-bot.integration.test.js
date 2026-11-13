@@ -7,6 +7,10 @@ import os from "node:os";
 import { CodexBackend } from "../src/codex-backend.js";
 import { ClaudeBackend } from "../src/claude-backend.js";
 import { featureTurnFixture } from "../test-support/setup-model-fixture.mjs";
+import { nativeExtractorSource, verifiedMediaSource } from "../src/media-source.js";
+import { MediaCache } from "../src/media-cache.js";
+import { MediaOperations } from "../src/media-operations.js";
+import { ConversationStore } from "../src/conversation-store.js";
 
 async function fixture(t, profile = "legacy", owner, configure = async () => {}, answerBackend = "codex", voice = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "bot-reliability-"));
@@ -227,7 +231,8 @@ test('a long media job leaves its durable inbox pending while a same-chat questi
 test('an unconfirmed upload is not retried automatically; an explicit retry uses the prepared cache after restart', async t => {
   const f=await fixture(t);let downloads=0,uploads=0;
   const file=path.join(f.root,'image.jpg');await fs.writeFile(file,new Uint8Array([1,2,3]));
-  f.setDownloader(async()=>{downloads++;return {files:[{filePath:file,mediaKind:'image',mimeType:'image/jpeg',title:'Fixture'}]};});
+  const source=nativeExtractorSource('https://www.instagram.com/p/fixture/',{extractor_key:'Instagram',id:'fixture',channel:'fixture'});
+  f.setDownloader(async()=>{downloads++;return {source,files:[{filePath:file,mediaKind:'image',mimeType:'image/jpeg',title:'Fixture'}]};});
   f.setUpload(async()=>{uploads++;throw Object.assign(new Error('connection interrupted'),{code:'ECONNRESET'});});
   await f.handle({message_id:500,text:'https://www.instagram.com/p/fixture/'});
   let journal=JSON.parse(await fs.readFile(f.root+'/runtime/media.json'));
@@ -245,6 +250,154 @@ test('an unconfirmed upload is not retried automatically; an explicit retry uses
   assert.equal(uploads,2);
 });
 
+test('one story cannot send three unverified images or cache them as its verified source',async t=>{
+  const f=await fixture(t);const files=[];
+  for(let index=0;index<3;index++){
+    const filePath=path.join(f.root,`unverified-${index}.jpg`);await fs.writeFile(filePath,Buffer.from([index,2,3]));
+    files.push({filePath,mediaKind:'image',mimeType:'image/jpeg'});
+  }
+  f.setDownloader(async()=>({files,title:'Unbound provider images'}));
+  await f.handle({message_id:500,text:'https://www.instagram.com/stories/fixture/64/'});
+  assert.equal(f.calls.filter(call=>['sendPhoto','sendVideo','sendMediaGroup','sendDocument'].includes(call.method)).length,0);
+  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/SOURCE_UNVERIFIED/);
+  await assert.rejects(fs.access(f.root+'/runtime/media-cache/index.json'),{code:'ENOENT'});
+  const operation=JSON.parse(await fs.readFile(f.root+'/runtime/media.json')).operations[0];
+  assert.equal(operation.status,'failed');assert.equal(operation.source.status,'unverified');
+  assert.equal(operation.deliveredFileCount,undefined);
+});
+
+test('a forged verified flag cannot hide mismatched native identity',async t=>{
+  const f=await fixture(t);const filePath=path.join(f.root,'wrong.jpg');await fs.writeFile(filePath,'wrong');
+  const source=nativeExtractorSource('https://www.instagram.com/stories/fixture/64/',{extractor_key:'InstagramStory',id:'BA',channel:'fixture'});
+  source.resolved.id='OTHER';source.resolved.key='OTHER';
+  f.setDownloader(async()=>({source,files:[{filePath,mediaKind:'image',mimeType:'image/jpeg'}]}));
+  await f.handle({text:'https://www.instagram.com/stories/fixture/64/'});
+  assert.equal(f.calls.filter(call=>call.method==='sendPhoto').length,0);
+  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/SOURCE_MISMATCH/);
+});
+
+test('a verified carousel binds each Telegram photo to its own file, including after restart',async t=>{
+  const f=await fixture(t);const files=[];
+  for(let index=0;index<3;index++){
+    const filePath=path.join(f.root,`item-${index}.jpg`);await fs.writeFile(filePath,Buffer.from([index,2,3]));
+    files.push({filePath,mediaKind:'image',mimeType:'image/jpeg'});
+  }
+  const url='https://www.tiktok.com/@fixture/photo/123/';
+  const source=verifiedMediaSource(url,{provider:'tiktok-api',id:'123',owner:'fixture'});
+  f.setDownloader(async()=>({source,files,title:'A'.repeat(1500)}));
+  f.setUpload(async(method)=>{
+    assert.equal(method,'sendMediaGroup');
+    return new Response(JSON.stringify({ok:true,result:files.map((file,index)=>({message_id:2000+index,message_thread_id:9,is_topic_message:true,
+      chat:{id:-123,type:'supergroup',is_forum:true},photo:[{file_id:`photo-${index}`,file_size:3}]}))}));
+  });
+  await f.handle({message_id:500,text:url});
+  const payload=f.calls.find(call=>call.method==='sendMediaGroup').payload;
+  const caption=JSON.parse(payload.media)[0].caption;
+  assert.ok(caption.length<=1000);assert.match(caption,/@Fixture/);assert.ok(caption.includes(url));
+  await f.restart();let scope='item',inspected=[];
+  f.setAnswer(async args=>{
+    if(args.images?.length){inspected=await Promise.all(args.images.map(async file=>(await fs.readFile(file))[0]));return {text:'Опис фактично вибраних файлів.',searchStatus:{succeeded:false}};}
+    return {text:JSON.stringify({action:'analyze',language:'uk',targetMessageId:2001,mediaScope:scope}),searchStatus:{succeeded:false}};
+  });
+  await f.handle({message_id:3000,text:'@ReliabilityTestBot поясни це фото',reply_to_message:{message_id:2001,from:{id:77,is_bot:true},photo:[{file_id:'photo-1',file_size:3}]}});
+  assert.deepEqual(inspected,[1]);
+  scope='publication';
+  await f.handle({message_id:3001,text:'@ReliabilityTestBot поясни весь альбом',reply_to_message:{message_id:2001,from:{id:77,is_bot:true},photo:[{file_id:'photo-1',file_size:3}]}});
+  assert.deepEqual(inspected,[0,1,2]);
+});
+
+test('legacy unverified prepared files cannot authorize a redelivery',async t=>{
+  const f=await fixture(t);const filePath=path.join(f.root,'legacy.jpg');await fs.writeFile(filePath,'legacy');
+  const url='https://www.instagram.com/reel/legacy/';
+  const cache=new MediaCache(f.root+'/runtime/media-cache');
+  await cache.put({chatId:-123,topicId:9,sourceMessageId:500,sourceUrl:url,files:[{filePath,mediaKind:'image',mimeType:'image/jpeg'}]});
+  await new MediaOperations(f.root+'/runtime/media.json').record({chatId:-123,topicId:9,userId:88,sourceMessageId:500,errorMessageId:600,url,status:'unknown',failure:{code:'UPLOAD_UNKNOWN',retryable:true,stage:'upload'}});
+  let downloads=0;f.setDownloader(async()=>{downloads++;return {files:[{filePath,mediaKind:'image',mimeType:'image/jpeg'}]};});
+  await f.handle({message_id:1500,text:'Repeat',reply_to_message:{message_id:600,from:{id:77,is_bot:true},text:'Previous upload outcome unknown'}});
+  assert.equal(downloads,1);assert.equal(f.calls.filter(call=>call.method==='sendPhoto').length,0);
+  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/SOURCE_UNVERIFIED/);
+});
+
+test('legacy album selection reads only its exact Telegram file and never substitutes an unavailable historical file',async t=>{
+  const f=await fixture(t),files=[],store=new ConversationStore(f.root+'/runtime/conversations');
+  const url='https://www.instagram.com/stories/fixture/64/';
+  for(let index=0;index<3;index++){
+    const filePath=path.join(f.root,`legacy-album-${index}.jpg`);await fs.writeFile(filePath,Buffer.from([10+index,2,3]));files.push({filePath,mediaKind:'image',mimeType:'image/jpeg'});
+  }
+  const cache=new MediaCache(f.root+'/runtime/media-cache');await cache.put({chatId:-123,topicId:9,sourceMessageId:500,sourceUrl:url,files});
+  const indexPath=f.root+'/runtime/media-cache/index.json',index=JSON.parse(await fs.readFile(indexPath));
+  index.entries[0].sentMessageIds=[600,601,602];delete index.entries[0].bindings;await fs.writeFile(indexPath,JSON.stringify(index));
+  for(const item of [{messageId:600,sourceUrl:url,media:{kind:'image',fileId:'legacy-first',size:3}},
+    {messageId:650,sourceUrl:'https://www.instagram.com/reel/legacy-video/',media:{kind:'video',fileId:'large-legacy',size:30*1024*1024}}]){
+    await store.record({chatId:-123,messageThreadId:9,isForum:true,date:Date.now()-10000,isBot:true,userId:77,sender:'@ReliabilityTestBot',text:'Legacy sent file',...item});
+  }
+  let target=600,inspected=0,downloads=0;
+  f.setDownloader(async()=>{downloads++;throw new Error('No source may substitute this historical file');});
+  f.setAnswer(async args=>{
+    if(args.images?.length){inspected++;assert.equal(args.images.length,1);assert.deepEqual([...await fs.readFile(args.images[0])],[1,2,3]);
+      assert.match(args.prompt,/Зовнішнє походження не підтверджене/);return {text:'Опис лише видимого файла.',searchStatus:{succeeded:false}};}
+    return {text:JSON.stringify({action:'analyze',language:'uk',targetMessageId:target}),searchStatus:{succeeded:false}};
+  });
+  await f.handle({message_id:700,text:'@ReliabilityTestBot поясни саме це',reply_to_message:{message_id:600,from:{id:77,is_bot:true},text:'Legacy sent file'}});
+  assert.equal(inspected,1);assert.equal(f.calls.filter(call=>call.method==='getFile').length,1);
+  target=650;
+  await f.handle({message_id:701,text:'@ReliabilityTestBot поясни цей файл',reply_to_message:{message_id:650,from:{id:77,is_bot:true},text:'Legacy sent file'}});
+  assert.equal(downloads,0);assert.equal(inspected,1);
+  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/20 МіБ/);
+});
+
+test('an unavailable verified single-file receipt may use a matching source copy with explicit disclosure',async t=>{
+  const f=await fixture(t),store=new ConversationStore(f.root+'/runtime/conversations'),filePath=path.join(f.root,'single.jpg');
+  await fs.writeFile(filePath,Buffer.from([1,2,3]));
+  const url='https://www.threads.com/@fixture/post/single/';const source=verifiedMediaSource(url,{provider:'threads-page',id:'single',owner:'fixture'});
+  await store.record({chatId:-123,messageId:600,messageThreadId:9,isForum:true,date:Date.now()-10000,isBot:true,userId:77,sender:'@ReliabilityTestBot',text:'Verified single image',sourceUrl:url,mediaSource:source,mediaSelection:{index:0,total:1},media:{kind:'image',fileId:'large-single',size:30*1024*1024}});
+  let downloads=0,inspected=false;
+  f.setDownloader(async()=>{downloads++;return {source,files:[{filePath,mediaKind:'image',mimeType:'image/jpeg'}]};});
+  f.setAnswer(async args=>{
+    if(args.images?.length){inspected=true;assert.match(args.prompt,/попередній файл із Telegram не був прочитаний/);return {text:'Опис повторно отриманої копії.',searchStatus:{succeeded:false}};}
+    return {text:JSON.stringify({action:'analyze',language:'uk',targetMessageId:600}),searchStatus:{succeeded:false}};
+  });
+  await f.handle({message_id:700,text:'@ReliabilityTestBot проаналізуй фото',reply_to_message:{message_id:600,from:{id:77,is_bot:true},text:'Verified single image'}});
+  assert.equal(downloads,1);assert.equal(inspected,true);assert.equal(f.calls.filter(call=>call.method==='sendPhoto').length,0);
+});
+
+test('a short album receipt remains unknown and cannot create guessed file bindings',async t=>{
+  const f=await fixture(t),files=[];const url='https://www.tiktok.com/@fixture/photo/123/';
+  for(let index=0;index<3;index++){const filePath=path.join(f.root,`short-receipt-${index}.jpg`);await fs.writeFile(filePath,Buffer.from([index,2,3]));files.push({filePath,mediaKind:'image',mimeType:'image/jpeg'});}
+  const source=verifiedMediaSource(url,{provider:'tiktok-api',id:'123',owner:'fixture'});
+  f.setDownloader(async()=>({source,files}));let uploads=0;
+  f.setUpload(async()=>{uploads++;return new Response(JSON.stringify({ok:true,result:[{message_id:600}]}));});
+  await f.handle({message_id:500,text:url});
+  const operation=JSON.parse(await fs.readFile(f.root+'/runtime/media.json')).operations[0];
+  assert.equal(uploads,1);assert.equal(operation.status,'unknown');assert.equal(operation.failure.code,'UPLOAD_UNKNOWN');
+  assert.equal(operation.deliveredFileCount,undefined);
+  const index=JSON.parse(await fs.readFile(f.root+'/runtime/media-cache/index.json'));assert.deepEqual(index.entries[0].bindings,[]);
+});
+
+test('action explanations receive scoped recorded facts and actual automatic settings without certifying legacy origins',async t=>{
+  const f=await fixture(t),store=new ConversationStore(f.root+'/runtime/conversations');
+  const url='https://www.instagram.com/stories/source/64/';
+  for(const item of [{messageId:500,isBot:false,userId:99,sender:'@Source',text:url},{messageId:600,isBot:true,userId:77,sender:'@ReliabilityTestBot',text:'Old album',sourceUrl:url,replyToMessageId:500}]){
+    await store.record({chatId:-123,date:Date.now()-10000,messageThreadId:9,isForum:true,...item});
+  }
+  const operations=new MediaOperations(f.root+'/runtime/media.json');
+  await operations.record({chatId:-123,topicId:9,sourceMessageId:500,sentMessageIds:[600,601,602],status:'done',deliveredFileCount:3,url});
+  await operations.record({chatId:-456,topicId:9,sourceMessageId:500,status:'done',url:'https://www.instagram.com/reel/OTHER_CHAT_SECRET/'});
+  await operations.record({chatId:-123,topicId:10,sourceMessageId:500,status:'done',url:'https://www.instagram.com/reel/OTHER_TOPIC_SECRET/'});
+  await operations.record({chatId:-123,topicId:9,sourceMessageId:500,lastRequest:{messageId:800,sender:'FUTURE_REQUEST_SECRET'},status:'done',url});
+  f.setAnswer(async args=>{
+    assert.match(args.prompt,/Recorded scoped media operations/);assert.match(args.prompt,/unverified-legacy/);
+    assert.match(args.prompt,/not-recorded/);assert.match(args.prompt,/"deliveredFileCount":3/);
+    assert.match(args.prompt,/Current automatic download setting: enabled/);
+    assert.doesNotMatch(args.prompt,/OTHER_CHAT_SECRET|OTHER_TOPIC_SECRET|FUTURE_REQUEST_SECRET/);
+    assert.match(args.prompt,/requested source:.*origin unverified/);
+    return {text:JSON.stringify({action:'reply',language:'uk',text:'Автозавантаження було увімкнено. Походження старих файлів журнал не підтверджує.'}),searchStatus:{succeeded:false}};
+  });
+  await f.handle({message_id:700,text:'Чому ти це надіслав?',reply_to_message:{message_id:600,from:{id:77,is_bot:true},text:'Old album'}});
+  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/Походження старих файлів/);
+  assert.equal(f.calls.filter(call=>['sendPhoto','sendVideo','sendMediaGroup'].includes(call.method)).length,0);
+});
+
 test('voice transcription leaves independent questions responsive and a reply waits for its referenced transcript',async t=>{
   const f=await fixture(t,'legacy',undefined,async()=>{},'codex',true);
   let start,release;const started=new Promise(resolve=>{start=resolve;}),gate=new Promise(resolve=>{release=resolve;});
@@ -260,16 +413,17 @@ test('voice transcription leaves independent questions responsive and a reply wa
 });
 
 test('an interrupted album retry sends only files without acknowledged delivery', async t => {
-  const f=await fixture(t);let downloads=0;const uploads=[];
+  const f=await fixture(t,'legacy',undefined,async()=>{process.env.SOCIAL_VIDEO_MAX_MEDIA_ITEMS='20';});let downloads=0;const uploads=[];
   const files=[];
   for(let i=0;i<11;i++){const file=path.join(f.root,`image-${i}.jpg`);await fs.writeFile(file,new Uint8Array([i,2,3]));files.push({filePath:file,mediaKind:'image',mimeType:'image/jpeg'});}
-  f.setDownloader(async()=>{downloads++;return {files};});
+  const source=verifiedMediaSource('https://www.tiktok.com/@fixture/photo/123/',{provider:'tiktok-api',id:'123',owner:'fixture'});
+  f.setDownloader(async()=>{downloads++;return {source,files};});
   f.setUpload(async method=>{
     uploads.push(method);
     if(method==='sendMediaGroup')return new Response(JSON.stringify({ok:true,result:Array.from({length:10},(_,i)=>({message_id:2000+i}))}));
     throw new Error('fetch failed');
   });
-  await f.handle({message_id:500,text:'https://www.instagram.com/p/album/'});
+  await f.handle({message_id:500,text:'https://www.tiktok.com/@fixture/photo/123/'});
   const before=JSON.parse(await fs.readFile(f.root+'/runtime/media.json')).operations[0];
   assert.equal(before.deliveredFileCount,10);assert.equal(before.sentMessageIds.length,10);
   f.setMediaNow(()=>Date.now()+31000);

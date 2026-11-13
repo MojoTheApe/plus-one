@@ -27,6 +27,24 @@ test("cache binds source and sent IDs, survives restart and keeps forum topics i
   assert.equal((await fs.stat(cacheRoot)).mode & 0o777, 0o700);
 });
 
+test("album file bindings survive missing neighbours and legacy albums never guess a selected file",async t=>{
+  const directory=await temporaryDirectory(t),files=[];
+  for(let index=0;index<3;index++){
+    const filePath=path.join(directory,`input-${index}.jpg`);await fs.writeFile(filePath,String(index));files.push({filePath,mediaKind:'image',mimeType:'image/jpeg'});
+  }
+  const root=path.join(directory,'cache'),cache=new MediaCache(root);
+  const stored=await cache.put({chatId:-1,sourceMessageId:10,files});await cache.bind(stored.id,[11,12,13]);
+  await fs.rm(stored.files[0].filePath);
+  const restored=new MediaCache(root),selected=await restored.get({chatId:-1,messageId:12});
+  assert.equal(selected.files.length,1);assert.equal(await fs.readFile(selected.files[0].filePath,'utf8'),'1');assert.equal(selected.complete,true);
+  assert.equal((await restored.get({chatId:-1,messageId:10})).complete,false);
+  assert.equal(await restored.get({chatId:-1,messageId:11}),null);
+  const index=JSON.parse(await fs.readFile(path.join(root,'index.json'),'utf8'));delete index.entries[0].bindings;
+  await fs.writeFile(path.join(root,'index.json'),JSON.stringify(index));
+  assert.equal(await new MediaCache(root).get({chatId:-1,messageId:12}),null);
+  assert.equal((await new MediaCache(root).get({chatId:-1,messageId:12,wholePublication:true})).files.length,2);
+});
+
 test("cache expires old media, evicts oldest to total budget and skips oversize input", async t => {
   const directory = await temporaryDirectory(t), filePath = path.join(directory, "source.mp4");
   await fs.writeFile(filePath, Buffer.alloc(6));
