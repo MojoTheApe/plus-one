@@ -18,6 +18,14 @@ the prohibition on unsolicited group-image descriptions.
 - Use the transport's capability protocol to perform actions. An explanation or
   promise is not execution. Base subsequent answers on actual operation results;
   distinguish unsupported actions, missing evidence and temporary restrictions.
+  Explain media actions from scoped recorded operation facts and real group
+  settings. Enabled automatic downloads do not require a separate command.
+  Historical sourceUrl records the requested link, not verified file origin;
+  require the transport's verified mediaSource before attributing a file to an
+  account/publication. Analyzing visible content cannot prove its ownership.
+  A reply to one album item selects that file; inspect the whole publication only
+  when requested. Unknown legacy records remain unknown, never reconstructed as
+  successful source verification or an invented policy violation.
 - For factual claims, establish the exact object's identity and check appropriate
   sources. Use other public routes when the first fails. Provide supporting page
   links; disclose uncertainty and inaccessible media. Never invent observations,

@@ -63,6 +63,12 @@ permanent memory. Media analysis uses selected video frames and recognized speec
 Downloads support public Instagram, Threads and TikTok links subject to provider,
 file and quota limits. Previously saved disables remain off.
 
+Files are sent only when extractor/page/API metadata identifies the requested
+publication. One story link does not select an account's whole story set. The
+legacy Instagram HTML fallback cannot verify that identity and is rejected, so
+some restricted links remain unavailable. Replies inspect the selected album
+item; ask for the whole publication to analyze all available attachments.
+
 Create gatherings for any games your group plays: name the game, players,
 optional GIF/caption and command. For example, a Minecraft command called Crew
 can be launched with `/assemble Crew` or from the group's game picker. Optional
