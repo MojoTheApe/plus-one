@@ -56,6 +56,7 @@ async function fixture(t, { perGroup = false } = {}) {
       packs.get(payload.name).stickers.push({ file_id: payload.sticker.sticker, file_unique_id: payload.sticker.sticker });
     }
     else if (method === "sendMessage") result = { message_id: 999, chat: { id: Number(payload.chat_id), type: "supergroup" } };
+    else if (["sendAnimation", "sendSticker"].includes(method)) result = { message_id: 999, chat: { id: Number(payload.chat_id), type: "supergroup" } };
     else assert.ok(["sendAnimation", "sendMessage", "sendChatAction", "answerCallbackQuery", "editMessageReplyMarkup", "sendSticker"].includes(method), method);
     return new Response(JSON.stringify({ ok: true, result }));
   };

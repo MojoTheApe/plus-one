@@ -13,6 +13,17 @@ export function publicAddress(address) {
   return family===4 ? !blocked.check(address,'ipv4') : family===6 && globalV6.check(address,'ipv6') && !blocked.check(address,'ipv6');
 }
 
+// A server-side availability check is not a verdict on evidence retrieved by
+// the web tool. Access restrictions and transient network failures must not
+// discard an otherwise researched answer. Invalid/dead destinations still need
+// correction before delivery.
+export function sourceAvailability(checked) {
+  const hardReasons = new Set(['invalid', 'unsafe', 'invalid-redirect', 'not-found']);
+  const hardFailures = checked.filter(source => !source.ok && hardReasons.has(source.reason));
+  const unavailable = checked.filter(source => !source.ok && !hardReasons.has(source.reason));
+  return { usable: checked.length > 0 && hardFailures.length === 0, hardFailures, unavailable };
+}
+
 // Checks availability and the actual destination, not semantic truth. Every
 // redirect is revalidated, and HTTPS keeps the source hostname for Host/TLS SNI.
 export async function verifySourcePages(urls, deps = {}) {

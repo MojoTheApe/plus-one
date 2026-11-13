@@ -60,6 +60,7 @@ test("sessions survive a new backend instance and images use the independent CLI
   assert.equal(resumed.text, "Продовження");
   assert.deepEqual(calls[1].args.slice(0, 3), ["exec", "resume", id]);
   assert.equal(calls[1].args.includes("--image"), true);
+  assert.deepEqual(calls[1].args.slice(-2), ["--", "-"], 'stdin is a positional prompt, never an image path');
   assert.equal(calls[1].args.includes("features.shell_tool=false"), true);
   assert.equal(calls[1].args.includes('sandbox_mode="read-only"'), true);
   assert.equal(calls[1].prompt, "Next");

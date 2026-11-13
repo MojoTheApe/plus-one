@@ -9,6 +9,17 @@ const available = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status 
 test('an expired overall deadline prevents preparation before reading or launching tools',async()=>{
   await assert.rejects(prepareMediaForTelegram([{filePath:'/nonexistent',mediaKind:'image'}],{deadline:Date.now()-1}),error=>error.code==='SOCIAL_DOWNLOAD_TIMEOUT');
 });
+test('a small silent VP9 file is converted to compatible H264 MP4 without inventing audio or cutting duration', {skip:!available}, async t=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'format-qa-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const input=path.join(root,'source.webm');
+  execFileSync('ffmpeg',['-v','error','-y','-f','lavfi','-i','testsrc2=size=96x64:rate=10','-t','1','-c:v','libvpx-vp9','-threads','1',input],{timeout:15000});
+  assert.ok((await fs.stat(input)).size<100000);
+  const [result]=await prepareMediaForTelegram([{filePath:input,mediaKind:'video',mimeType:'video/webm'}]);
+  assert.equal(result.converted,true);assert.equal(result.hasAudio,false);assert.equal(result.mimeType,'video/mp4');
+  const probe=JSON.parse(execFileSync('ffprobe',['-v','error','-show_streams','-show_format','-of','json',result.filePath],{encoding:'utf8'}));
+  assert.equal(probe.streams[0].codec_name,'h264');assert.equal(probe.streams[0].pix_fmt,'yuv420p');assert.equal(probe.streams.length,1);
+  assert.ok(Math.abs(Number(probe.format.duration)-1)<0.1);
+});
 test("real compression fits the upload budget without cropping duration", { skip: !available }, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "compress-qa-")); t.after(() => fs.rm(root, { recursive: true, force: true }));
   const file = path.join(root, "source.mp4");

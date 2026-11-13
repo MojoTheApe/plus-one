@@ -152,7 +152,9 @@ export class CodexBackend {
       }
       if (!previous) args.push("-C", this.workspace);
       for (const image of images) args.push("--image", image);
-      args.push("-");
+      // --image accepts multiple values, including a bare '-'. Terminate options
+      // explicitly so stdin is never mistaken for another image attachment.
+      args.push("--", "-");
       const result = await this.executeDialogue(args, effectivePrompt, profile);
       const parsed = parseCodexEvents(result.stdout);
       if (result.code === 0 && parsed.completed && !parsed.failed && (parsed.text.trim() || allowEmpty)) {
@@ -194,7 +196,8 @@ export class CodexBackend {
       await fs.writeFile(file, instructions, { mode: 0o600 });
       const config = ["-c", `model_instructions_file=${JSON.stringify(file)}`];
       if (profile.instructions) config.unshift("--ignore-user-config", "-c", "project_doc_max_bytes=0");
-      args.splice(args.length - 1, 0, ...config);
+      const endOfOptions = args.lastIndexOf("--");
+      args.splice(endOfOptions >= 0 ? endOfOptions : args.length - 1, 0, ...config);
       return await this.execute(args, prompt);
     } finally {
       await fs.rm(directory, { recursive: true, force: true });

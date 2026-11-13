@@ -202,6 +202,13 @@ test("explicit web search detection covers direct requests and Ukrainian follow-
     "перевір код у цьому файлі",
     "what do you remember about it?",
     "summarize the last 40 messages",
+    "Do not search for anything; explain your previous answer.",
+    "Напиши сценку, де персонаж каже: «пошукай ключі».",
+    "Поясни, що таке Google.",
+    "Google is the company we discussed; explain your previous answer.",
+    "Google did not find the file. Explain why.",
+    "Don't check online; use the answer you already sent.",
+    "Що означає фраза «перевір в інтернеті»?",
   ]) {
     assert.equal(isExplicitWebSearchRequestText(text), false, text);
   }

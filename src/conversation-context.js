@@ -33,5 +33,20 @@ export function historyPage(items,{cursor=0,limit=100,maxChars=24000}={}){
 export function responseDecision(raw,{mustReply=true,assemblyGames}={}){
   return deliveryDecision(raw,{mustReply,assemblyGames});
 }
+
+// Evidence lives on the actual delivered message in the existing scoped
+// conversation journal. A fresh question cannot borrow another task's proof.
+export function researchForReply(items, message, { now = Date.now(), profileFingerprint = null } = {}) {
+  const chain = message.reply_to_message
+    ? replyChain(items, message.reply_to_message.message_id)
+    : items.slice(-8);
+  const candidates = chain.filter(item => item.chatId === message.chat.id && item.isBot && item.researchEvidence)
+    .filter(item => message.reply_to_message || item.researchEvidence.authorId === message.from?.id)
+    .map(item => item.researchEvidence)
+    .filter(evidence => Number.isSafeInteger(evidence.id) && evidence.id > 0 &&
+      evidence.checkedAt <= now && now - evidence.checkedAt <= 30 * 60 * 1000 &&
+      evidence.profileFingerprint === profileFingerprint && Array.isArray(evidence.sources) && evidence.sources.length);
+  return [...new Map(candidates.map(evidence => [evidence.id, evidence])).values()].slice(-3);
+}
 export function dialoguePolicy(options={}){return deliveryContract(options);}
 export {replyChain,scopedItems};

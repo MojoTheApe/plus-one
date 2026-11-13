@@ -90,6 +90,15 @@ test("extractThreadsPostFromHtml chooses matching post and best media", () => {
     caption: "Hello Threads",
   });
 });
+test('a short Threads URL can use its exact public video metadata and a changed CDN host',()=>{
+  const html='<meta property="og:url" content="https://www.threads.com/@user/post/abc123"><meta property="og:video" content="https://scontent.example.fbcdn.net/video.mp4"><meta property="og:description" content="A public clip">';
+  assert.deepEqual(extractThreadsPostFromHtml(html,'https://www.threads.com/share/short'),{mediaUrls:['https://scontent.example.fbcdn.net/video.mp4'],caption:'A public clip'});
+  assert.equal(extractThreadsPostFromHtml(html,'https://www.threads.com/@user/post/different').mediaUrls.length,0);
+});
+test('a Threads payload belonging to a different author cannot replace the requested post',()=>{
+  const html=`<script type="application/json">${JSON.stringify({code:'abc123',user:{username:'other'},video_versions:[{url:'https://scontent-one.cdninstagram.com/file.mp4'}]})}</script>`;
+  assert.equal(extractThreadsPostFromHtml(html,'https://www.threads.com/@user/post/abc123').mediaUrls.length,0);
+});
 
 test("media type helpers infer kind, mime, and extension", () => {
   assert.equal(inferRemoteMediaKind("https://example.com/photo.webp", ""), "image");

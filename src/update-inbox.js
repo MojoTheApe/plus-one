@@ -9,9 +9,33 @@ export class UpdateInbox {
   done(id){return this.mutate(s=>({...s,pending:s.pending.filter(u=>u.update_id!==id)}));}
 }
 export class ChatQueue {
-  constructor({concurrency=2,onError=()=>{}}={}){this.concurrency=concurrency;this.onError=onError;this.waiting=[];this.active=new Set();this.ids=new Set();this.idle=[];}
-  add(id,key,work){if(this.ids.has(id))return;this.ids.add(id);this.waiting.push({id,key,work});this.pump();}
-  pump(){while(this.active.size<this.concurrency){const i=this.waiting.findIndex(j=>!this.active.has(j.key));if(i<0)break;const job=this.waiting.splice(i,1)[0];this.active.add(job.key);Promise.resolve().then(job.work).catch(this.onError).finally(()=>{this.active.delete(job.key);this.ids.delete(job.id);this.pump();if(!this.ids.size)this.idle.splice(0).forEach(r=>r());});}}
+  constructor({concurrency=2,onError=()=>{}}={}) {
+    this.concurrency=concurrency;this.onError=onError;
+    this.waiting=[];this.active=new Set();this.ids=new Set();this.idle=[];this.jobs=new Map();
+  }
+  add(id,key,work,{messageId}={}) {
+    if(this.ids.has(id))return this.jobs.get(id).completion;
+    let finish;
+    const completion=new Promise(resolve=>{finish=resolve;});
+    const job={id,key,work,messageId,completion,finish};
+    this.ids.add(id);this.jobs.set(id,job);this.waiting.push(job);this.pump();
+    return completion;
+  }
+  pump() {
+    while(this.active.size<this.concurrency) {
+      const index=this.waiting.findIndex(job=>!this.active.has(job.key));
+      if(index<0)break;
+      const job=this.waiting.splice(index,1)[0];this.active.add(job.key);
+      Promise.resolve().then(job.work).catch(this.onError).finally(()=>{
+        this.active.delete(job.key);this.ids.delete(job.id);this.jobs.delete(job.id);job.finish();
+        this.pump();if(!this.ids.size)this.idle.splice(0).forEach(resolve=>resolve());
+      });
+    }
+  }
+  async waitForMessage(key,messageId) {
+    if(!messageId)return;
+    await Promise.all([...this.jobs.values()].filter(job=>job.key===key && job.messageId===messageId).map(job=>job.completion));
+  }
   drain(){return this.ids.size?new Promise(r=>this.idle.push(r)):Promise.resolve();}
 }
 

@@ -20,6 +20,25 @@ test('replay: Threads login redirect is diagnosed as authentication, not a timeo
     ...baseDeps(mockFs()),fetch:async()=>response,
   }),/authentication required/);
 });
+test('a Threads page with disabled server content reports its actual restriction, never an unsupported video format',async()=>{
+  await assert.rejects(downloadThreadsFromPage('https://www.threads.com/@user/post/abc','/tmp/threads',{
+    ...baseDeps(mockFs()),fetch:async()=>new Response('<script type="application/json">{"status":"fail_ssr_disabled"}</script>'),
+  }),error=>error.code==='THREADS_RENDER_UNAVAILABLE');
+  let extractorCalls=0;
+  const result=await downloadSocialVideo('https://www.threads.com/share/fixture',{
+    ...baseDeps(mockFs()),execFileAsync:async()=>{extractorCalls++;throw new Error('unsupported URL');},
+    downloadThreads:async()=>({files:[],title:'Actual page result'}),
+  });
+  assert.equal(extractorCalls,0);assert.equal(result.title,'Actual page result');
+});
+test('the primary downloader accepts a valid video without an audio track',async()=>{
+  const result=await downloadSocialVideoWithYtDlp('https://www.instagram.com/reel/silent','/tmp/social',{
+    ...baseDeps(mockFs()),execFileAsync:async(_file,args)=>({stdout:args.includes('--dump-single-json')?JSON.stringify({duration:1}):''}),
+    findDownloadedVideo:async()=>({filePath:'/tmp/social/silent.mp4',size:100}),
+    validateDownloadedVideo:async(_file,options)=>{assert.equal(options.requireAudio,false);return {hasAudio:false,duration:1};},
+  });
+  assert.equal(result.mediaKind,'video');
+});
 
 test('one download budget aborts a running extractor and cleans its temporary directory', async()=>{
   const files=mockFs();
@@ -100,7 +119,7 @@ test("downloadSocialVideo blocks open fallback circuit", async () => {
 
 test("stream validation triggers only one provider fallback and preserves both causes", async () => {
   let fallbackCalls = 0;
-  const primary = new Error("downloaded media did not contain an audio stream");
+  const primary = new Error("downloaded media did not contain a video stream");
   await assert.rejects(downloadSocialVideo("https://www.tiktok.com/@u/video/1", {
     ...baseDeps(mockFs()),
     execFileAsync: async (_command, args) => args.includes("--dump-single-json")

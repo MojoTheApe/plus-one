@@ -9,7 +9,7 @@ COPY --chown=node:node package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY requirements.txt ./
 RUN python3 -m venv /opt/whisper \
-    && /opt/whisper/bin/pip install --no-cache-dir -r requirements.txt yt-dlp
+    && /opt/whisper/bin/pip install --no-cache-dir -r requirements.txt 'yt-dlp[default,curl-cffi]==2026.10.26'
 COPY --chown=node:node src ./src
 COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node tools ./tools

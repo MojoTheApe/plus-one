@@ -1,7 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
-import {publicAddress,verifySourcePages} from '../src/source-verification.js';
+import {publicAddress,verifySourcePages,sourceAvailability} from '../src/source-verification.js';
+
+test('a denied or slow supplementary page does not discard retrieved research; dead and unsafe citations require correction', () => {
+  const good = {url:'https://example.org/report',ok:true};
+  for (const reason of ['access-restricted','timeout','dns-failed','source-limit']) {
+    const result=sourceAvailability([good,{url:'https://other.example/report',ok:false,reason}]);
+    assert.equal(result.usable,true);assert.equal(result.unavailable.length,1);
+  }
+  for (const reason of ['not-found','unsafe','invalid-redirect']) assert.equal(sourceAvailability([good,{ok:false,reason}]).usable,false);
+  assert.equal(sourceAvailability([]).usable,false);
+});
 
 function fixture(routes) {
   const calls=[];

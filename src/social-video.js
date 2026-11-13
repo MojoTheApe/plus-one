@@ -266,7 +266,11 @@ export function extractSnapinstaMediaUrls(html) {
 }
 
 export function extractThreadsPostFromHtml(html, sourceUrl = "") {
-  const targetPost = extractTargetThreadsPost(html, sourceUrl);
+  const metaUrl = extractHtmlMetaContent(html, "og:url");
+  // Some share pages keep the short URL but expose the target in public metadata.
+  // Never substitute a different post when the requested permalink is known.
+  const resolvedUrl = !threadsShortcodeFromUrl(sourceUrl) && isThreadsSocialVideoUrl(metaUrl) && threadsShortcodeFromUrl(metaUrl) ? metaUrl : sourceUrl;
+  const targetPost = extractTargetThreadsPost(html, resolvedUrl);
   if (targetPost) {
     return {
       mediaUrls: extractThreadsPostMediaUrls(targetPost),
@@ -274,6 +278,19 @@ export function extractThreadsPostFromHtml(html, sourceUrl = "") {
     };
   }
 
+  if (metaUrl && threadsShortcodeFromUrl(resolvedUrl) &&
+      (threadsShortcodeFromUrl(metaUrl) !== threadsShortcodeFromUrl(resolvedUrl) ||
+       (threadsHandleFromUrl(metaUrl) && threadsHandleFromUrl(resolvedUrl) && threadsHandleFromUrl(metaUrl).toLowerCase() !== threadsHandleFromUrl(resolvedUrl).toLowerCase()))) {
+    return { mediaUrls: [], caption: "" };
+  }
+
+  const metaVideoUrl = extractHtmlMetaContent(html, "og:video") || extractHtmlMetaContent(html, "og:video:url") || extractHtmlMetaContent(html, "twitter:player:stream");
+  if (metaVideoUrl && threadsShortcodeFromUrl(resolvedUrl) &&
+      (!metaUrl || threadsShortcodeFromUrl(metaUrl) === threadsShortcodeFromUrl(resolvedUrl))) {
+    const normalized = normalizeSocialMediaUrl(metaVideoUrl);
+    if (normalized && isLikelyThreadsPostMediaUrl(normalized)) return { mediaUrls: [normalized],
+      caption: extractHtmlMetaContent(html, "og:description") || extractHtmlMetaContent(html, "description") };
+  }
   const metaImageUrl = extractHtmlMetaContent(html, "og:image") || extractHtmlMetaContent(html, "twitter:image");
   if (metaImageUrl) {
     const normalized = normalizeSocialMediaUrl(metaImageUrl);
@@ -306,7 +323,7 @@ export function extractTargetThreadsPost(html, sourceUrl) {
     if (!handle) return true;
     return String(post?.user?.username || "").toLowerCase() === handle.toLowerCase();
   });
-  return matchingPosts[0] || posts[0] || null;
+  return matchingPosts[0] || null;
 }
 
 export function collectThreadsPostsByCode(value, shortcode, posts, depth = 0) {
@@ -413,7 +430,7 @@ export function padBase64Url(value) {
 export function isLikelyThreadsPostMediaUrl(value) {
   try {
     const url = new URL(value);
-    if (!/scontent-[^/]+\.cdninstagram\.com$/i.test(url.hostname)) return false;
+    if (!/scontent-[^/]+\.cdninstagram\.com$/i.test(url.hostname) && !/(?:^|\.)fbcdn\.net$/i.test(url.hostname)) return false;
     if (/\/t51\.(?:2885|82787)-19\//i.test(url.pathname)) return false;
     if (/profile_pic|s150x150|s640x640/i.test(value)) return false;
     return /\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp)(?:[?#]|$)/i.test(url.pathname) || /\/o1\/v\/t16\//i.test(url.pathname);

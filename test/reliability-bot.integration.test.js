@@ -29,14 +29,16 @@ async function fixture(t, profile = "legacy", owner, configure = async () => {},
   let setupTurn = async input => ({ intent: input.kind === "menu" ? "setup" : "answer" });
   Backend.prototype.classify = async args => { classified.push(args); return JSON.stringify(args.schemaFile.endsWith("setup-turn.schema.json") ? {...featureTurnFixture(JSON.parse(args.prompt)),...await setupTurn(JSON.parse(args.prompt))} : languageDecision); };
   Backend.prototype.ask = async args => { prompts.push(args.prompt); if (answerError) throw answerError; if (answerFn) return answerFn(args); return { text: "Знайшов відповідь за назвою.", searchStatus: { executed: searchSucceeded, succeeded: searchSucceeded, failures: 0 } }; };
-  let nextMessage = 1000, memberStatus = "administrator", memberLookup = null;
+  let nextMessage = 1000, memberStatus = "administrator", memberLookup = null, uploadFn = null;
   globalThis.fetch = async (input, options = {}) => {
     const url = new URL(String(input)); assert.equal(url.hostname, "api.telegram.org", "Only mocked Telegram calls");
     if(url.pathname.startsWith("/file/"))return new Response(new Uint8Array([1,2,3]));
-    const method = url.pathname.split("/").at(-1), payload = JSON.parse(options.body || "{}");
+    const method = url.pathname.split("/").at(-1), multipart = options.body instanceof FormData;
+    const payload = multipart ? Object.fromEntries(options.body.entries()) : JSON.parse(options.body || "{}");
     assert.notEqual(method, "getUpdates"); calls.push({ method, payload });
+    if (multipart && uploadFn) return uploadFn(method, options.body);
     const result = method === "getStickerSet" ? { name: payload.name, sticker_type: "regular" } : method === "getChatMember" ? (memberLookup ? memberLookup(payload) : { status: memberStatus }) : method === "getFile" ? {file_path:"photos/fixture.jpg",file_size:3} : { message_id: nextMessage++ };
-    assert.ok(["getChatMember", "sendChatAction", "sendMessage", "getFile", "sendAnimation", "getStickerSet", "getChatAdministrators", "answerCallbackQuery", "editMessageText", "banChatMember", "unbanChatMember"].includes(method), method);
+    assert.ok(["getChatMember", "sendChatAction", "sendMessage", "getFile", "sendAnimation", "sendPhoto", "sendVideo", "sendMediaGroup", "getStickerSet", "getChatAdministrators", "answerCallbackQuery", "editMessageText", "banChatMember", "unbanChatMember"].includes(method), method);
     return new Response(JSON.stringify({ ok: true, result }));
   };
   t.after(async () => {
@@ -47,15 +49,18 @@ async function fixture(t, profile = "legacy", owner, configure = async () => {},
   await fs.mkdir(root + "/src");
   for (const name of await fs.readdir("src")) if (name !== "bot.js") await fs.symlink(path.resolve("src", name), root + "/src/" + name);
   let source = await fs.readFile("src/bot.js", "utf8");
+  source = source.replace('import { verifySourcePages, sourceAvailability } from "./source-verification.js";',
+    'import {sourceAvailability} from "./source-verification.js"; let verifySourcePages=async urls=>urls.map(url=>({url,ok:true})); export function setSourceVerifier(fn){verifySourcePages=fn;}');
   const start = source.indexOf("main().catch((error) => {"), end = source.indexOf("\nasync function main()", start);
   source = source.slice(0, start) + source.slice(end);
-  source += '\nexport async function queued(update){await updateInbox.add([update]);scheduleUpdate(update);await workQueue.drain();return (await updateInbox.load()).pending;}\nexport function setCallback(fn){assembleRouter.handleCallback=fn;}\nexport async function init(){botInfo={id:77,username:"ReliabilityTestBot"};await ensureMemoryVault();await ensureSettingsVault();}\nexport {handleUpdate};\nexport function closeSetup(){setupStore?.close();}\nexport function setDownloader(fn){downloadSocialVideo=fn;}\nexport function setTranscriber(fn){transcribeWithLocalWhisper=fn;}\nexport function setMediaNow(fn){socialVideoBudget.now=fn;}\n';
+  source += '\nexport async function enqueue(update){await updateInbox.add([update]);scheduleUpdate(update);}\nexport async function drainText(){await workQueue.drain();}\nexport async function drainAll(){await workQueue.drain();await mediaQueue.drain();}\nexport async function pending(){return (await updateInbox.load()).pending;}\n';
+  source += '\nexport async function queued(update){await enqueue(update);await drainAll();return pending();}\nexport function setCallback(fn){assembleRouter.handleCallback=fn;}\nexport async function init(){botInfo={id:77,username:"ReliabilityTestBot"};await ensureMemoryVault();await ensureSettingsVault();}\nexport {handleUpdate};\nexport function closeSetup(){setupStore?.close();}\nexport function setDownloader(fn){downloadSocialVideo=fn;}\nexport function setTranscriber(fn){transcribeWithLocalWhisper=fn;}\nexport function setMediaNow(fn){socialVideoBudget.now=fn;}\n';
   await fs.writeFile(root + "/src/bot.mjs", source);
   await configure(root);
   let app = await import(root + "/src/bot.mjs"); await app.init();
   t.after(() => app.closeSetup());
   let id = 10;
-  return { root, calls, prompts, classified, update: update => app.handleUpdate(update), queue: update => app.queued(update), setCallback: fn => app.setCallback(fn), restart: async () => { app.closeSetup(); app = await import(root + "/src/bot.mjs?restart=" + Date.now()); await app.init(); }, setDownloader: fn => app.setDownloader(fn), setTranscriber: fn => app.setTranscriber(fn), setMediaNow: fn => app.setMediaNow(fn), setLanguage:value=>{languageDecision=value;},
+  return { root, calls, prompts, classified, update: update => app.handleUpdate(update), queue: update => app.queued(update), enqueue:update=>app.enqueue(update), drainText:()=>app.drainText(), drainAll:()=>app.drainAll(), pending:()=>app.pending(), setUpload:fn=>{uploadFn=fn;}, setCallback: fn => app.setCallback(fn), setSourceVerifier:fn=>app.setSourceVerifier(fn), restart: async () => { app.closeSetup(); app = await import(root + "/src/bot.mjs?restart=" + Date.now()); await app.init(); }, setDownloader: fn => app.setDownloader(fn), setTranscriber: fn => app.setTranscriber(fn), setMediaNow: fn => app.setMediaNow(fn), setLanguage:value=>{languageDecision=value;},
     setAnswer: fn => { answerFn = fn; }, setSetupTurn: fn => { setupTurn = fn; }, setMemberStatus: value => { memberStatus = value; }, setMemberLookup: fn => { memberLookup = fn; }, setError: error => { answerError = error; }, setSearch: value => { searchSucceeded = value; },
     handle: extra => app.handleUpdate({ update_id: id, message: { message_id: nextMessage++, date: Math.floor(Date.now()/1000), chat: { id: -123, type: "supergroup", is_forum:true }, is_topic_message:true, from: { id: 88, username: "Fixture" }, message_thread_id: 9, ...extra } }) };
 }
@@ -142,12 +147,137 @@ test('replay: insistence keeps one interpersonal dispute, including after saved-
   assert.match(f.prompts.filter(p=>p.includes('scope extractor')).at(-1),/Новий аргумент/);
 });
 
+test('a researched judge verdict preserves source access limitations', async t => {
+  const f=await fixture(t);
+  for (const [message_id,text,reply] of [[20,'Вода кипить при ста градусах'],[21,'Це залежить від тиску',20],[22,'Перевірмо за науковим джерелом',21]]) {
+    await f.handle({message_id,text,reply_to_message:reply?{message_id:reply,from:{id:99}}:undefined});
+  }
+  f.setSourceVerifier(async urls=>urls.map(url=>({url,ok:false,reason:'access-restricted',status:403})));
+  f.setAnswer(async args=>({text:args.prompt.includes('Return one JSON object:')
+    ? JSON.stringify({action:'judge',language:'uk',targetMessageId:21})
+    : args.prompt.includes('scope extractor')
+      ? JSON.stringify({status:'ready',topic:'Кипіння води',messageIds:[20,21,22],materialPublicClaims:[{claim:'Температура кипіння залежить від тиску',messageIds:[21]}]})
+      : 'Вердикт: тиск має значення. https://source.example/report',searchStatus:{executed:true,succeeded:true}}));
+  await f.handle({text:'@ReliabilityTestBot розсуди',reply_to_message:{message_id:21,from:{id:99},text:'Це залежить від тиску'}});
+  const sent=f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text;
+  assert.match(sent,/тиск має значення/);
+  assert.match(sent,/Частину джерел не вдалося повторно відкрити/);
+});
+
 test('research failure without a completed search is not accepted as verified', async t => {
   const f=await fixture(t);
   f.setAnswer(async()=>({text:JSON.stringify({action:'reply',language:'uk',needsResearch:true,text:'Перевірений факт',sources:[{title:'Новина',url:'https://example.org/report'}]}),searchStatus:{succeeded:false}}));
   await f.handle({text:'@ReliabilityTestBot перевір це'});
   assert.equal(f.prompts.length,2);
   assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/Не вдалося підтвердити/);
+});
+
+test('researched results survive a blocked supplementary source and a same-task follow-up survives restart', async t => {
+  const f=await fixture(t);
+  const sources=[{title:'Organizer',url:'https://organizer.example/events'},{title:'Tickets',url:'https://tickets.example/event'}];
+  let checks=0;
+  f.setSourceVerifier(async urls=>{checks++;return urls.map(url=>({url,ok:url.includes('organizer'),reason:url.includes('organizer')?undefined:'access-restricted',status:url.includes('organizer')?200:403}));});
+  f.setAnswer(async()=>({text:JSON.stringify({action:'reply',language:'uk',needsResearch:true,text:'Концерт у Відні 29 листопада.',sources}),searchStatus:{executed:true,succeeded:true}}));
+  await f.handle({message_id:500,text:'@ReliabilityTestBot пошукай концерти в Європі'});
+  assert.equal(f.prompts.length,1);assert.equal(checks,1);
+  const sent=f.calls.filter(c=>c.method==='sendMessage').at(-1);
+  assert.match(sent.payload.text,/Концерт у Відні/);assert.match(sent.payload.text,/Частину джерел/);
+  const file=(await fs.readdir(f.root+'/runtime/conversations')).find(name=>name.endsWith('.jsonl'));
+  const records=(await fs.readFile(f.root+'/runtime/conversations/'+file,'utf8')).split('\n').filter(Boolean).map(JSON.parse);
+  const delivered=records.findLast(item=>item.researchEvidence);
+  assert.equal(delivered.deliveryOutcome,'research_partial');assert.equal(delivered.researchEvidence.id,500);
+  await f.restart();
+  f.setSourceVerifier(async()=>{throw new Error('A saved follow-up must not repeat HTTP checks');});
+  f.setAnswer(async args=>{
+    assert.match(args.prompt,/Recent scoped research evidence/);assert.match(args.prompt,/Концерт у Відні/);
+    return {text:JSON.stringify({action:'reply',language:'uk',needsResearch:true,researchRef:500,text:'Знайшов концерт у Відні 29 листопада.',sources}),searchStatus:{succeeded:false}};
+  });
+  await f.handle({message_id:1500,text:'Які концерти ти знайшов?',reply_to_message:{message_id:delivered.messageId,from:{id:77,is_bot:true},text:sent.payload.text}});
+  assert.equal(f.prompts.length,2);assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/Знайшов концерт/);
+  await f.handle({message_id:1550,text:'@ReliabilityTestBot Do not search for anything; explain your previous answer.',reply_to_message:{message_id:delivered.messageId,from:{id:77,is_bot:true},text:sent.payload.text}});
+  assert.equal(f.prompts.length,3);assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/Знайшов концерт/);
+  f.setAnswer(async()=>({text:JSON.stringify({action:'reply',language:'uk',needsResearch:true,researchRef:500,text:'Оновлений концерт.',sources}),searchStatus:{succeeded:false}}));
+  await f.handle({message_id:1600,text:'@ReliabilityTestBot пошукай оновлення',reply_to_message:{message_id:delivered.messageId,from:{id:77,is_bot:true},text:sent.payload.text}});
+  assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/Не вдалося підтвердити/);
+});
+
+test('an unknown research reference cannot replace fresh research', async t => {
+  const f=await fixture(t);
+  f.setAnswer(async()=>({text:JSON.stringify({action:'reply',language:'uk',needsResearch:true,researchRef:500,text:'Нова подія підтверджена.',sources:[{title:'Other',url:'https://other.example/new'}]}),searchStatus:{succeeded:false}}));
+  await f.handle({text:'@ReliabilityTestBot пошукай нові події'});
+  assert.equal(f.prompts.length,2);assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/Не вдалося підтвердити/);
+});
+
+test('a long media job leaves its durable inbox pending while a same-chat question completes; duplicate polling does not repeat it', async t => {
+  const f=await fixture(t);
+  let start,release,downloads=0;
+  const started=new Promise(resolve=>{start=resolve;}),gate=new Promise(resolve=>{release=resolve;});
+  f.setDownloader(async()=>{downloads++;start();await gate;throw new Error('request timeout');});
+  const message={message_id:500,date:Math.floor(Date.now()/1000),chat:{id:-123,type:'supergroup',is_forum:true},is_topic_message:true,message_thread_id:9,from:{id:88},text:'https://www.instagram.com/reel/fixture/'};
+  const update={update_id:500,message};
+  await f.enqueue(update);await started;
+  await f.enqueue({update_id:501,message:{...message,message_id:501,text:'@ReliabilityTestBot поясни слово'}});
+  await f.drainText();
+  assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/Знайшов відповідь/);
+  assert.deepEqual((await f.pending()).map(item=>item.update_id),[500]);
+  await f.enqueue(update);await f.drainText();assert.equal(downloads,1);
+  release();await f.drainAll();assert.deepEqual(await f.pending(),[]);
+});
+
+test('an unconfirmed upload is not retried automatically; an explicit retry uses the prepared cache after restart', async t => {
+  const f=await fixture(t);let downloads=0,uploads=0;
+  const file=path.join(f.root,'image.jpg');await fs.writeFile(file,new Uint8Array([1,2,3]));
+  f.setDownloader(async()=>{downloads++;return {files:[{filePath:file,mediaKind:'image',mimeType:'image/jpeg',title:'Fixture'}]};});
+  f.setUpload(async()=>{uploads++;throw Object.assign(new Error('connection interrupted'),{code:'ECONNRESET'});});
+  await f.handle({message_id:500,text:'https://www.instagram.com/p/fixture/'});
+  let journal=JSON.parse(await fs.readFile(f.root+'/runtime/media.json'));
+  assert.equal(journal.operations[0].status,'unknown');assert.equal(journal.operations[0].failure.code,'UPLOAD_UNKNOWN');
+  assert.equal(uploads,1);assert.equal(downloads,1);
+  const notice=f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text;
+  assert.match(notice,/автоматично його не дублюю/);
+  await f.restart();f.setMediaNow(()=>Date.now()+31000);
+  f.setUpload(async()=>{uploads++;return new Response(JSON.stringify({ok:true,result:{message_id:1900}}));});
+  await f.handle({message_id:1500,text:'Repeat',reply_to_message:{message_id:journal.operations[0].errorMessageId,from:{id:77,is_bot:true},text:notice}});
+  journal=JSON.parse(await fs.readFile(f.root+'/runtime/media.json'));
+  assert.equal(downloads,1);assert.equal(uploads,2);assert.equal(journal.operations[0].status,'done');
+  assert.deepEqual(journal.operations[0].sentMessageIds,[1900]);
+  await f.handle({message_id:500,text:'https://www.instagram.com/p/fixture/'});
+  assert.equal(uploads,2);
+});
+
+test('voice transcription leaves independent questions responsive and a reply waits for its referenced transcript',async t=>{
+  const f=await fixture(t,'legacy',undefined,async()=>{},'codex',true);
+  let start,release;const started=new Promise(resolve=>{start=resolve;}),gate=new Promise(resolve=>{release=resolve;});
+  f.setTranscriber(async()=>{start();await gate;return {text:'Spoken fixture evidence',language:'uk'};});
+  const message={message_id:500,date:Math.floor(Date.now()/1000),chat:{id:-123,type:'supergroup',is_forum:true},is_topic_message:true,message_thread_id:9,from:{id:88},voice:{file_id:'voice',file_size:3,duration:1},reply_to_message:{message_id:90,from:{id:77,is_bot:true},text:'Question'}};
+  await f.enqueue({update_id:500,message});await started;
+  await f.enqueue({update_id:501,message:{...message,message_id:501,voice:undefined,reply_to_message:undefined,text:'@ReliabilityTestBot коротке питання'}});
+  await f.drainText();assert.equal(f.prompts.length,1);
+  await f.enqueue({update_id:502,message:{...message,message_id:502,voice:undefined,text:'@ReliabilityTestBot що він сказав?',reply_to_message:{message_id:500,from:{id:88},voice:message.voice}}});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(f.prompts.length,1);
+  release();await f.drainAll();assert.equal(f.prompts.length,3);
+  assert.match(f.prompts.at(-1),/Spoken fixture evidence/);assert.deepEqual(await f.pending(),[]);
+});
+
+test('an interrupted album retry sends only files without acknowledged delivery', async t => {
+  const f=await fixture(t);let downloads=0;const uploads=[];
+  const files=[];
+  for(let i=0;i<11;i++){const file=path.join(f.root,`image-${i}.jpg`);await fs.writeFile(file,new Uint8Array([i,2,3]));files.push({filePath:file,mediaKind:'image',mimeType:'image/jpeg'});}
+  f.setDownloader(async()=>{downloads++;return {files};});
+  f.setUpload(async method=>{
+    uploads.push(method);
+    if(method==='sendMediaGroup')return new Response(JSON.stringify({ok:true,result:Array.from({length:10},(_,i)=>({message_id:2000+i}))}));
+    throw new Error('fetch failed');
+  });
+  await f.handle({message_id:500,text:'https://www.instagram.com/p/album/'});
+  const before=JSON.parse(await fs.readFile(f.root+'/runtime/media.json')).operations[0];
+  assert.equal(before.deliveredFileCount,10);assert.equal(before.sentMessageIds.length,10);
+  f.setMediaNow(()=>Date.now()+31000);
+  f.setUpload(async method=>{uploads.push(method);return new Response(JSON.stringify({ok:true,result:{message_id:2010}}));});
+  await f.handle({message_id:1500,text:'Repeat',reply_to_message:{message_id:before.errorMessageId,from:{id:77,is_bot:true},text:'Upload unconfirmed'}});
+  const after=JSON.parse(await fs.readFile(f.root+'/runtime/media.json')).operations[0];
+  assert.deepEqual(uploads,['sendMediaGroup','sendPhoto','sendPhoto']);assert.equal(downloads,1);
+  assert.equal(after.status,'done');assert.equal(after.deliveredFileCount,11);assert.equal(after.sentMessageIds.length,11);
 });
 
 test('an unavailable explicit judge anchor cannot silently fall back to another discussion',async t=>{
