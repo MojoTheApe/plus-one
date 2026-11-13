@@ -4,6 +4,13 @@ import { randomUUID } from "node:crypto";
 
 const durationText = n => { const seconds = Math.ceil(n); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; };
 export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes = 48 * 1024 * 1024, stage = "download" } = {}) {
+  if (error?.deliveryUnknown) return { code: "UPLOAD_UNKNOWN", retryable: true, stage: "upload", status: error.status || null,
+    transportCode: error.transportCode || error.cause?.code || null,
+    reason: "Не отримав підтвердження від Telegram. Файл міг уже з’явитися в чаті, тому автоматично його не дублюю. Перевір чат; якщо файлу немає, попроси повторити надсилання." };
+  if (error?.code === "MEDIA_RETRY_CACHE_MISSING") return { code: "RETRY_CACHE_MISSING", retryable: false, stage: "prepare", status: null,
+    reason: "Частину файлів уже надіслано, але підготовлена копія решти більше недоступна. Не повторюю весь набір, щоб не дублювати вже надіслане. Потрібні відсутні файли окремо." };
+  if (error?.code === "THREADS_RENDER_UNAVAILABLE") return { code: "SOURCE_CONTENT_UNAVAILABLE", retryable: true, stage: "download", status: null,
+    reason: "Threads повернув сторінку без самого вмісту публікації, тому отримати файл цим способом зараз не вдалося. Це не помилка формату відео. Можна надіслати сам файл або іншу доступну копію." };
   if(error?.code === 'SOCIAL_DOWNLOAD_TIMEOUT') return {
     code:'TIMEOUT',retryable:true,stage,status:null,reason:'Вичерпано час цієї спроби; роботу зупинено. Можна повторити пізніше.',
     ...(Number.isFinite(error.elapsedSeconds)?{elapsedSeconds:error.elapsedSeconds}:{}),
@@ -69,7 +76,9 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
 
 export function failureMessage(failure, id) {
   const stages = { download: "отримання медіа", prepare: "перевірка й підготовка", upload: "надсилання до Telegram" };
-  return `Не вдалося надіслати медіа: ${failure.reason}\nЕтап: ${stages[failure.stage] || failure.stage}. Код: ${failure.code}${id ? ` · ${id}` : ""}.`;
+  const title = failure.code === "UPLOAD_UNKNOWN" ? "Не вдалося підтвердити надсилання медіа" : "Не вдалося надіслати медіа";
+  const causes = failure.causes?.length > 1 ? "\n" + failure.causes.map(cause => `${cause.provider}: ${cause.reason}`).join("\n") : "";
+  return `${title}: ${failure.reason}${causes}\nЕтап: ${stages[failure.stage] || failure.stage}. Код: ${failure.code}${id ? ` · ${id}` : ""}.`;
 }
 
 export function isMediaRetryText(text, username = "") {

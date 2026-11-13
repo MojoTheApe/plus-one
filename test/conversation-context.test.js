@@ -4,11 +4,21 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ConversationStore, retentionMs, scopedItems, replyChain } from '../src/conversation-store.js';
-import { historyIntent, selectContext, localEpoch, localTime, responseDecision, historyPage } from '../src/conversation-context.js';
+import { historyIntent, selectContext, localEpoch, localTime, responseDecision, historyPage, researchForReply } from '../src/conversation-context.js';
 import { UpdateInbox, ChatQueue } from '../src/update-inbox.js';
 import { parseJudgeScopesText } from '../src/judge.js';
 
 async function directory(t){const p=await fs.mkdtemp(path.join(os.tmpdir(),'bot-context-'));t.after(()=>fs.rm(p,{recursive:true,force:true}));return p;}
+test('research reuse is scoped to delivered reply ancestors, freshness, author and profile',()=>{
+ const now=Date.now(),evidence={id:1,checkedAt:now-1000,authorId:7,profileFingerprint:'profile',sources:[{url:'https://example.org/source'}]};
+ const items=[{chatId:-123,messageId:2,isBot:true,researchEvidence:evidence},{chatId:-123,messageId:3,isBot:true,replyToMessageId:2}];
+ const message={chat:{id:-123},from:{id:7},reply_to_message:{message_id:3}};
+ assert.equal(researchForReply(items,message,{now,profileFingerprint:'profile'}).length,1);
+ for(const options of [{now:now+31*60000,profileFingerprint:'profile'},{now,profileFingerprint:'different'}])assert.equal(researchForReply(items,message,options).length,0);
+ assert.equal(researchForReply(items,{...message,chat:{id:-456}},{now,profileFingerprint:'profile'}).length,0);
+ assert.equal(researchForReply(items,{chat:{id:-123},from:{id:8}},{now,profileFingerprint:'profile'}).length,0);
+ assert.equal(researchForReply(items.map(item=>({...item,isBot:false})),message,{now,profileFingerprint:'profile'}).length,0);
+});
 test('history survives process recreation, includes replies, and purges content after seven days',async t=>{
  const root=await directory(t);let now=Date.now();const store=new ConversationStore(root,{now:()=>now});
  const item={chatId:-123,messageId:1,date:now,text:'saved question',messageThreadId:9};await store.record(item);await store.record({...item,messageId:2,text:'bot answer',isBot:true,replyToMessageId:1});

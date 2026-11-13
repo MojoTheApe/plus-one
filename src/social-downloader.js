@@ -11,6 +11,7 @@ import {
   extractSnapinstaMediaUrls,
   extractThreadsPostFromHtml,
   inferRemoteMediaKind,
+  isThreadsSocialVideoUrl,
   mediaExtensionForMimeType,
   normalizeMediaMimeType,
   uniqueStrings,
@@ -183,6 +184,9 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
   const extracted = extractThreadsPostFromHtml(html, resolvedUrl);
   const mediaUrls = extracted.mediaUrls;
   if (!mediaUrls.length) {
+    if (/"status"\s*:\s*"fail_ssr_disabled"/u.test(html)) {
+      throw Object.assign(new Error("Threads returned a page without server-rendered post contents"), { code: "THREADS_RENDER_UNAVAILABLE" });
+    }
     const error = new Error("Threads fetch returned no media");
     error.code = "THREADS_MEDIA_NOT_FOUND";
     throw error;
@@ -354,6 +358,9 @@ function decodeByteString(value) {
 export async function downloadSocialVideo(url, deps) {
   const tempDir = await deps.fs.promises.mkdtemp(path.join(os.tmpdir(), "telegram-social-video-"));
   try {
+    // yt-dlp has no Threads extractor. Its generic unsupported-URL error says
+    // nothing about the media format and must not mask the actual page result.
+    if (isThreadsSocialVideoUrl(url)) return await runSocialVideoFallback("threads", () => deps.downloadThreads(url, tempDir), deps);
     try {
       return await downloadSocialVideoWithYtDlp(url, tempDir, deps);
     } catch (error) {
@@ -446,6 +453,7 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
     deps.downloader,
     [
       "--ignore-config",
+      "--js-runtimes", "node",
       "--no-playlist",
       "--no-warnings",
       "--socket-timeout",
@@ -479,7 +487,7 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
   if (file.size > deps.maxBytes) throw new Error(`downloaded file exceeds ${maxMb} MB`);
   // Provider fallback belongs to downloadSocialVideo. Keeping it at one layer
   // prevents one failed validation from silently executing the same fallback twice.
-  const video = await deps.validateDownloadedVideo(file.filePath, { requireAudio: true });
+  const video = await deps.validateDownloadedVideo(file.filePath, { requireAudio: false });
   file.hasAudio = video.hasAudio;
   file.duration = video.duration;
   file.width = video.width;
@@ -502,6 +510,7 @@ export async function inspectSocialVideo(url, deps) {
     deps.downloader,
     [
       "--ignore-config",
+      "--js-runtimes", "node",
       "--no-playlist",
       "--no-warnings",
       "--socket-timeout",

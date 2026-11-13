@@ -235,14 +235,19 @@ export function isExplicitWebSearchRequestText(text) {
   const shortUkrainianFollowUp =
     /^(?:ну\s+)?(?:так\s+)?(?:перевір|перевірте|пошукай|пошукайте|загугли|загугліть|прогугли|прогугліть)(?:\s+(?:це|цю\s+інформацію|ще\s+раз))?(?:,?\s+будь\s+ласка)?[.!?…]*$/u;
   if (shortUkrainianFollowUp.test(value)) return true;
+  // Only a direct imperative is a trusted transport signal. Quoted, negated
+  // and descriptive mentions remain for the model's semantic interpretation.
+  const command = value.replace(/^(?:@[\w]+[,:]?\s+)?(?:(?:please|будь\s+ласка)[, ]+)?(?:(?:ну|так)[, ]+)*/u, "");
+  if (/^(?:пошукай|пошукайте|загугли|загугліть|прогугли|прогугліть|погугли|поищи)(?:$|[^\p{L}\p{N}_])/u.test(command) ||
+      /^(?:search\s+(?:for|the\s+web)|look\s+up|browse\s+(?:for|the\s+web))\b/u.test(command)) return true;
 
   const webLocation =
     /(?:\b(?:online|internet|web|sources?)\b|(?:^|[^\p{L}\p{N}_])(?:онлайн|інтернет(?:і|у)?|мережі|джерел(?:о|а|ами|ах)?)(?:$|[^\p{L}\p{N}_]))/u;
   if (!webLocation.test(value)) return false;
 
   return (
-    /\b(?:search|check|verify|research|browse|google|look\s+up)\b/u.test(value) ||
-    /(?:^|[^\p{L}\p{N}_])(?:перевір|перевірте|пошукай|пошукайте|знайди|знайдіть|загугли|загугліть|прогугли|прогугліть)(?:$|[^\p{L}\p{N}_])/u.test(value)
+    /^(?:search|check|verify|research|browse|look\s+up)\b/u.test(command) ||
+    /^(?:перевір|перевірте|пошукай|пошукайте|знайди|знайдіть|загугли|загугліть|прогугли|прогугліть)(?:$|[^\p{L}\p{N}_])/u.test(command)
   );
 }
 
