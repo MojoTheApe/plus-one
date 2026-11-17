@@ -12,6 +12,15 @@ class SourceWait(Exception):
         self.seconds = max(1, int(seconds))
 
 
+def explicit_http_status(message):
+    # Exceptions can echo publication URLs/IDs; their digits are not HTTP evidence.
+    text = re.sub(r"https?://\S+", "", message)
+    match = re.search(r"\bHTTP(?:/\d(?:\.\d)?)?(?:\s+Error|\s+status)?\s*:?\s+([45]\d{2})\b", text, re.I)
+    if not match:
+        match = re.search(r"\b([45]\d{2})\s+(?:Bad Request|Unauthorized|Forbidden|Not Found|Request Timeout|Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)\b", text, re.I)
+    return int(match[1]) if match else None
+
+
 def publication_manifest(post, max_items):
     # from_shortcode initially contains the caller's shortcode. Reading the
     # numeric native ID forces metadata retrieval before certifying identity.
@@ -81,23 +90,22 @@ def main():
         status, code = None, "UNKNOWN"
         if isinstance(error, SourceWait):
             code = "RATE_LIMIT"
-        elif "429" in message or name == "TooManyRequestsException":
+        elif name == "TooManyRequestsException":
             status, code = 429, "RATE_LIMIT"
-        elif name in {"LoginRequiredException", "PrivateProfileNotFollowedException"} or "401" in message:
-            status, code = 401, "AUTH_REQUIRED"
         elif name == "QueryReturnedNotFoundException":
             status, code = 404, "UNAVAILABLE"
         elif name == "QueryReturnedForbiddenException":
             status, code = 403, "UNAVAILABLE"
+        elif name in {"LoginRequiredException", "PrivateProfileNotFollowedException"}:
+            status, code = explicit_http_status(message), "AUTH_REQUIRED"
         elif message in {"MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"}:
             code = message
         elif isinstance(error, ImportError):
             code = "MEDIA_ADAPTER_MISSING"
         elif name in {"ConnectionException", "BadResponseException"}:
             code = "SERVICE_ERROR"
-            http = re.search(r"\b([45]\d\d)\b", message)
-            if http:
-                status = int(http[1])
+            status = explicit_http_status(message)
+            if status:
                 code = {400: "UNKNOWN", 401: "AUTH_REQUIRED", 403: "UNAVAILABLE", 404: "UNAVAILABLE", 429: "RATE_LIMIT"}.get(status, "SERVICE_ERROR")
         result = {"error": {"code": code, "status": status, "adapterErrorType": name,
                             **({"retryAfterSeconds": getattr(error, "seconds", 60)} if code == "RATE_LIMIT" else {})}}

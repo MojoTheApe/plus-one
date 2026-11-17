@@ -50,3 +50,24 @@ adapter.main()
   assert.deepEqual(JSON.parse(result.stdout), { error: { code: 'RATE_LIMIT', status: null, adapterErrorType: 'SourceWait', retryAfterSeconds: 120 } });
   assert.doesNotMatch(result.stdout, /fixture|instagram.com/);
 });
+
+test('typed source restrictions and explicit HTTP facts take precedence over digits in publication URLs', () => {
+  const program = `
+import importlib.util,sys,io,json,contextlib
+spec=importlib.util.spec_from_file_location('adapter',sys.argv[1]);adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
+cases=[('QueryReturnedNotFoundException','404 Not Found when querying https://www.instagram.com/p/BA429/','UNAVAILABLE',404),('QueryReturnedForbiddenException','https://www.instagram.com/p/BA401/','UNAVAILABLE',403),('LoginRequiredException','Login required for https://www.instagram.com/p/BA429/','AUTH_REQUIRED',None),('ConnectionException','Query failed for https://www.instagram.com/p/429/','SERVICE_ERROR',None),('ConnectionException','401 Unauthorized when querying https://www.instagram.com/p/BA429/','AUTH_REQUIRED',401),('ConnectionException','HTTP status: 503 at https://www.instagram.com/p/401/','SERVICE_ERROR',503),('TooManyRequestsException','https://www.instagram.com/p/401/','RATE_LIMIT',429)]
+for name,message,code,status in cases:
+ error=type(name,(Exception,),{})(message)
+ def fail(*args):raise error
+ adapter.resolve=fail;sys.argv=['adapter','--url','https://www.instagram.com/p/fixture/']
+ output=io.StringIO()
+ with contextlib.redirect_stdout(output):adapter.main()
+ result=json.loads(output.getvalue())['error']
+ assert result['code']==code and result['status']==status,(name,result)
+ assert 'instagram.com' not in output.getvalue()
+print(json.dumps({'cases':len(cases)}))
+`;
+  const result = spawnSync('python3', ['-B', '-c', program, path.resolve('scripts/instagram-media.py')], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { cases: 7 });
+});
