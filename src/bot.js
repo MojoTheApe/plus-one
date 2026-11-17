@@ -2394,7 +2394,9 @@ async function maybeHandleSocialVideo(message, retry = null) {
       }
       catch { cached = null; }
     }
-    if (retry?.deliveredFileCount && !cached?.complete) {
+    const recoverRejectedReference = retry?.staleRejected === true && !cached?.complete;
+    if (recoverRejectedReference && !hasMediaItemIdentity(retry.mediaItems)) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", cached?.source?.provider);
+    if (retry?.deliveredFileCount && !cached?.complete && !(recoverRejectedReference && cached)) {
       throw Object.assign(new Error("Prepared media for the remaining files has expired"), { code: "MEDIA_RETRY_CACHE_MISSING" });
     }
     const downloadStarted = Date.now();
@@ -2421,6 +2423,10 @@ async function maybeHandleSocialVideo(message, retry = null) {
       ffmpeg: socialVideoFfmpeg, ffprobe: socialVideoFfprobe, deadline:message._mediaDeadline });
     preparedCache = cached?.complete ? cached : await mediaCache.put({ chatId: message.chat.id, topicId: judgeThreadId(message),
       sourceMessageId: operation?.sourceMessageId || message.message_id, sourceUrl: url, source, title: result.title, files: mediaFiles, pending: true });
+    if (recoverRejectedReference && cached) {
+      if (operation.deliveredFileCount) await mediaCache.copyAcknowledged(cached.id, preparedCache.id, { count: operation.deliveredFileCount, botId: botInfo.id });
+      await mediaCache.release(cached.id);
+    }
     if (cached?.complete) await mediaCache.hold(cached.id);
     logInfo("media_stage_completed", messageLogMeta(message, { diagnosticId: operation?.id, stage, elapsedMs: Date.now() - prepareStarted,
       bytes: mediaFiles.reduce((sum, file) => sum + (file.size || 0), 0), converted: mediaFiles.filter(file => file.converted).length }));
@@ -2457,7 +2463,7 @@ async function maybeHandleSocialVideo(message, retry = null) {
       const delivered = operation.deliveredFileCount || 0;
       if (error.deliveryUnknown || error.status !== 400 || !/wrong (?:remote )?file|file[_ ]?id|file reference.*expired|invalid.*file.*identifier/iu.test(error.message) ||
           !mediaFiles.slice(delivered).some(file => file.telegramFileId)) throw error;
-      operation = await mediaOperations.record({ ...operation, status: "prepared", failure: null });
+      operation = await mediaOperations.record({ ...operation, status: "prepared", failure: null, staleRejected: true });
       await mediaCache.invalidateReceipts(preparedCache.id, mediaFiles.slice(delivered).map((_, index) => delivered + index));
       if (mediaFiles.slice(delivered).some(file => !file.filePath)) {
         stage = "download";
