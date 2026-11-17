@@ -260,13 +260,14 @@ test("inspectSocialVideo and downloadSocialVideoWithYtDlp call yt-dlp with expec
 test("Instagram photos and mixed albums preserve native identity and order without an unbound fallback", async () => {
   const storage = mockFs(), fetched = [];
   const manifest = { id: "BA", publicationId: "64", owner: "fixture", url: "https://www.instagram.com/p/BA/", title: "Original title", count: 2,
-    items: [{ index: 0, kind: "image", url: "https://scontent.example.cdninstagram.com/photo.jpg" },
-      { index: 1, kind: "video", url: "https://video.example.fbcdn.net/clip.mp4" }] };
+    items: [{ index: 0, mediaId: "100", kind: "image", url: "https://scontent.example.cdninstagram.com/photo.jpg" },
+      { index: 1, mediaId: "101", kind: "video", url: "https://video.example.fbcdn.net/clip.mp4" }] };
   const deps = { ...baseDeps(storage), instagramScript: "/adapter.py", execFileAsync: async () => ({ stdout: JSON.stringify(manifest) }),
     fetch: async url => { fetched.push(url); return mockResponse({ headers: { "content-type": url.endsWith("jpg") ? "image/jpeg" : "video/mp4" } }); } };
   const result = await downloadInstagramPost("https://www.instagram.com/p/BA/?igsh=tracking", "/tmp/social", deps);
   assert.equal(result.source.status, "verified"); assert.equal(result.source.provider, "instaloader");
   assert.deepEqual(result.files.map(file => file.mediaKind), ["image", "video"]);
+  assert.deepEqual(result.files.map(file => file.sourceItemId), ["native:100", "native:101"]);
   assert.deepEqual(fetched, manifest.items.map(item => item.url));
   manifest.publicationId = "65"; fetched.length = 0;
   await assert.rejects(downloadInstagramPost("https://www.instagram.com/p/BA/", "/tmp/social", deps), { code: "MEDIA_SOURCE_UNVERIFIED" });
@@ -695,3 +696,46 @@ function mockTextResponse(body, { ok = true, status = 200, url = "" } = {}) {
     text: async () => body,
   };
 }
+
+test('all Instagram post/Reel aliases use the same ordered native adapter and explicit session', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'instagram-session-'));
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const session = path.join(root, 'session.json');
+  await fs.promises.writeFile(session, JSON.stringify({ username: 'dedicated', cookies: { sessionid: 'private-fixture' } }), { mode: 0o600 });
+  const manifest = { id: 'BA', publicationId: '64', owner: 'fixture', url: 'https://www.instagram.com/p/BA/', count: 2,
+    items: [{ index: 0, mediaId: '100', kind: 'image', url: 'https://one.cdninstagram.com/first.jpg' },
+      { index: 1, mediaId: '101', kind: 'video', url: 'https://one.cdninstagram.com/second.mp4' }] };
+  for (const alias of ['p', 'reel', 'reels', 'tv']) {
+    let calls = 0;
+    const result = await downloadSocialVideo(`https://www.instagram.com/${alias}/BA/`, {
+      ...baseDeps(fs), instagramSession: session, instagramScript: '/adapter.py',
+      execFileAsync: async (_command, args) => { calls++; assert.ok(args.includes('/adapter.py')); assert.equal(args[args.indexOf('--session') + 1], session); return { stdout: JSON.stringify(manifest) }; },
+      fetch: async () => mockResponse({ headers: { 'content-type': 'application/octet-stream' } }),
+    });
+    assert.equal(calls, 1); assert.equal(result.files.length, 2);
+    assert.deepEqual(result.files.map(item => item.sourceItemId), ['native:100', 'native:101']);
+    await fs.promises.rm(result.tempDir, { recursive: true, force: true });
+  }
+});
+
+test('the native video compatibility extractor receives the same dedicated session at inspection and download', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'instagram-fallback-session-'));
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const session = path.join(root, 'session.json');
+  await fs.promises.writeFile(session, JSON.stringify({ username: 'dedicated', cookies: { sessionid: 'private-fixture' } }), { mode: 0o600 });
+  const cookies = []; let adapterSession = false;
+  const result = await downloadSocialVideo('https://www.instagram.com/reel/BA/', {
+    ...baseDeps(fs), instagramSession: session, instagramScript: '/adapter.py',
+    execFileAsync: async (_command, args) => {
+      if (args.includes('/adapter.py')) { adapterSession = args[args.indexOf('--session') + 1] === session; return { stdout: JSON.stringify({ error: { code: 'AUTH_REQUIRED' } }) }; }
+      const file = args[args.indexOf('--cookies') + 1]; cookies.push(file);
+      assert.equal((await fs.promises.stat(file)).mode & 0o777, 0o600);
+      assert.match(await fs.promises.readFile(file, 'utf8'), /\.instagram.com\tTRUE\t\/\tTRUE\t0\tsessionid\tprivate-fixture/);
+      return { stdout: args.includes('--dump-single-json') ? JSON.stringify({ extractor_key: 'Instagram', id: 'BA', duration: 1 }) : '' };
+    }, findDownloadedVideo: async () => ({ filePath: path.join(root, 'video.mp4'), size: 10 }),
+  });
+  assert.equal(adapterSession, true); assert.equal(cookies.length, 2); assert.equal(cookies[0], cookies[1]);
+  assert.equal(result.source.status, 'verified');
+  await fs.promises.rm(result.tempDir, { recursive: true, force: true });
+  await assert.rejects(fs.promises.stat(cookies[0]), { code: 'ENOENT' });
+});

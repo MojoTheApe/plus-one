@@ -1,16 +1,17 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { mediaPublicationKey } from "./media-source.js";
+import { assertVerifiedMediaSource, mediaPublicationKey } from "./media-source.js";
+import { assertSameMediaItems, hasMediaItemIdentity } from "./media-items.js";
 
 const safeId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const safeName = /^\d{1,2}\.[a-z0-9]{1,6}$/;
 
 export class MediaCache {
-  constructor(directory, { ttlMs = 48 * 3600000, maxTotalBytes = 256 * 1024 * 1024,
+  constructor(directory, { ttlMs = 48 * 3600000, receiptTtlMs = 30 * 86400000, maxTotalBytes = 256 * 1024 * 1024,
     maxFileBytes = 48 * 1024 * 1024, maxEntries = 300, now = Date.now } = {}) {
     this.directory = path.resolve(directory);
-    Object.assign(this, { ttlMs, maxTotalBytes, maxFileBytes, maxEntries, now });
+    Object.assign(this, { ttlMs, receiptTtlMs, maxTotalBytes, maxFileBytes, maxEntries, now });
     this.index = path.join(this.directory, "index.json");
     this.queue = Promise.resolve();
   }
@@ -22,8 +23,8 @@ export class MediaCache {
       const id = randomUUID(), destination = path.join(this.directory, id);
       const entry = { id, chatId, topicId, sourceMessageId, sourceUrl: String(sourceUrl).slice(0, 4096),
         source, title: String(title).slice(0, 1000), sentMessageIds: [], bindings: [], receipts: [], sourceMessageIds: [sourceMessageId],
-        createdAt: this.now(), pending, files: [], sourceFileCount: files.length,
-        manifest: files.map((file, index) => ({ index, mediaKind: file.mediaKind, mimeType: file.mimeType,
+        createdAt: this.now(), pending, ...(pending ? { pendingSince: this.now() } : {}), files: [], sourceFileCount: files.length,
+        manifest: files.map((file, index) => ({ index, sourceItemId: file.sourceItemId, mediaKind: file.mediaKind, mimeType: file.mimeType,
           title: String(file.title || title).slice(0, 1000), size: file.size, width: file.width, height: file.height, duration: file.duration, hasAudio: file.hasAudio })) };
       if (pending) {
         const sizes = await Promise.all(files.map(file => fs.lstat(file.filePath)));
@@ -48,7 +49,7 @@ export class MediaCache {
           const copied = await fs.lstat(target);
           if (copied.size > this.maxFileBytes || bytes + copied.size > this.maxTotalBytes) { await fs.unlink(target); continue; }
           bytes += copied.size;
-          entry.files.push({ name, index, mediaKind: file.mediaKind, mimeType: file.mimeType,
+          entry.files.push({ name, index, sourceItemId: file.sourceItemId, mediaKind: file.mediaKind, mimeType: file.mimeType,
             title: String(file.title || "").slice(0, 1000), size: copied.size });
         }
         if (entry.files.length) state.entries.push(entry);
@@ -126,7 +127,7 @@ export class MediaCache {
   async release(entryId) {
     return this.lock(async () => {
       const state = await this.read(), entry = state.entries.find(item => item.id === entryId);
-      if (entry) entry.pending = false;
+      if (entry) { entry.pending = false; delete entry.pendingSince; }
       await this.write(state);
     });
   }
@@ -134,7 +135,7 @@ export class MediaCache {
   async hold(entryId) {
     return this.lock(async () => {
       const state = await this.read(), entry = state.entries.find(item => item.id === entryId);
-      if (entry) entry.pending = true;
+      if (entry && !entry.pending) { entry.pending = true; entry.pendingSince = this.now(); }
       await this.write(state);
     });
   }
@@ -143,6 +144,21 @@ export class MediaCache {
     return this.lock(async () => {
       const state = await this.read(), entry = state.entries.find(item => item.id === entryId);
       if (entry) entry.receipts = (entry.receipts || []).filter(receipt => !indexes.includes(receipt.index));
+      await this.write(state);
+    });
+  }
+
+  async copyAcknowledged(fromId, toId, { count, botId } = {}) {
+    return this.lock(async () => {
+      const state = await this.read(), from = state.entries.find(entry => entry.id === fromId), to = state.entries.find(entry => entry.id === toId);
+      if (!from || !to || !Number.isSafeInteger(count) || count < 0 || count > to.sourceFileCount ||
+          String(from.chatId) !== String(to.chatId) || from.topicId !== to.topicId ||
+          mediaPublicationKey(from.sourceUrl) !== mediaPublicationKey(to.sourceUrl)) throw new Error("Invalid acknowledged media transfer");
+      assertSameMediaItems(from.manifest, to.manifest, to.source?.provider);
+      to.receipts = from.receipts.filter(item => item.index < count && item.botId === botId);
+      to.bindings = from.bindings.filter(item => item.index < count);
+      to.sentMessageIds = to.bindings.map(item => item.messageId);
+      to.sourceMessageIds = [...new Set([...from.sourceMessageIds, ...to.sourceMessageIds])].slice(-50);
       await this.write(state);
     });
   }
@@ -178,7 +194,7 @@ export class MediaCache {
           sourceMessageIds: Array.isArray(entry.sourceMessageIds) ? entry.sourceMessageIds.filter(Number.isSafeInteger).slice(-50) : [],
           receipts: Array.isArray(entry.receipts) ? entry.receipts.filter(value => Number.isSafeInteger(value?.index) && value.index >= 0 && value.index < entry.sourceFileCount && Number.isSafeInteger(value.botId) &&
             typeof value.fileId === "string" && value.fileId.length > 0 && value.fileId.length <= 1024).slice(0, 20) : [],
-          manifest: Array.isArray(entry.manifest) ? entry.manifest.slice(0, 20).map(file => ({ index: file.index, mediaKind: file.mediaKind,
+          manifest: Array.isArray(entry.manifest) ? entry.manifest.slice(0, 20).map(file => ({ index: file.index, sourceItemId: file.sourceItemId, mediaKind: file.mediaKind,
             mimeType: file.mimeType, title: String(file.title || "").slice(0, 1000), size: file.size, width: file.width, height: file.height,
             duration: file.duration, hasAudio: file.hasAudio })) : [],
           bindings: Array.isArray(entry.bindings) ? entry.bindings.filter(binding => Number.isSafeInteger(binding?.messageId) && binding.messageId > 0 && Number.isSafeInteger(binding.index) && binding.index >= 0 && binding.index < entry.sourceFileCount).slice(-50) : [],
@@ -192,7 +208,11 @@ export class MediaCache {
     for (const entry of state.entries) {
       const directory = path.join(this.directory, entry.id);
       const stat = await fs.lstat(directory).catch(() => null);
-      if (this.now() - entry.createdAt >= this.ttlMs || stat?.isSymbolicLink() || (stat && !stat.isDirectory())) { await this.removeEntry(entry.id); continue; }
+      const pendingExpired = entry.pending && this.now() - (entry.pendingSince ?? entry.createdAt) >= this.ttlMs;
+      const localExpired = this.now() - entry.createdAt >= this.ttlMs && !entry.pending;
+      const receiptExpired = this.now() - entry.createdAt >= this.receiptTtlMs || !hasReusableReceipts(entry);
+      if (pendingExpired || (localExpired && receiptExpired) || stat?.isSymbolicLink() || (stat && !stat.isDirectory())) { await this.removeEntry(entry.id); continue; }
+      if (localExpired) { await this.removeEntry(entry.id); entry.files = []; }
       const available = [];
       for (const file of entry.files) {
         const filePath = path.join(directory, file.name), current = await fs.lstat(filePath).catch(() => null);
@@ -242,4 +262,12 @@ export class MediaCache {
 
 function capacityError() {
   return Object.assign(new Error("Prepared media cache is reserved by unfinished deliveries"), { code: "MEDIA_CACHE_CAPACITY" });
+}
+
+function hasReusableReceipts(entry) {
+  if (entry.pending || entry.manifest?.length !== entry.sourceFileCount || !hasMediaItemIdentity(entry.manifest)) return false;
+  try { assertVerifiedMediaSource(entry.source, entry.source?.requested?.url); } catch { return false; }
+  const botId = entry.receipts?.[0]?.botId;
+  return Number.isSafeInteger(botId) && entry.manifest.every((item, index) => item.index === index &&
+    entry.receipts.some(receipt => receipt.index === index && receipt.botId === botId));
 }

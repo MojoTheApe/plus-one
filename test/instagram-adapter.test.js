@@ -15,6 +15,9 @@ class Post:
  typename='GraphSidecar'
  owner_username='fixture'
  caption='Original caption'
+ def _field(self,*keys):
+  assert keys==('edge_sidecar_to_children','edges')
+  return [{'node':{'id':str(100+i),'is_video':i==1,'video_url':'https://cdn.example/second.mp4'}} for i in range(3)]
  @staticmethod
  def mediaid_to_shortcode(value):
   assert value==64
@@ -26,6 +29,7 @@ post=Post();result=adapter.publication_manifest(post,2)
 assert result['publicationId']=='64' and result['count']==3 and result['owner']=='fixture'
 assert [item['url'] for item in result['items']]==['https://cdn.example/first.jpg','https://cdn.example/second.mp4']
 assert [item['kind'] for item in result['items']]==['image','video']
+assert [item['mediaId'] for item in result['items']]==['100','101']
 post.shortcode='OTHER'
 try:adapter.publication_manifest(post,2);raise AssertionError('mismatch accepted')
 except ValueError as error:assert str(error)=='MEDIA_SOURCE_MISMATCH'
@@ -70,4 +74,31 @@ print(json.dumps({'cases':len(cases)}))
   const result = spawnSync('python3', ['-B', '-c', program, path.resolve('scripts/instagram-media.py')], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), { cases: 7 });
+});
+
+test('the explicit session is loaded for every Instagram alias without browser access', () => {
+  const program = `
+import importlib.util,sys,json,tempfile,pathlib
+from types import SimpleNamespace
+spec=importlib.util.spec_from_file_location('adapter',sys.argv[1]);adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
+loaded=[]
+class Loader:
+ def __init__(self,**kwargs):
+  assert kwargs['max_connection_attempts']==1 and kwargs['request_timeout']==15
+  self.context=SimpleNamespace(load_session=lambda username,cookies:loaded.append((username,cookies)))
+class Post:
+ mediaid=64;shortcode='BA';mediacount=1;typename='GraphImage';owner_username='fixture';caption='';is_video=False;url='https://one.cdninstagram.com/photo.jpg'
+ mediaid_to_shortcode=staticmethod(lambda value:'BA')
+ from_shortcode=staticmethod(lambda context,code:Post())
+sys.modules['instaloader']=SimpleNamespace(Instaloader=Loader,Post=Post,RateController=object)
+with tempfile.TemporaryDirectory() as root:
+ session=pathlib.Path(root)/'session.json';session.write_text(json.dumps({'username':'dedicated','cookies':{'sessionid':'private-fixture'}}))
+ for alias in ['p','reel','reels','tv']:
+  result=adapter.resolve('https://www.instagram.com/'+alias+'/BA/',20,str(session))
+  assert result['items'][0]['mediaId']=='64'
+assert loaded==[('dedicated',{'sessionid':'private-fixture'})]*4
+print('session verified')
+`;
+  const result = spawnSync('python3', ['-B', '-c', program, path.resolve('scripts/instagram-media.py')], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), 'session verified');
 });

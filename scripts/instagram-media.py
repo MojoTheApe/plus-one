@@ -32,14 +32,26 @@ def publication_manifest(post, max_items):
     if not isinstance(count, int) or count < 1:
         raise ValueError("MEDIA_SOURCE_UNVERIFIED")
     if post.typename == "GraphSidecar":
+        edges = post._field("edge_sidecar_to_children", "edges")
+        if any(edge["node"]["is_video"] and "video_url" not in edge["node"] for edge in edges[:max_items]):
+            full_edges = post._full_metadata["edge_sidecar_to_children"]["edges"]
+            if [edge["node"]["id"] for edge in full_edges] != [edge["node"]["id"] for edge in edges]:
+                raise ValueError("MEDIA_SOURCE_MISMATCH")
+            edges = full_edges
         nodes = list(post.get_sidecar_nodes(start=0, end=max_items - 1))
+        if len(edges) != count or len(nodes) != min(count, max_items):
+            raise ValueError("MEDIA_SOURCE_UNVERIFIED")
         items = [{"index": index, "kind": "video" if node.is_video else "image",
+                  "mediaId": str(edges[index]["node"]["id"]),
                   "url": node.video_url if node.is_video else node.display_url}
                  for index, node in enumerate(nodes)]
+        if any(node.is_video != edges[index]["node"]["is_video"] for index, node in enumerate(nodes)):
+            raise ValueError("MEDIA_SOURCE_UNVERIFIED")
     else:
         items = [{"index": 0, "kind": "video" if post.is_video else "image",
+                  "mediaId": str(native_id),
                   "url": post.video_url if post.is_video else post.url}]
-    if len(items) != min(count, max_items) or any(not item["url"] for item in items):
+    if len(items) != min(count, max_items) or any(not item["url"] or not re.fullmatch(r"[0-9]+", item["mediaId"]) for item in items) or len({item["mediaId"] for item in items}) != len(items):
         raise ValueError("MEDIA_SOURCE_UNVERIFIED")
     return {"id": code, "publicationId": str(native_id), "owner": post.owner_username,
             "url": "https://www.instagram.com/p/" + code + "/", "count": count,
@@ -100,6 +112,8 @@ def main():
             status, code = explicit_http_status(message), "AUTH_REQUIRED"
         elif message in {"MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"}:
             code = message
+        elif isinstance(error, (KeyError, TypeError, AttributeError)):
+            code = "MEDIA_SOURCE_UNVERIFIED"
         elif isinstance(error, ImportError):
             code = "MEDIA_ADAPTER_MISSING"
         elif name in {"ConnectionException", "BadResponseException"}:

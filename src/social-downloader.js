@@ -331,19 +331,22 @@ export async function downloadInstagramPost(url, tempDir, deps) {
     throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader");
   }
   const files = [];
+  const itemIds = new Set();
   let bytes = 0;
   for (const [index, item] of manifest.items.entries()) {
     let target;
     try { target = new URL(item.url); } catch { throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader"); }
-    if (item.index !== index || !["image", "video"].includes(item.kind) || target.protocol !== "https:" || target.username || target.password ||
+    if (item.index !== index || typeof item.mediaId !== "string" || !/^\d+$/u.test(item.mediaId) || itemIds.has(item.mediaId) ||
+        !["image", "video"].includes(item.kind) || target.protocol !== "https:" || target.username || target.password ||
         (target.port && target.port !== "443") || !["cdninstagram.com", "fbcdn.net"].some(host => target.hostname.endsWith("." + host))) {
       throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader");
     }
+    itemIds.add(item.mediaId);
     const file = await downloadRemoteMediaFile(item.url, tempDir, `instagram-${index + 1}`, source.resolved.url, item.kind,
       { ...deps, maxBytes: Math.min(deps.maxBytes, 256 * 1024 * 1024 - bytes) });
     bytes += file.size;
     file.title = manifest.title || "Instagram media";
-    file.sourceItemId = `${source.resolved.id}:${index}`;
+    file.sourceItemId = count === 1 ? `publication:${source.resolved.id}` : `native:${item.mediaId}`;
     if (item.kind === "video") Object.assign(file, await deps.validateDownloadedVideo(file.filePath, { requireAudio: false }));
     files.push(file);
   }
@@ -353,10 +356,13 @@ export async function downloadInstagramPost(url, tempDir, deps) {
 export async function downloadSocialVideo(url, deps) {
   const tempDir = await deps.fs.promises.mkdtemp(path.join(os.tmpdir(), "telegram-social-video-"));
   try {
+    if (mediaReference(url)?.platform === "instagram" && deps.instagramSession) {
+      deps = { ...deps, instagramCookieArgs: await instagramCookieArgs(tempDir, deps) };
+    }
     // yt-dlp has no Threads extractor. Its generic unsupported-URL error says
     // nothing about the media format and must not mask the actual page result.
     if (isThreadsSocialVideoUrl(url)) return await runSocialVideoFallback("threads", () => deps.downloadThreads(url, tempDir), deps);
-    if (mediaReference(url)?.platform === "instagram" && mediaReference(url)?.kind === "post" && deps.instagramScript) {
+    if (mediaReference(url)?.platform === "instagram" && ["post", "reel"].includes(mediaReference(url)?.kind) && deps.instagramScript) {
       try { return await downloadInstagramPost(url, tempDir, deps); }
       catch (error) {
         if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error.code) || deps.signal?.aborted || mediaFailure(error).code === "RATE_LIMIT") throw error;
@@ -383,6 +389,24 @@ export async function downloadSocialVideo(url, deps) {
     await deps.fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
+}
+
+async function instagramCookieArgs(tempDir, deps) {
+  // The same explicitly configured JSON session reaches the native video
+  // compatibility path too. Never inspect/import a personal browser profile.
+  try {
+    const stat = await deps.fs.promises.lstat(deps.instagramSession);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 100000) throw new Error();
+    const session = JSON.parse(await deps.fs.promises.readFile(deps.instagramSession, "utf8"));
+    if (!/^[\w.]{1,30}$/u.test(session.username || "") || !session.cookies || Array.isArray(session.cookies) || typeof session.cookies !== "object") throw new Error();
+    const lines = Object.entries(session.cookies).map(([name, value]) => {
+      if (!name || typeof value !== "string" || /[\t\r\n]/u.test(name + value)) throw new Error();
+      return [".instagram.com", "TRUE", "/", "TRUE", "0", name, value].join("\t");
+    });
+    const file = path.join(tempDir, "instagram-cookies.txt");
+    await deps.fs.promises.writeFile(file, "# Netscape HTTP Cookie File\n" + lines.join("\n") + "\n", { mode: 0o600, flag: "wx" });
+    return ["--cookies", file];
+  } catch { throw Object.assign(new Error("Configured Instagram session could not be read"), { code: "AUTH_REQUIRED", downloader: "instaloader" }); }
 }
 
 export function selectFallback(url, deps) {
@@ -470,6 +494,7 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
     deps.downloader,
     [
       "--ignore-config",
+      ...(deps.instagramCookieArgs || []),
       "--js-runtimes", "node",
       "--no-playlist",
       "--no-warnings",
@@ -516,6 +541,7 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
     tempDir,
     filePath: file.filePath,
     mediaKind: "video",
+    sourceItemId: `publication:${source.resolved.id}`,
     mimeType: "video/mp4",
     title: typeof info.title === "string" ? info.title : "",
     duration: file.duration,
@@ -529,6 +555,7 @@ export async function inspectSocialVideo(url, deps) {
     deps.downloader,
     [
       "--ignore-config",
+      ...(deps.instagramCookieArgs || []),
       "--js-runtimes", "node",
       "--no-playlist",
       "--no-warnings",

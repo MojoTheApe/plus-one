@@ -194,13 +194,22 @@ Public access depends on Instagram; no personal browser session is imported.
 If the operator deliberately supplies an existing service-account session,
 `INSTAGRAM_SESSION_FILE` points to a private JSON file with `username` and a
 `cookies` object whose values are strings. Keep it outside Git under private state,
-mode0600, readable by the bot UID. The adapter reads it without pickle or automatic
-login. Its access/challenges remain the operator's responsibility; missing login
+mode0600, readable by the bot UID. All post/Reel aliases and the native single-video
+compatibility extractor use the same session. The latter receives a private
+temporary cookie file, removed with the attempt. The adapter reads the JSON without
+pickle or automatic login. Access/challenges remain the operator's responsibility; missing login
 does not authorize an unbound third-party downloader or a different Stories item.
 
 Preserve the media journal/cache through updates. The journal also holds source
-backoff and aggregate outcomes. The cache protects unfinished albums; confirmed
-file IDs are bot/chat/topic-scoped and expire with the existing48-hour entries.
+backoff and aggregate outcomes. The cache protects unfinished albums. Prepared
+bytes expire after48 hours;
+complete verified item manifests with all acknowledged bot/chat/topic-scoped file
+IDs may be reused for30 days within the existing300-entry cap. Partial/unknown
+and legacy records keep48-hour bounds. Fresh recovery requires the original
+ordered item identities; no legacy album replacement is guessed by position.
+`SOCIAL_VIDEO_PER_CHAT_PER_HOUR` limits successful new source retrievals, not
+prepared/Telegram repeats. A stale reference that needs the source again consumes
+source allowance; cache or upload errors do not count as upstream failures.
 The next job waits/fails before upload if protected files exhaust its256MiB budget.
 Captions retain title/source/link only; requester and operation data stay private.
 

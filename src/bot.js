@@ -25,6 +25,7 @@ import { ConversationStore, scopedItems, replyChain, mergeConversationItem } fro
 import { resolveActionTarget, actionRestriction } from "./dialogue-actions.js";
 import { prepareMediaEvidence } from "./media-evidence.js";
 import { MediaBudget } from "./media-budget.js";
+import { identifyMediaItems, mediaItemSnapshot, assertSameMediaItems, hasMediaItemIdentity } from "./media-items.js";
 import { MediaCache } from "./media-cache.js";
 import { assertVerifiedMediaSource, verifiedMediaSource, mediaReference, sourceIdentityError } from "./media-source.js";
 import { observeTelegramUpload } from "./telegram-upload-observer.js";
@@ -2338,7 +2339,7 @@ async function maybeHandleSocialVideo(message, retry = null) {
     return true;
   }
 
-  const budget = socialVideoBudget.reserve(message.chat.id, url);
+  const budget = socialVideoBudget.reserve(message.chat.id, url, { source: false });
   if (!budget.allowed) {
     const limit = budget.reason === "SUCCESS_QUOTA" ? "Вичерпано погодинний ліміт успішних завантажень." : "Після невдалих або незавершених спроб потрібна коротка пауза.";
     await telegram("sendMessage", {
@@ -2397,7 +2398,7 @@ async function maybeHandleSocialVideo(message, retry = null) {
       throw Object.assign(new Error("Prepared media for the remaining files has expired"), { code: "MEDIA_RETRY_CACHE_MISSING" });
     }
     const downloadStarted = Date.now();
-    const result = cached?.complete ? { files: cached.files, title: cached.files[0]?.title, source: cached.source } : await downloadSocialVideo(url, {deadline:message._mediaDeadline});
+    const result = cached?.complete ? { files: cached.files, title: cached.files[0]?.title, source: cached.source } : await downloadBudgetedMedia(url, budget.reservation, message._mediaDeadline);
     tempDir = result.tempDir;
     const source = assertVerifiedMediaSource(result.source, url);
     operation = await mediaOperations.record({ ...operation, source, downloader: source.provider,
@@ -2410,7 +2411,8 @@ async function maybeHandleSocialVideo(message, retry = null) {
         title: result.title,
       },
     ];
-    operation = await mediaOperations.record({ ...operation, deliveryRoute: downloadedFiles.every(file => file.telegramFileId)
+    if (hasMediaItemIdentity(retry?.mediaItems)) assertSameMediaItems(retry.mediaItems, mediaItemSnapshot(downloadedFiles), source.provider);
+    operation = await mediaOperations.record({ ...operation, mediaItems: mediaItemSnapshot(downloadedFiles), deliveryRoute: downloadedFiles.every(file => file.telegramFileId)
       ? "telegram-file-id" : cached?.complete ? "prepared-cache" : "source" });
     logInfo("media_stage_completed", messageLogMeta(message, { diagnosticId: operation?.id, stage: "download", cached: Boolean(cached?.complete), elapsedMs: Date.now() - downloadStarted, files: downloadedFiles.length }));
     stage = "prepare";
@@ -2459,18 +2461,19 @@ async function maybeHandleSocialVideo(message, retry = null) {
       await mediaCache.invalidateReceipts(preparedCache.id, mediaFiles.slice(delivered).map((_, index) => delivered + index));
       if (mediaFiles.slice(delivered).some(file => !file.filePath)) {
         stage = "download";
-        const fresh = await downloadSocialVideo(url, { deadline: message._mediaDeadline });
+        const fresh = await downloadBudgetedMedia(url, budget.reservation, message._mediaDeadline);
         try {
           const freshSource = assertVerifiedMediaSource(fresh.source, url);
           const candidates = fresh.files || [{ ...fresh, mediaKind: fresh.mediaKind }];
-          if (freshSource.resolved.id !== source.resolved.id || candidates.length !== mediaFiles.length ||
-              candidates.some((file, index) => file.mediaKind !== mediaFiles[index].mediaKind)) throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", freshSource.provider);
+          if (freshSource.resolved.id !== source.resolved.id) throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", freshSource.provider);
+          assertSameMediaItems(operation.mediaItems, mediaItemSnapshot(candidates), freshSource.provider);
           stage = "prepare";
           const replacement = await prepareMediaForTelegram(candidates, { maxDurationSeconds: socialVideoMaxDurationSeconds,
             ffmpeg: socialVideoFfmpeg, ffprobe: socialVideoFfprobe, deadline: message._mediaDeadline });
           const previousCache = preparedCache;
           preparedCache = await mediaCache.put({ chatId: message.chat.id, topicId: judgeThreadId(message), sourceMessageId: operation.sourceMessageId,
             sourceUrl: url, source, title: result.title, files: replacement, pending: true });
+          if (delivered) await mediaCache.copyAcknowledged(previousCache.id, preparedCache.id, { count: delivered, botId: botInfo.id });
           mediaFiles = replacement.map((file, index) => ({ ...file, filePath: preparedCache.files.find(item => item.index === index).filePath }));
           await mediaCache.release(previousCache.id);
           operation = await mediaOperations.record({ ...operation, cacheId: preparedCache.id, deliveryRoute: "source" });
@@ -2556,6 +2559,25 @@ function getSocialVideoMaxMediaItems() {
 
 async function downloadSocialVideo(url, options) {
   return socialDownloader.download(url, options);
+}
+
+async function downloadBudgetedMedia(url, reservation, deadline) {
+  const allowance = socialVideoBudget.reserveSource(reservation);
+  if (!allowance.allowed) throw Object.assign(new Error("Fresh source download allowance unavailable"), {
+    code: "MEDIA_SOURCE_QUOTA", budgetReason: allowance.reason, retryAfterSeconds: allowance.retryAfterSeconds });
+  let result;
+  try {
+    result = await downloadSocialVideo(url, { deadline });
+    const source = assertVerifiedMediaSource(result.source, url);
+    const files = result.files || [{ ...result }];
+    await identifyMediaItems(files, source);
+    socialVideoBudget.completeSource(reservation, { success: true });
+    return { ...result, files };
+  } catch (error) {
+    if (error.code !== "SOCIAL_VIDEO_PROVIDER_COOLDOWN") socialVideoBudget.completeSource(reservation, { success: false });
+    if (result?.tempDir) await fs.promises.rm(result.tempDir, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 function shouldTryTikTokFallback(url) {

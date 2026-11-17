@@ -129,3 +129,51 @@ async function temporaryDirectory(t) {
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test('verified complete references last 30 days, while local bytes and incomplete/legacy records expire at 48 hours', async t => {
+  const { verifiedMediaSource } = await import('../src/media-source.js');
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, 'photo.png');
+  await fs.writeFile(filePath, 'media');
+  let now = 0; const hour = 3600000, root = path.join(directory, 'cache');
+  const cache = new MediaCache(root, { now: () => now });
+  const url = 'https://www.instagram.com/p/BA/';
+  const source = verifiedMediaSource(url, { provider: 'instaloader', id: 'BA', owner: 'fixture' });
+  const file = { filePath, sourceItemId: 'native:64', mediaKind: 'image', mimeType: 'image/png' };
+  const complete = await cache.put({ chatId: -1, topicId: 9, sourceMessageId: 1, sourceUrl: url, source, files: [file], pending: true });
+  await cache.bind(complete.id, [11], { botId: 77, items: [{ photo: [{ file_id: 'known' }] }] });
+  await cache.release(complete.id);
+  const legacy = await cache.put({ chatId: -1, sourceMessageId: 2, sourceUrl: url, source, files: [{ ...file, sourceItemId: undefined }] });
+  await cache.bind(legacy.id, [12], { botId: 77, items: [{ photo: [{ file_id: 'old' }] }] });
+  await cache.put({ chatId: -2, sourceMessageId: 3, sourceUrl: url, source, files: [file], pending: true });
+  now = 48 * hour;
+  const restored = new MediaCache(root, { now: () => now });
+  const scope = { chatId: -1, topicId: 9, botId: 77, sourceUrl: url };
+  const found = await restored.forDelivery(scope);
+  assert.equal(found.complete, true); assert.equal(found.files[0].telegramFileId, 'known');
+  assert.equal(found.files[0].sourceItemId, 'native:64'); assert.equal(found.files[0].filePath, undefined);
+  await assert.rejects(fs.stat(complete.files[0].filePath), { code: 'ENOENT' });
+  assert.equal(await restored.get({ chatId: -1, messageId: 2 }), null);
+  assert.equal(await restored.get({ chatId: -2, messageId: 3 }), null);
+  assert.equal((await restored.forDelivery({ ...scope, botId: 78 })).complete, false);
+  assert.equal(await restored.forDelivery({ ...scope, topicId: 10 }), null);
+  // Starting a repeat of a 2-day-old record gets its own bounded recovery hold.
+  await restored.hold(complete.id); now += hour;
+  assert.equal((await restored.forDelivery({ ...scope, entryId: complete.id })).complete, true);
+  await restored.hold(complete.id); now = 96 * hour;
+  assert.equal(await restored.forDelivery({ ...scope, entryId: complete.id }), null, 'retry does not extend the hold');
+});
+
+test('complete metadata expires at 30 days and entry bounds still apply', async t => {
+  const { verifiedMediaSource } = await import('../src/media-source.js');
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, 'photo.png'); await fs.writeFile(filePath, 'media');
+  let now = 0; const cache = new MediaCache(path.join(directory, 'cache'), { now: () => now, maxEntries: 1 });
+  const url = 'https://www.instagram.com/p/BA/', source = verifiedMediaSource(url, { provider: 'instaloader', id: 'BA', owner: 'fixture' });
+  const put = async messageId => {
+    const entry = await cache.put({ chatId: -1, sourceMessageId: messageId, sourceUrl: url, source, files: [{ filePath, sourceItemId: 'native:64', mediaKind: 'image' }] });
+    await cache.bind(entry.id, [messageId + 10], { botId: 77, items: [{ photo: [{ file_id: 'known' }] }] }); return entry;
+  };
+  await put(1); now++; const second = await put(2);
+  assert.equal(await cache.get({ chatId: -1, messageId: 1 }), null);
+  now += 30 * 86400000;
+  assert.equal(await cache.forDelivery({ chatId: -1, entryId: second.id, botId: 77 }), null);
+});
