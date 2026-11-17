@@ -6,6 +6,9 @@ import { say } from "./helpers.js";
 
 const durationText = n => { const seconds = Math.ceil(n); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; };
 export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes = 48 * 1024 * 1024, stage = "download" } = {}) {
+  if (error?.code === "MEDIA_SOURCE_QUOTA") return { code: error.budgetReason === "SUCCESS_QUOTA" ? "GROUP_RATE_LIMIT" : error.budgetReason,
+    retryable: true, stage: "download", status: null, retryAfterSeconds: error.retryAfterSeconds,
+    reason: `Для нового завантаження з джерела потрібна пауза приблизно ${error.retryAfterSeconds} с. Готові файли можна надсилати повторно.` };
   if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error?.code)) return {
     code: error.code === "MEDIA_SOURCE_MISMATCH" ? "SOURCE_MISMATCH" : "SOURCE_UNVERIFIED", retryable: false, stage: "download", status: null,
     ...(error.fallbackDisabled === true ? { fallbackDisabled: true } : {}),

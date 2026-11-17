@@ -129,3 +129,83 @@ async function temporaryDirectory(t) {
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test('verified complete references last 30 days, while local bytes and incomplete/legacy records expire at 48 hours', async t => {
+  const { verifiedMediaSource } = await import('../src/media-source.js');
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, 'photo.png');
+  await fs.writeFile(filePath, 'media');
+  let now = 0; const hour = 3600000, root = path.join(directory, 'cache');
+  const cache = new MediaCache(root, { now: () => now });
+  const url = 'https://www.instagram.com/p/BA/';
+  const source = verifiedMediaSource(url, { provider: 'instaloader', id: 'BA', owner: 'fixture' });
+  const file = { filePath, sourceItemId: 'native:64', mediaKind: 'image', mimeType: 'image/png' };
+  const complete = await cache.put({ chatId: -1, topicId: 9, sourceMessageId: 1, sourceUrl: url, source, files: [file], pending: true });
+  await cache.bind(complete.id, [11], { botId: 77, items: [{ photo: [{ file_id: 'known' }] }] });
+  await cache.release(complete.id);
+  const legacy = await cache.put({ chatId: -1, sourceMessageId: 2, sourceUrl: url, source, files: [{ ...file, sourceItemId: undefined }] });
+  await cache.bind(legacy.id, [12], { botId: 77, items: [{ photo: [{ file_id: 'old' }] }] });
+  await cache.put({ chatId: -2, sourceMessageId: 3, sourceUrl: url, source, files: [file], pending: true });
+  now = 48 * hour;
+  const restored = new MediaCache(root, { now: () => now });
+  const scope = { chatId: -1, topicId: 9, botId: 77, sourceUrl: url };
+  const found = await restored.forDelivery(scope);
+  assert.equal(found.complete, true); assert.equal(found.files[0].telegramFileId, 'known');
+  assert.equal(found.files[0].sourceItemId, 'native:64'); assert.equal(found.files[0].filePath, undefined);
+  await assert.rejects(fs.stat(complete.files[0].filePath), { code: 'ENOENT' });
+  assert.equal(await restored.get({ chatId: -1, messageId: 2 }), null);
+  assert.equal(await restored.get({ chatId: -2, messageId: 3 }), null);
+  assert.equal((await restored.forDelivery({ ...scope, botId: 78 })).complete, false);
+  assert.equal(await restored.forDelivery({ ...scope, topicId: 10 }), null);
+  // Starting a repeat of a 2-day-old record gets its own bounded recovery hold.
+  await restored.hold(complete.id); now += hour;
+  assert.equal((await restored.forDelivery({ ...scope, entryId: complete.id })).complete, true);
+  await restored.hold(complete.id); now = 96 * hour;
+  assert.equal(await restored.forDelivery({ ...scope, entryId: complete.id }), null, 'retry does not extend the hold');
+});
+
+test('complete metadata expires at 30 days and entry bounds still apply', async t => {
+  const { verifiedMediaSource } = await import('../src/media-source.js');
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, 'photo.png'); await fs.writeFile(filePath, 'media');
+  let now = 0; const cache = new MediaCache(path.join(directory, 'cache'), { now: () => now, maxEntries: 1 });
+  const url = 'https://www.instagram.com/p/BA/', source = verifiedMediaSource(url, { provider: 'instaloader', id: 'BA', owner: 'fixture' });
+  const put = async messageId => {
+    const entry = await cache.put({ chatId: -1, sourceMessageId: messageId, sourceUrl: url, source, files: [{ filePath, sourceItemId: 'native:64', mediaKind: 'image' }] });
+    await cache.bind(entry.id, [messageId + 10], { botId: 77, items: [{ photo: [{ file_id: 'known' }] }] }); return entry;
+  };
+  await put(1); now++; const second = await put(2);
+  assert.equal(await cache.get({ chatId: -1, messageId: 1 }), null);
+  now += 30 * 86400000;
+  assert.equal(await cache.forDelivery({ chatId: -1, entryId: second.id, botId: 77 }), null);
+});
+
+test('long-lived metadata cannot exceed the readable index bound or evict pending recovery', async t => {
+  const { verifiedMediaSource } = await import('../src/media-source.js');
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, 'tiny.png'); await fs.writeFile(filePath, 'tiny');
+  const cache = new MediaCache(path.join(directory, 'cache')), limit = 4 * 1024 * 1024;
+  const url = 'https://www.instagram.com/p/BA/', source = verifiedMediaSource(url, { provider: 'instaloader', id: 'BA', owner: 'fixture' });
+  const files = Array.from({ length: 20 }, (_, i) => ({ filePath, sourceItemId: `native:${i}`, mediaKind: 'image', mimeType: 'image/png', title: 'x'.repeat(1000) }));
+  const pinned = await cache.put({ chatId: 1, sourceMessageId: 500, sourceUrl: url, source, title: 'x'.repeat(1000), files, pending: true });
+  await cache.bind(pinned.id, Array.from({ length: 20 }, (_, i) => 600 + i), { botId: 77, items: files.map((_, i) => ({ photo: [{ file_id: `known-${i}` + 'x'.repeat(100) }] })) });
+  const original = (await cache.read()).entries[0], state = { version: 1, entries: [original] };
+  while (true) {
+    state.entries.push({ ...structuredClone(original), id: randomUUID(), chatId: state.entries.length + 2, files: [], pending: false, createdAt: Date.now() - 49 * 3600000 });
+    if (Buffer.byteLength(JSON.stringify(state)) >= limit) { state.entries.pop(); break; }
+  }
+  assert.ok(state.entries.length < 300);
+  await fs.writeFile(cache.index, JSON.stringify(state));
+  const next = await cache.put({ chatId: -1, sourceMessageId: 501, sourceUrl: url, source, title: 'x'.repeat(1000), files, pending: true });
+  assert.ok((await fs.stat(cache.index)).size <= limit);
+  const restored = await new MediaCache(cache.directory).read();
+  assert.ok(restored.entries.some(item => item.id === pinned.id && item.pending));
+  assert.ok(restored.entries.some(item => item.id === next.id));
+  assert.ok(restored.entries.length <= state.entries.length, 'completed metadata was evicted to fit');
+  await cache.compact();
+  // When every near-limit entry protects a pending attempt, fail before writing.
+  for (const item of state.entries) { item.pending = true; item.pendingSince = Date.now(); }
+  while (Buffer.byteLength(JSON.stringify(state)) > limit) state.entries.pop();
+  const protectedIndex = JSON.stringify(state); await fs.writeFile(cache.index, protectedIndex);
+  await assert.rejects(cache.put({ chatId: -2, sourceMessageId: 502, sourceUrl: url, source, title: 'x'.repeat(1000), files, pending: true }), { code: 'MEDIA_CACHE_CAPACITY' });
+  assert.equal(await fs.readFile(cache.index, 'utf8'), protectedIndex);
+  assert.equal((await cache.read()).entries.length, state.entries.length);
+  assert.equal(await fs.readFile(pinned.files[0].filePath, 'utf8'), 'tiny');
+});

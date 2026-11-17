@@ -14,7 +14,7 @@ export class MediaBudget {
     this.reservations = new Map();
   }
 
-  reserve(chatId, url) {
+  reserve(chatId, url, { source = true } = {}) {
     const now = this.now(), key = String(chatId);
     this.prune(now);
     let state = this.chats.get(key);
@@ -25,23 +25,45 @@ export class MediaBudget {
     }
     state.updatedAt = now;
     const active = [...this.reservations.values()].filter(item => item.chatId === key);
+    if (active.length) return denied("IN_PROGRESS", 5);
+    const reservation = { id: randomUUID(), chatId: key, urlKey: mediaUrlKey(url), createdAt: now, sourceReserved: false, sourceSettled: false, legacy: source };
+    this.reservations.set(reservation.id, reservation);
+    if (source) {
+      const result = this.reserveSource(reservation);
+      if (!result.allowed) { this.reservations.delete(reservation.id); return result; }
+    }
+    return { allowed: true, retryAfterSeconds: 0, reason: null, reservation: { ...reservation } };
+  }
+
+  reserveSource(reservation) {
+    const saved = reservation && this.reservations.get(reservation.id);
+    if (!saved) return denied("IN_PROGRESS", 5);
+    const now = this.now(), state = this.chats.get(saved.chatId);
+    state.successes = state.successes.filter(time => time > now - this.windowMs);
     if (this.hourlyLimit > 0 && state.successes.length >= this.hourlyLimit) {
       return denied("SUCCESS_QUOTA", (state.successes[0] + this.windowMs - now) / 1000);
     }
     if (state.blockedUntil > now) return denied("FAILURE_COOLDOWN", (state.blockedUntil - now) / 1000);
-    const urlKey = mediaUrlKey(url), urlState = state.urls.get(urlKey);
+    const urlState = state.urls.get(saved.urlKey);
     if (urlState?.blockedUntil > now) return denied("URL_BACKOFF", (urlState.blockedUntil - now) / 1000);
-    if (active.length) return denied("IN_PROGRESS", 5);
-    const reservation = { id: randomUUID(), chatId: key, urlKey, createdAt: now };
-    this.reservations.set(reservation.id, reservation);
-    return { allowed: true, retryAfterSeconds: 0, reason: null, reservation: { ...reservation } };
+    saved.sourceReserved = true;
+    saved.sourceSettled = false;
+    return { allowed: true, retryAfterSeconds: 0, reason: null };
+  }
+
+  completeSource(reservation, { success } = {}) {
+    const saved = reservation && this.reservations.get(reservation.id);
+    if (!saved?.sourceReserved || saved.sourceSettled) return false;
+    this.finish(saved, success === true, this.now());
+    saved.sourceSettled = true;
+    return true;
   }
 
   complete(reservation, { success } = {}) {
     const saved = reservation && this.reservations.get(reservation.id);
     if (!saved) return false;
+    if (saved.legacy && !saved.sourceSettled) this.completeSource(saved, { success });
     this.reservations.delete(saved.id);
-    this.finish(saved, success === true, this.now());
     return true;
   }
 
@@ -66,7 +88,7 @@ export class MediaBudget {
     for (const reservation of this.reservations.values()) {
       if (now - reservation.createdAt >= this.reservationTtlMs) {
         this.reservations.delete(reservation.id);
-        this.finish(reservation, false, now);
+        if (reservation.sourceReserved && !reservation.sourceSettled) this.finish(reservation, false, now);
       }
     }
     for (const [key, state] of this.chats) {

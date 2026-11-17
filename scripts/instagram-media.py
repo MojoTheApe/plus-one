@@ -3,6 +3,7 @@
 import argparse
 import json
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -21,6 +22,41 @@ def explicit_http_status(message):
     return int(match[1]) if match else None
 
 
+@contextmanager
+def verified_alternate_urls(post, native_id, children=None):
+    # Instaloader's logged-in high-quality URLs come from a second native API.
+    # Validate that cached response BEFORE the library selects URLs by position.
+    context = getattr(post, "_context", None)
+    if not context or not context.iphone_support or not context.is_logged_in:
+        yield
+        return
+    enabled = context.iphone_support
+    try:
+        alternate = post._iphone_struct
+    except Exception as error:
+        if type(error).__name__ not in {"ConnectionException", "BadResponseException", "QueryReturnedForbiddenException", "QueryReturnedNotFoundException", "LoginRequiredException"}:
+            raise
+        # Retain the library's GraphQL fallback without letting its URL accessor
+        # retry the failed alternate API or use an unverified alternate response.
+        context.iphone_support = False
+    else:
+        expected_type = 8 if children is not None else 2 if post.is_video else 1
+        if not re.fullmatch(r"[0-9]+", str(alternate.get("pk", ""))) or alternate.get("media_type") not in {1, 2, 8}:
+            raise ValueError("MEDIA_SOURCE_UNVERIFIED")
+        if str(alternate.get("pk")) != str(native_id) or alternate.get("media_type") != expected_type:
+            raise ValueError("MEDIA_SOURCE_MISMATCH")
+        if children is not None:
+            if any(not re.fullmatch(r"[0-9]+", str(item.get("pk", ""))) or item.get("media_type") not in {1, 2} for item in alternate["carousel_media"]):
+                raise ValueError("MEDIA_SOURCE_UNVERIFIED")
+            actual = [(str(item["pk"]), item["media_type"] == 2) for item in alternate["carousel_media"]]
+            if actual != children:
+                raise ValueError("MEDIA_SOURCE_MISMATCH")
+    try:
+        yield
+    finally:
+        context.iphone_support = enabled
+
+
 def publication_manifest(post, max_items):
     # from_shortcode initially contains the caller's shortcode. Reading the
     # numeric native ID forces metadata retrieval before certifying identity.
@@ -32,14 +68,34 @@ def publication_manifest(post, max_items):
     if not isinstance(count, int) or count < 1:
         raise ValueError("MEDIA_SOURCE_UNVERIFIED")
     if post.typename == "GraphSidecar":
-        nodes = list(post.get_sidecar_nodes(start=0, end=max_items - 1))
+        edges = post._field("edge_sidecar_to_children", "edges")
+        if any(edge["node"]["is_video"] and "video_url" not in edge["node"] for edge in edges[:max_items]):
+            full_edges = post._full_metadata["edge_sidecar_to_children"]["edges"]
+            if [edge["node"]["id"] for edge in full_edges] != [edge["node"]["id"] for edge in edges]:
+                raise ValueError("MEDIA_SOURCE_MISMATCH")
+            edges = full_edges
+        children = [(str(edge["node"]["id"]), edge["node"]["is_video"]) for edge in edges]
+        # Sidecar videos use GraphQL URLs; only selected photos ask the library
+        # for alternate high-quality URLs.
+        if any(not is_video for _, is_video in children[:max_items]):
+            with verified_alternate_urls(post, native_id, children):
+                nodes = list(post.get_sidecar_nodes(start=0, end=max_items - 1))
+        else:
+            nodes = list(post.get_sidecar_nodes(start=0, end=max_items - 1))
+        if len(edges) != count or len(nodes) != min(count, max_items):
+            raise ValueError("MEDIA_SOURCE_UNVERIFIED")
         items = [{"index": index, "kind": "video" if node.is_video else "image",
+                  "mediaId": str(edges[index]["node"]["id"]),
                   "url": node.video_url if node.is_video else node.display_url}
                  for index, node in enumerate(nodes)]
+        if any(node.is_video != edges[index]["node"]["is_video"] for index, node in enumerate(nodes)):
+            raise ValueError("MEDIA_SOURCE_UNVERIFIED")
     else:
-        items = [{"index": 0, "kind": "video" if post.is_video else "image",
-                  "url": post.video_url if post.is_video else post.url}]
-    if len(items) != min(count, max_items) or any(not item["url"] for item in items):
+        with verified_alternate_urls(post, native_id):
+            items = [{"index": 0, "kind": "video" if post.is_video else "image",
+                      "mediaId": str(native_id),
+                      "url": post.video_url if post.is_video else post.url}]
+    if len(items) != min(count, max_items) or any(not item["url"] or not re.fullmatch(r"[0-9]+", item["mediaId"]) for item in items) or len({item["mediaId"] for item in items}) != len(items):
         raise ValueError("MEDIA_SOURCE_UNVERIFIED")
     return {"id": code, "publicationId": str(native_id), "owner": post.owner_username,
             "url": "https://www.instagram.com/p/" + code + "/", "count": count,
@@ -100,6 +156,8 @@ def main():
             status, code = explicit_http_status(message), "AUTH_REQUIRED"
         elif message in {"MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"}:
             code = message
+        elif isinstance(error, (KeyError, TypeError, AttributeError)):
+            code = "MEDIA_SOURCE_UNVERIFIED"
         elif isinstance(error, ImportError):
             code = "MEDIA_ADAPTER_MISSING"
         elif name in {"ConnectionException", "BadResponseException"}:

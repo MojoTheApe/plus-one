@@ -1746,3 +1746,190 @@ test('voice kick resolves known targets and default-linked groups never inherit 
   await f.handle({ ...audio, chat: beta });
   assert.equal(f.calls.filter(call => call.method === 'banChatMember').length, 1, 'other actors and unconfigured default-linked groups are denied');
 });
+
+for (const change of ['none', 'last', 'acknowledged-first', 'order', 'missing', 'duplicate', 'legacy']) {
+  test(`stale album recovery after restart preserves every selected identity: ${change}`, async t => {
+    const f = await fixture(t), url = 'https://www.tiktok.com/@fixture/photo/123/';
+    const source = verifiedMediaSource(url, { provider: 'tiktok-api', id: '123', owner: 'fixture' });
+    let downloads = 0, pass = 0, uploads = [];
+    const download = async () => {
+      downloads++;
+      const tempDir = await fs.mkdtemp(path.join(f.root, 'batch-')), files = [];
+      for (let i = 0; i < 11; i++) {
+        const changed = downloads > 1 && (change === 'last' && i === 10 || change === 'acknowledged-first' && i === 0);
+        const filePath = path.join(tempDir, `item-${i}.png`); await fs.writeFile(filePath, await photoBytes(changed ? 99 : i));
+        files.push({ sourceItemId: changed ? 'native:changed' : `native:${i}`, filePath, mediaKind: 'image', mimeType: 'image/png' });
+      }
+      if (downloads > 1 && change === 'order') [files[0], files[1]] = [files[1], files[0]];
+      if (downloads > 1 && change === 'missing') files.pop();
+      if (downloads > 1 && change === 'duplicate') files[10].sourceItemId = files[0].sourceItemId;
+      return { tempDir, source, files };
+    };
+    f.setDownloader(download);
+    f.setUpload(async (method, form) => {
+      const items = method === 'sendMediaGroup' ? JSON.parse(form.get('media')) : [{ media: form.get('photo') }];
+      uploads.push({ pass, method, references: items.map(item => typeof item.media === 'string' ? item.media : 'upload') });
+      if (pass === 1 && method === 'sendPhoto' && typeof form.get('photo') === 'string') {
+        return Response.json({ ok: false, error_code: 400, description: 'wrong file identifier' }, { status: 400 });
+      }
+      if (pass === 1 && method === 'sendPhoto') assert.equal(Buffer.from(await form.get('photo').arrayBuffer()).at(-1), 10);
+      const response = items.map((_, i) => ({ message_id: 2000 + uploads.length * 100 + i, photo: [{ file_id: `file-${method === 'sendPhoto' ? 10 : i}` }] }));
+      return Response.json({ ok: true, result: method === 'sendPhoto' ? response[0] : response });
+    });
+    await f.handle({ message_id: 500, text: url });
+    const indexFile = f.root + '/runtime/media-cache/index.json', cache = JSON.parse(await fs.readFile(indexFile));
+    for (const file of cache.entries[0].files) await fs.rm(path.join(f.root, 'runtime/media-cache', cache.entries[0].id, file.name));
+    if (change === 'legacy') {
+      for (const item of cache.entries[0].manifest) delete item.sourceItemId;
+      await fs.writeFile(indexFile, JSON.stringify(cache));
+    }
+    await f.restart(); f.setDownloader(download); pass = 1;
+    await f.handle({ message_id: 501, text: url });
+    const operation = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+    const repeated = uploads.filter(item => item.pass === 1);
+    assert.equal(downloads, 2);
+    assert.deepEqual(repeated.map(item => item.method), change === 'none' ? ['sendMediaGroup', 'sendPhoto', 'sendPhoto'] : ['sendMediaGroup', 'sendPhoto']);
+    assert.deepEqual(repeated[0].references, Array.from({ length: 10 }, (_, i) => `file-${i}`));
+    assert.equal(operation.deliveredFileCount, change === 'none' ? 11 : 10);
+    assert.equal(operation.status, change === 'none' ? 'done' : 'failed');
+    if (change !== 'none') assert.equal(operation.failure.code, ['duplicate', 'legacy'].includes(change) ? 'SOURCE_UNVERIFIED' : 'SOURCE_MISMATCH');
+    else {
+      assert.equal(operation.mediaItems.length, 11);
+      const entry = JSON.parse(await fs.readFile(indexFile)).entries.find(item => item.id === operation.cacheId);
+      assert.equal(entry.receipts.length, 11, 'replacement keeps the ten acknowledged references');
+      const selected = await new MediaCache(f.root + '/runtime/media-cache').get({ chatId: -123, topicId: 9, messageId: 2300 });
+      assert.equal(new Set(entry.bindings.filter(item => item.index < 10).map(item => item.index)).size, 10);
+      assert.equal(selected.id, entry.id); assert.equal(selected.files[0].sourceItemId, 'native:0');
+    }
+  });
+}
+
+test('source quota allows cached repeats, but blocks both new URLs and stale-reference fresh fetches', async t => {
+  const f = await fixture(t, 'legacy', undefined, async () => { process.env.SOCIAL_VIDEO_PER_CHAT_PER_HOUR = '1'; });
+  const url = 'https://www.instagram.com/reel/quota/'; let downloads = 0, stale = false;
+  f.setDownloader(async input => {
+    downloads++; const filePath = path.join(f.root, 'quota.png'); await fs.writeFile(filePath, await photoBytes());
+    return { source: verifiedMediaSource(input, { provider: 'instaloader', id: 'quota', owner: 'fixture' }), files: [{ filePath, mediaKind: 'image', mimeType: 'image/png' }] };
+  });
+  f.setUpload(async (_method, form) => stale && typeof form.get('photo') === 'string'
+    ? Response.json({ ok: false, error_code: 400, description: 'wrong file identifier' }, { status: 400 })
+    : Response.json({ ok: true, result: { message_id: 2200, photo: [{ file_id: 'known-quota' }] } }));
+  await f.handle({ message_id: 500, text: url });
+  await f.handle({ message_id: 501, text: url });
+  assert.equal(downloads, 1); assert.equal(f.calls.filter(item => item.method === 'sendPhoto').length, 2);
+  await f.handle({ message_id: 502, text: 'https://www.instagram.com/reel/new-quota/' });
+  assert.match(f.calls.filter(item => item.method === 'sendMessage').at(-1).payload.text, /GROUP_RATE_LIMIT/);
+  const cache = JSON.parse(await fs.readFile(f.root + '/runtime/media-cache/index.json'));
+  for (const entry of cache.entries) for (const file of entry.files) await fs.rm(path.join(f.root, 'runtime/media-cache', entry.id, file.name), { force: true });
+  stale = true; await f.handle({ message_id: 503, text: url });
+  assert.equal(downloads, 1);
+  assert.match(f.calls.filter(item => item.method === 'sendMessage').at(-1).payload.text, /GROUP_RATE_LIMIT/);
+});
+
+test('source-failure cooldown still permits a complete prepared resend', async t => {
+  const f = await fixture(t), url = 'https://www.instagram.com/p/cooldown/'; let downloads = 0;
+  const filePath = path.join(f.root, 'cooldown.png'); await fs.writeFile(filePath, await photoBytes());
+  f.setDownloader(async input => {
+    downloads++;
+    if (input !== url) throw Object.assign(new Error('source unavailable'), { status: 503 });
+    return { source: verifiedMediaSource(url, { provider: 'instaloader', id: 'cooldown', owner: 'fixture' }), files: [{ filePath, mediaKind: 'image', mimeType: 'image/png' }] };
+  });
+  await f.handle({ message_id: 500, text: url });
+  for (const id of [1, 2, 3]) await f.handle({ message_id: 500 + id, text: `https://www.instagram.com/p/broken${id}/` });
+  await f.handle({ message_id: 504, text: url });
+  assert.equal(downloads, 4);
+  assert.equal(f.calls.filter(item => item.method === 'sendPhoto').length, 2);
+  assert.equal(JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0].status, 'done');
+});
+
+test('an explicit legacy retry reuses its actual prepared file without inventing a child identity', async t => {
+  const f = await fixture(t), url = 'https://www.instagram.com/p/legacy/', filePath = path.join(f.root, 'legacy.png');
+  await fs.writeFile(filePath, await photoBytes());
+  const source = verifiedMediaSource(url, { provider: 'instaloader', id: 'legacy', owner: 'fixture' });
+  const cache = new MediaCache(f.root + '/runtime/media-cache');
+  const entry = await cache.put({ chatId: -123, topicId: 9, sourceMessageId: 500, sourceUrl: url, source, files: [{ filePath, mediaKind: 'image', mimeType: 'image/png' }], pending: true });
+  await new MediaOperations(f.root + '/runtime/media.json').record({ chatId: -123, topicId: 9, userId: 88, sourceMessageId: 500, errorMessageId: 600,
+    cacheId: entry.id, source, url, status: 'failed', failure: { code: 'TIMEOUT', retryable: true } });
+  f.setDownloader(async () => { throw new Error('Legacy prepared retry must not retrieve the source'); });
+  await f.handle({ message_id: 1500, text: 'Repeat', reply_to_message: { message_id: 600, from: { id: 77, is_bot: true }, text: 'Failed' } });
+  assert.equal(f.calls.filter(item => item.method === 'sendPhoto').length, 1);
+  const operation = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+  assert.equal(operation.status, 'done'); assert.equal(operation.mediaItems[0].sourceItemId, undefined);
+});
+
+test('a partial stale-reference recovery paused by source quota resumes only its unacknowledged remainder', async t => {
+  const f = await fixture(t, 'legacy', undefined, async () => { process.env.SOCIAL_VIDEO_PER_CHAT_PER_HOUR = '1'; });
+  const url = 'https://www.tiktok.com/@fixture/photo/123/', source = verifiedMediaSource(url, { provider: 'tiktok-api', id: '123', owner: 'fixture' });
+  let pass = 0, downloads = 0; const uploads = [];
+  f.setDownloader(async () => {
+    downloads++; const tempDir = await fs.mkdtemp(path.join(f.root, 'quota-album-')), files = [];
+    for (let i = 0; i < 11; i++) { const filePath = path.join(tempDir, `${i}.png`); await fs.writeFile(filePath, await photoBytes(i)); files.push({ filePath, sourceItemId: `native:${i}`, mediaKind: 'image', mimeType: 'image/png' }); }
+    return { tempDir, files, source };
+  });
+  f.setUpload(async (method, form) => {
+    uploads.push({ pass, method });
+    if (pass === 1 && method === 'sendPhoto') return Response.json({ ok: false, error_code: 400, description: 'wrong file identifier' }, { status: 400 });
+    const items = Array.from({ length: method === 'sendMediaGroup' ? 10 : 1 }, (_, i) => ({ message_id: 2000 + uploads.length * 100 + i, photo: [{ file_id: `known-${i}` }] }));
+    if (pass === 2) assert.equal(Buffer.from(await form.get('photo').arrayBuffer()).at(-1), 10);
+    return Response.json({ ok: true, result: method === 'sendMediaGroup' ? items : items[0] });
+  });
+  await f.handle({ message_id: 500, text: url });
+  const root = f.root + '/runtime/media-cache', cache = JSON.parse(await fs.readFile(root + '/index.json'));
+  for (const file of cache.entries[0].files) await fs.rm(path.join(root, cache.entries[0].id, file.name));
+  pass = 1; await f.handle({ message_id: 501, text: url });
+  const paused = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+  assert.equal(paused.failure.code, 'GROUP_RATE_LIMIT'); assert.equal(paused.staleRejected, true); assert.equal(paused.deliveredFileCount, 10); assert.equal(downloads, 1);
+  f.setMediaNow(() => Date.now() + 3600001); pass = 2;
+  await f.handle({ message_id: 1500, text: 'Repeat', reply_to_message: { message_id: paused.errorMessageId, from: { id: 77, is_bot: true }, text: 'Paused' } });
+  const done = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+  assert.deepEqual(uploads.filter(item => item.pass === 2).map(item => item.method), ['sendPhoto']);
+  assert.equal(downloads, 2); assert.equal(done.status, 'done'); assert.equal(done.deliveredFileCount, 11); assert.equal(done.sentMessageIds.length, 11);
+  const retained = JSON.parse(await fs.readFile(root + '/index.json')).entries.find(item => item.id === done.cacheId);
+  assert.equal(retained.receipts.length, 11);
+});
+
+for (const recovery of ['in-attempt', 'after-quota-pause']) {
+  test(`a replacement journal failure keeps a 49-hour-old partial recovery resumable after restart: ${recovery}`, async t => {
+    const f = await fixture(t, 'legacy', undefined, async () => { process.env.SOCIAL_VIDEO_PER_CHAT_PER_HOUR = recovery === 'after-quota-pause' ? '1' : '6'; });
+    const url = 'https://www.tiktok.com/@fixture/photo/123/', source = verifiedMediaSource(url, { provider: 'tiktok-api', id: '123', owner: 'fixture' });
+    let pass = 0, oldId, injected = false; const uploads = [];
+    const download = async () => {
+      const tempDir = await fs.mkdtemp(path.join(f.root, 'journal-album-')), files = [];
+      for (let i = 0; i < 11; i++) { const filePath = path.join(tempDir, `${i}.png`); await fs.writeFile(filePath, await photoBytes(i)); files.push({ filePath, sourceItemId: `native:${i}`, mediaKind: 'image', mimeType: 'image/png' }); }
+      return { tempDir, files, source };
+    };
+    f.setDownloader(download);
+    f.setUpload(async (method, form) => {
+      uploads.push({ pass, method });
+      if (pass === 1 && method === 'sendPhoto' && typeof form.get('photo') === 'string') return Response.json({ ok: false, error_code: 400, description: 'wrong file identifier' }, { status: 400 });
+      const items = Array.from({ length: method === 'sendMediaGroup' ? 10 : 1 }, (_, i) => ({ message_id: 2000 + uploads.length * 100 + i, photo: [{ file_id: `known-${method === 'sendPhoto' ? 10 : i}` }] }));
+      return Response.json({ ok: true, result: method === 'sendMediaGroup' ? items : items[0] });
+    });
+    await f.handle({ message_id: 500, text: url });
+    const indexFile = f.root + '/runtime/media-cache/index.json', cache = JSON.parse(await fs.readFile(indexFile));
+    oldId = cache.entries[0].id; cache.entries[0].createdAt = Date.now() - 49 * 3600000;
+    await fs.writeFile(indexFile, JSON.stringify(cache));
+    const originalRecord = MediaOperations.prototype.record;
+    MediaOperations.prototype.record = async function (op) {
+      if (pass === 1 && !injected && op.cacheId && op.cacheId !== oldId) { injected = true; throw new Error('Injected replacement pointer failure'); }
+      return originalRecord.call(this, op);
+    };
+    t.after(() => { MediaOperations.prototype.record = originalRecord; });
+    pass = 1; await f.handle({ message_id: 501, text: url });
+    if (recovery === 'after-quota-pause') {
+      const paused = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+      assert.equal(paused.failure.code, 'GROUP_RATE_LIMIT'); f.setMediaNow(() => Date.now() + 3600001);
+      await f.handle({ message_id: 502, text: 'Repeat', reply_to_message: { message_id: paused.errorMessageId, from: { id: 77, is_bot: true }, text: 'Paused' } });
+    }
+    const failed = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+    assert.equal(injected, true); assert.equal(failed.cacheId, oldId); assert.equal(failed.deliveredFileCount, 10);
+    const held = JSON.parse(await fs.readFile(indexFile)).entries.find(item => item.id === oldId);
+    assert.equal(held.pending, true, 'old hold remains until the new pointer is durable');
+    await f.restart(); f.setDownloader(download); pass = 2;
+    await f.handle({ message_id: 1500, text: 'Repeat', reply_to_message: { message_id: failed.errorMessageId, from: { id: 77, is_bot: true }, text: 'Failed' } });
+    const done = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+    assert.equal(done.status, 'done'); assert.equal(done.deliveredFileCount, 11);
+    assert.deepEqual(uploads.filter(item => item.pass === 2).map(item => item.method), ['sendPhoto']);
+    assert.equal(done.sentMessageIds.length, 11); assert.notEqual(done.cacheId, oldId);
+  });
+}

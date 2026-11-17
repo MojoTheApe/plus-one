@@ -68,3 +68,36 @@ test("tracking parameters and post/reel aliases cannot bypass publication backof
   assert.equal(budget.reserve(-1, "https://www.instagram.com/reel/BA/?igsh=second").reason, "URL_BACKOFF");
   assert.equal(budget.reserve(-1, "https://www.instagram.com/p/OTHER/").allowed, true);
 });
+
+test('prepared delivery bypasses source quota/cooldown while holding the same concurrency slot', () => {
+  const budget = new MediaBudget({ hourlyLimit: 1, now: () => 1000, maxFailures: 1 });
+  const first = budget.reserve(1, 'first', { source: false });
+  assert.equal(budget.reserveSource(first.reservation).allowed, true);
+  budget.completeSource(first.reservation, { success: true });
+  budget.complete(first.reservation, { success: false }); // Telegram failed, source succeeded.
+  const cached = budget.reserve(1, 'first', { source: false });
+  assert.equal(cached.allowed, true);
+  assert.equal(budget.reserve(1, 'parallel', { source: false }).reason, 'IN_PROGRESS');
+  assert.equal(budget.reserveSource(cached.reservation).reason, 'SUCCESS_QUOTA');
+  budget.complete(cached.reservation, { success: true });
+  assert.equal(budget.chats.get('1').successes.length, 1);
+  assert.equal(budget.chats.get('1').failures.length, 0);
+  const failed = budget.reserve(2, 'broken', { source: false });
+  budget.reserveSource(failed.reservation); budget.completeSource(failed.reservation, { success: false });
+  budget.complete(failed.reservation, { success: false });
+  const reuse = budget.reserve(2, 'broken', { source: false });
+  assert.equal(reuse.allowed, true);
+  assert.equal(budget.reserveSource(reuse.reservation).reason, 'FAILURE_COOLDOWN');
+  budget.complete(reuse.reservation, { success: true });
+  assert.equal(budget.chats.get('2').failures.length, 1);
+});
+
+test('abandoned cache work and upload/cache errors never invent upstream failures', () => {
+  let now = 0;
+  const budget = new MediaBudget({ now: () => now, reservationTtlMs: 100 });
+  budget.reserve(1, 'cached', { source: false }); now = 100;
+  const next = budget.reserve(1, 'cached', { source: false });
+  assert.equal(next.allowed, true);
+  budget.complete(next.reservation, { success: false });
+  assert.equal(budget.reserve(1, 'cached').allowed, true);
+});
