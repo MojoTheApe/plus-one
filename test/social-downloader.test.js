@@ -13,6 +13,84 @@ import {
   inspectSocialVideo,
   selectFallback,
 } from "../src/social-downloader.js";
+import { mediaFailure, failureMessage } from "../src/media-operations.js";
+
+test('a transient native metadata failure recovers once and still verifies the exact requested publication', async () => {
+  let inspections = 0, downloads = 0;
+  const first = Object.assign(new Error('upstream busy'), { status: 429 });
+  const result = await downloadSocialVideoWithYtDlp('https://www.instagram.com/reel/recovery/', '/tmp/social', {
+    ...baseDeps(mockFs()),
+    execFileAsync: async (_command, args) => {
+      if (args.includes('--dump-single-json')) {
+        if (++inspections === 1) throw first;
+        return { stdout: JSON.stringify({ extractor_key: 'Instagram', id: 'recovery', duration: 1 }) };
+      }
+      downloads++; return { stdout: '' };
+    },
+    findDownloadedVideo: async () => ({ filePath: '/tmp/social/recovery.mp4', size: 100 }),
+  });
+  assert.equal(inspections, 2); assert.equal(downloads, 1);
+  assert.equal(result.source.status, 'verified'); assert.equal(result.source.resolved.id, 'recovery');
+  assert.equal(result.previousFailure, first);
+});
+
+test('persistent native throttling stays retryable and the disabled fallback never replaces it', async () => {
+  let inspections = 0, fetches = 0;
+  const deps = { ...baseDeps(mockFs()),
+    execFileAsync: async () => { inspections++; throw Object.assign(new Error('upstream busy'), { status: 429 }); },
+    shouldTryInstagramFallback: () => true,
+    fetch: async () => { fetches++; throw new Error('No external fallback transfer'); },
+  };
+  deps.downloadInstagram = (url, dir) => downloadInstagramWithSnapinsta(url, dir, deps);
+  await assert.rejects(downloadSocialVideo('https://www.instagram.com/reel/recovery/', deps), error => {
+    const failure = mediaFailure(error);
+    assert.equal(failure.code, 'RATE_LIMIT'); assert.equal(failure.retryable, true);
+    assert.deepEqual(failure.causes.map(cause => cause.code), ['RATE_LIMIT', 'SOURCE_UNVERIFIED']);
+    assert.equal(failure.causes[1].fallbackDisabled, true);
+    assert.doesNotMatch(failureMessage(failure, 'fixture'), /SOURCE_UNVERIFIED|неперевірен/);
+    return true;
+  });
+  assert.equal(inspections, 2); assert.equal(fetches, 0);
+});
+
+test('native retry never repeats authentication, absent media or identity failures', async () => {
+  for (const message of ['Login required', 'No video formats found', 'Unsupported URL']) {
+    let inspections = 0;
+    const error = new Error(message);
+    await assert.rejects(downloadSocialVideoWithYtDlp('https://www.instagram.com/reel/recovery/', '/tmp/social', {
+      ...baseDeps(mockFs()), execFileAsync: async () => { inspections++; throw error; },
+    }), candidate => candidate === error);
+    assert.equal(inspections, 1);
+  }
+  let calls = 0;
+  await assert.rejects(downloadSocialVideoWithYtDlp('https://www.instagram.com/reel/recovery/', '/tmp/social', {
+    ...baseDeps(mockFs()), execFileAsync: async () => { calls++; return { stdout: JSON.stringify({ extractor_key: 'Instagram', id: 'wrong' }) }; },
+  }), { code: 'MEDIA_SOURCE_MISMATCH' });
+  assert.equal(calls, 1);
+});
+
+test('insufficient total budget skips the metadata retry without starting another extractor', async () => {
+  const files = mockFs(); let calls = 0, fallbacks = 0;
+  const downloader = createSocialDownloader({ ...baseDeps(files), totalTimeoutMs: 30,
+    execFileAsync: async () => { calls++; throw Object.assign(new Error('upstream busy'), { status: 429 }); },
+    shouldTryInstagramFallback: () => true,
+    downloadInstagram: async () => { fallbacks++; throw new Error('unused'); },
+  });
+  await assert.rejects(downloader.download('https://www.instagram.com/reel/recovery/'), error => mediaFailure(error).code === 'RATE_LIMIT');
+  assert.equal(calls, 1); assert.equal(fallbacks, 0); assert.equal(files.removed.length, 1);
+});
+
+test('cancellation during metadata backoff stops before a second extractor or any download', async () => {
+  const controller = new AbortController(); let calls = 0;
+  const timer = setTimeout(() => controller.abort(), 30);
+  try {
+    await assert.rejects(downloadSocialVideoWithYtDlp('https://www.instagram.com/reel/recovery/', '/tmp/social', {
+      ...baseDeps(mockFs()), signal: controller.signal,
+      execFileAsync: async () => { calls++; throw Object.assign(new Error('upstream busy'), { status: 429 }); },
+    }), { name: 'AbortError' });
+    assert.equal(calls, 1);
+  } finally { clearTimeout(timer); }
+});
 
 test('replay: Threads login redirect is diagnosed as authentication, not a timeout or missing media', async()=>{
   const response=new Response('<html>login</html>');Object.defineProperty(response,'url',{value:'https://www.threads.com/login/'});

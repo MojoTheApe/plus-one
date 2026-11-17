@@ -3,12 +3,43 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { MediaOperations, mediaFailure, isMediaRetryText } from "../src/media-operations.js";
+import { MediaOperations, mediaFailure, isMediaRetryText, canRetryMediaOperation } from "../src/media-operations.js";
 import { socialDownloadFailure } from "../src/social-downloader.js";
 
 test("canonical retry fast path leaves clearly Russian requests to the language gate", () => {
   for (const value of ["повтори", "спробуй ще раз", "retry", "@ExampleBot повторити будь ласка"]) assert.equal(isMediaRetryText(value, "ExampleBot"), true);
   for (const value of ["попробуй еще раз", "повтори пожалуйста", "Я хотів розповісти, що він сказав retry"]) assert.equal(isMediaRetryText(value, "ExampleBot"), false);
+});
+
+test('only the exact legacy masked transient pattern can retry without weakening real source or upload restrictions', () => {
+  const operation = { status: 'failed', downloader: 'snapinsta', source: { status: 'unverified' },
+    failure: { code: 'SOURCE_UNVERIFIED', retryable: false, causes: [
+      { provider: 'yt-dlp', code: 'RATE_LIMIT', retryable: true },
+      { provider: 'instagram', code: 'SOURCE_UNVERIFIED', retryable: false },
+    ] },
+  };
+  for (const code of ['RATE_LIMIT', 'NO_MEDIA', 'TIMEOUT', 'SERVICE_ERROR']) {
+    const candidate = structuredClone(operation); candidate.failure.causes[0].code = code;
+    assert.equal(canRetryMediaOperation(candidate), true);
+  }
+  for (const change of [
+    { status: 'unknown' }, { sentMessageIds: [123] }, { deliveredFileCount: 1 },
+    { downloader: 'threads-page' }, { source: { status: 'verified' } },
+    { failure: { ...operation.failure, code: 'SOURCE_MISMATCH' } },
+    { failure: { ...operation.failure, causes: [{ provider: 'yt-dlp', code: 'AUTH_REQUIRED', retryable: false }, operation.failure.causes[1]] } },
+    { failure: { code: 'SOURCE_UNVERIFIED', retryable: false } },
+  ]) assert.equal(canRetryMediaOperation({ ...operation, ...change }), false);
+  assert.equal(canRetryMediaOperation({ failure: { retryable: true } }), true);
+});
+
+test('a disabled adapter cannot mask native missing-media or login errors; a real source mismatch remains decisive', () => {
+  for (const [message, code] of [['No video formats found', 'NO_MEDIA'], ['Login required', 'AUTH_REQUIRED']]) {
+    const disabled = Object.assign(new Error('unverified'), { code: 'MEDIA_SOURCE_UNVERIFIED', fallbackDisabled: true });
+    const failure = mediaFailure(socialDownloadFailure(new Error(message), disabled, 'instagram'));
+    assert.equal(failure.code, code);
+    const mismatch = Object.assign(new Error('wrong item'), { code: 'MEDIA_SOURCE_MISMATCH' });
+    assert.equal(mediaFailure(socialDownloadFailure(new Error(message), mismatch, 'tiktok')).code, 'SOURCE_MISMATCH');
+  }
 });
 
 test("ordinary reply IDs are not forum scopes, and old error plus sent IDs survive retry updates", async t => {

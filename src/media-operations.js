@@ -8,6 +8,7 @@ const durationText = n => { const seconds = Math.ceil(n); return `${Math.floor(s
 export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes = 48 * 1024 * 1024, stage = "download" } = {}) {
   if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error?.code)) return {
     code: error.code === "MEDIA_SOURCE_MISMATCH" ? "SOURCE_MISMATCH" : "SOURCE_UNVERIFIED", retryable: false, stage: "download", status: null,
+    ...(error.fallbackDisabled === true ? { fallbackDisabled: true } : {}),
     reason: error.code === "MEDIA_SOURCE_MISMATCH"
       ? "Отриманий матеріал не збігається з конкретною публікацією за посиланням. Не надсилаю підміну."
       : "Завантажувач не підтвердив, що файли належать саме цій публікації. Не надсилаю неперевірений набір; можна надіслати сам потрібний файл.",
@@ -28,7 +29,9 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
     const causes = error.attempts.slice(0, 6).map(attempt => ({ provider: String(attempt.provider || "downloader").slice(0, 32),
       ...mediaFailure(attempt.error, { maxDurationSeconds, maxUploadBytes, stage }) }));
     // Prefer the first useful cause, rather than the last, often empty, fallback.
-    const selected = causes.find(cause => ["SOURCE_MISMATCH", "SOURCE_UNVERIFIED"].includes(cause.code)) || causes.find(cause => !["UNKNOWN", "NO_MEDIA"].includes(cause.code)) || causes[0];
+    const available = causes.filter(cause => !cause.fallbackDisabled);
+    const selected = available.find(cause => ["SOURCE_MISMATCH", "SOURCE_UNVERIFIED"].includes(cause.code)) ||
+      available.find(cause => !["UNKNOWN", "NO_MEDIA"].includes(cause.code)) || available[0] || causes[0];
     const { provider, ...failure } = selected;
     return { ...failure, causes, ...(Number.isFinite(error.elapsedSeconds) ? { elapsedSeconds: error.elapsedSeconds } : {}) };
   }
@@ -97,8 +100,22 @@ export function failureMessage(failure, id, locale = "uk") {
   }
   const stages = { download: "отримання медіа", prepare: "перевірка й підготовка", upload: "надсилання до Telegram" };
   const title = failure.code === "UPLOAD_UNKNOWN" ? "Не вдалося підтвердити надсилання медіа" : "Не вдалося надіслати медіа";
-  const causes = failure.causes?.length > 1 ? "\n" + failure.causes.map(cause => `${cause.provider}: ${cause.reason}`).join("\n") : "";
+  const availableCauses = failure.causes?.filter(cause => !cause.fallbackDisabled) || [];
+  const causes = availableCauses.length > 1 ? "\n" + availableCauses.map(cause => `${cause.provider}: ${cause.reason}`).join("\n") : "";
   return `${title}: ${failure.reason}${causes}\nЕтап: ${stages[failure.stage] || failure.stage}. Код: ${failure.code}${id ? ` · ${id}` : ""}.`;
+}
+
+export function canRetryMediaOperation(operation) {
+  if (operation.failure?.retryable) return true;
+  // TG-64 stored the disabled adapter's rejection over the native transient
+  // failure. Permit a fresh verified retrieval, never reuse its unverified files.
+  const causes = operation.failure?.causes;
+  return Boolean(operation.status === "failed" && operation.failure?.code === "SOURCE_UNVERIFIED" &&
+    operation.downloader === "snapinsta" && operation.source?.status === "unverified" &&
+    !operation.sentMessageIds?.length && !operation.deliveredFileCount && causes?.length === 2 &&
+    causes[0].provider === "yt-dlp" && causes[0].retryable === true &&
+    ["RATE_LIMIT", "TIMEOUT", "SERVICE_ERROR", "NO_MEDIA"].includes(causes[0].code) &&
+    causes[1].provider === "instagram" && causes[1].code === "SOURCE_UNVERIFIED");
 }
 
 export function isMediaRetryText(text, username = "") {

@@ -266,6 +266,34 @@ test('one story cannot send three unverified images or cache them as its verifie
   assert.equal(operation.deliveredFileCount,undefined);
 });
 
+for (const semantic of [false, true]) test(`a legacy masked rate limit supports ${semantic ? 'semantic' : 'canonical'} explicit retry through fresh verified retrieval`, async t => {
+  const f = await fixture(t); let downloads = 0;
+  const url = 'https://www.instagram.com/reel/recovery/';
+  const filePath = path.join(f.root, 'recovery.jpg'); await fs.writeFile(filePath, 'fixture');
+  const original = { chatId: -123, topicId: 9, userId: 88, sourceMessageId: 500, errorMessageId: 600,
+    url, status: 'failed', downloader: 'snapinsta', source: { status: 'unverified' },
+    failure: { code: 'SOURCE_UNVERIFIED', retryable: false, stage: 'download', causes: [
+      { provider: 'yt-dlp', code: 'RATE_LIMIT', retryable: true },
+      { provider: 'instagram', code: 'SOURCE_UNVERIFIED', retryable: false },
+    ] },
+  };
+  await new MediaOperations(f.root + '/runtime/media.json').record(original);
+  await f.handle({ message_id: 500, text: 'звичайна репліка' });
+  await f.restart();
+  f.setDownloader(async () => { downloads++; return {
+    source: nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'recovery' }),
+    files: [{ filePath, mediaKind: 'image', mimeType: 'image/jpeg' }],
+  }; });
+  f.setAnswer(async () => ({ text: JSON.stringify({ action: 'download', language: 'uk', targetMessageId: 500 }), searchStatus: { succeeded: false } }));
+  await f.handle({ message_id: 1500, text: semantic ? '@ReliabilityTestBot спробуй отримати цей ролик знову' : 'Repeat',
+    reply_to_message: { message_id: 500, from: { id: 88 }, text: url } });
+  assert.equal(downloads, 1);
+  assert.equal(f.calls.filter(call => call.method === 'sendPhoto').length, 1);
+  const operation = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+  assert.equal(operation.status, 'done'); assert.equal(operation.source.status, 'verified');
+  assert.equal(operation.source.resolved.id, 'recovery');
+});
+
 test('a forged verified flag cannot hide mismatched native identity',async t=>{
   const f=await fixture(t);const filePath=path.join(f.root,'wrong.jpg');await fs.writeFile(filePath,'wrong');
   const source=nativeExtractorSource('https://www.instagram.com/stories/fixture/64/',{extractor_key:'InstagramStory',id:'BA',channel:'fixture'});

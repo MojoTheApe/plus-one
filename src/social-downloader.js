@@ -1,7 +1,9 @@
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { mediaReference, nativeExtractorSource, verifiedMediaSource, sourceIdentityError } from "./media-source.js";
+import { mediaFailure } from "./media-operations.js";
 import {
   isCircuitBreakerOpen,
   recordCircuitBreakerFailure,
@@ -40,7 +42,7 @@ async function downloadWithinDeadline(url, deps, options = {}) {
   const budgetMs = Math.max(1, Math.min(deps.totalTimeoutMs || 90000, (options.deadline || Infinity) - Date.now()));
   const deadline = Date.now() + budgetMs;
   const timer = setTimeout(() => controller.abort(), budgetMs);
-  const scoped = { ...deps, signal: controller.signal,
+  const scoped = { ...deps, signal: controller.signal, deadline,
     fetch: (input, options = {}) => deps.fetch(input, { ...options,
       signal: options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal }),
     execFileAsync: (file, args, options = {}) => deps.execFileAsync(file, args, { ...options,
@@ -69,6 +71,7 @@ async function downloadWithinDeadline(url, deps, options = {}) {
 export function socialDownloadFailure(primary, fallback, provider) {
   const error = new Error(`Primary downloader failed; ${provider} fallback failed: ${fallback.message}`, { cause: primary });
   error.code = "SOCIAL_DOWNLOAD_FAILED";
+  error.downloader = primary.downloader || "yt-dlp";
   error.attempts = [
     ...(Array.isArray(primary.attempts) ? primary.attempts : [{ provider: "yt-dlp", error: primary }]),
     { provider, error: fallback },
@@ -240,7 +243,7 @@ export async function downloadInstagramWithSnapinsta(url, tempDir, deps) {
   // This legacy HTML adapter exposes arbitrary download links but no binding
   // to a native item/owner. Do not send a private link to it or certify its
   // files merely because they are decodable media. Native retrieval remains.
-  throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "snapinsta");
+  throw Object.assign(sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "snapinsta"), { fallbackDisabled: true });
 }
 
 export async function fetchSnapinstaToken(deps) {
@@ -406,7 +409,20 @@ export async function runSocialVideoFallback(provider, operation, deps) {
 }
 
 export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
-  const info = await inspectSocialVideo(url, deps);
+  let info, previousFailure;
+  try {
+    info = await inspectSocialVideo(url, deps);
+  } catch (error) {
+    error.downloader = "yt-dlp";
+    const failure = mediaFailure(error);
+    const delayMs = 2000;
+    if (deps.signal?.aborted || !["RATE_LIMIT", "TIMEOUT", "SERVICE_ERROR"].includes(failure.code) ||
+        (deps.deadline || Infinity) - Date.now() <= delayMs) throw error;
+    previousFailure = error;
+    deps.logInfo("social_video_metadata_retry", { provider: "yt-dlp", code: failure.code, delayMs });
+    await delay(delayMs, undefined, { signal: deps.signal });
+    info = await inspectSocialVideo(url, deps);
+  }
   const duration = Number(info.duration);
   if (info.is_live === true) throw new Error("live videos are not supported");
   if (Number.isFinite(duration) && duration > deps.maxDurationSeconds) {
@@ -465,6 +481,7 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
 
   return {
     source,
+    ...(previousFailure ? { previousFailure } : {}),
     tempDir,
     filePath: file.filePath,
     mediaKind: "video",
