@@ -2410,6 +2410,8 @@ async function maybeHandleSocialVideo(message, retry = null) {
         title: result.title,
       },
     ];
+    operation = await mediaOperations.record({ ...operation, deliveryRoute: downloadedFiles.every(file => file.telegramFileId)
+      ? "telegram-file-id" : cached?.complete ? "prepared-cache" : "source" });
     logInfo("media_stage_completed", messageLogMeta(message, { diagnosticId: operation?.id, stage: "download", cached: Boolean(cached?.complete), elapsedMs: Date.now() - downloadStarted, files: downloadedFiles.length }));
     stage = "prepare";
     const prepareStarted = Date.now();
@@ -2471,9 +2473,12 @@ async function maybeHandleSocialVideo(message, retry = null) {
             sourceUrl: url, source, title: result.title, files: replacement, pending: true });
           mediaFiles = replacement.map((file, index) => ({ ...file, filePath: preparedCache.files.find(item => item.index === index).filePath }));
           await mediaCache.release(previousCache.id);
-          operation = await mediaOperations.record({ ...operation, cacheId: preparedCache.id });
+          operation = await mediaOperations.record({ ...operation, cacheId: preparedCache.id, deliveryRoute: "source" });
         } finally { if (fresh.tempDir) await fs.promises.rm(fresh.tempDir, { recursive: true, force: true }); }
-      } else mediaFiles = mediaFiles.map(file => { const { telegramFileId, ...local } = file; return local; });
+      } else {
+        mediaFiles = mediaFiles.map(file => { const { telegramFileId, ...local } = file; return local; });
+        operation = await mediaOperations.record({ ...operation, deliveryRoute: "prepared-cache" });
+      }
       // A rejected file_id is a definite rejection; one fresh upload is safe.
       stage = "upload";
       operation = await mediaOperations.record({ ...operation, status: "uploading" });

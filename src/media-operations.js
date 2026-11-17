@@ -59,6 +59,7 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
   } else if (["RATE_LIMIT", "SOCIAL_VIDEO_PROVIDER_COOLDOWN"].includes(error?.code) || status === 429 || /cooling down|rate.?limit|too many requests|\b429\b/i.test(message)) {
     code = "RATE_LIMIT"; retryable = true;
     reason = "Сервіс тимчасово обмежив кількість запитів. Спробуй ще раз пізніше.";
+    if (Number.isFinite(error.retryAfterSeconds) && error.retryAfterSeconds > 0) reason += ` Наступна спроба — приблизно через ${Math.ceil(error.retryAfterSeconds)} с.`;
   } else if (error?.code === "SERVICE_ERROR" || (status >= 500 && status <= 599)) {
     code = "SERVICE_ERROR"; retryable = true;
     reason = "Сервіс завантаження або Telegram повернув тимчасову мережеву помилку. Можна повторити спробу.";
@@ -211,7 +212,7 @@ export class MediaOperations {
       .slice(0, 4).map(operation => ({ id: operation.id, sourceMessageId: operation.sourceMessageId,
         trigger: operation.trigger || null, lastRequest: operation.lastRequest || null, requestedUrl: mediaReference(operation.url)?.url || null,
         sourceVerification: operation.source?.status || "unverified-legacy", verifiedSource: operation.source?.status === "verified" ? operation.source.resolved : null,
-        downloader: operation.downloader || operation.source?.provider || "not-recorded", attempts: operation.attempts || [],
+        downloader: operation.downloader || operation.source?.provider || "not-recorded", deliveryRoute: operation.deliveryRoute || "not-recorded", attempts: operation.attempts || [],
         status: operation.status, sentMessageIds: operation.sentMessageIds || [], deliveredFileCount: operation.deliveredFileCount || 0,
         failure: operation.failure ? { code: operation.failure.code, stage: operation.failure.stage, reason: operation.failure.reason, causes: operation.failure.causes || [] } : null }));
   }

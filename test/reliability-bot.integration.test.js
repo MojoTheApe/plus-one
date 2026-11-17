@@ -277,7 +277,8 @@ test('a repeated verified publication uses its Telegram file after restart and d
   });
   await f.handle({ message_id: 501, text: url + '?igsh=two' });
   assert.equal(downloads, 1); assert.equal(uploads, 2);
-  assert.equal(JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0].status, 'done');
+  const operation = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+  assert.equal(operation.status, 'done'); assert.equal(operation.deliveryRoute, 'telegram-file-id');
 });
 
 test('a definitely rejected stale Telegram file ID falls back once to the prepared file without a source download', async t => {
@@ -295,7 +296,34 @@ test('a definitely rejected stale Telegram file ID falls back once to the prepar
   await f.handle({ message_id: 501, text: url });
   assert.deepEqual(attempts, ['uploaded', 'stale-photo-id', 'uploaded']);
   assert.equal(downloads, 1);
-  assert.equal(JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0].status, 'done');
+  const operation = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+  assert.equal(operation.status, 'done'); assert.equal(operation.deliveryRoute, 'prepared-cache');
+});
+
+test('a rejected Telegram file is downloaded again after disk eviction and copied before its temporary directory is removed', async t => {
+  const f = await fixture(t), url = 'https://www.instagram.com/p/refresh/';
+  const source = nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'refresh' });
+  const temporaryDirectories = [], attempts = [];
+  f.setDownloader(async () => {
+    const tempDir = await fs.mkdtemp(path.join(f.root, 'fresh-')); temporaryDirectories.push(tempDir);
+    const filePath = path.join(tempDir, 'photo.png'); await fs.writeFile(filePath, await photoBytes());
+    return { tempDir, source, files: [{ filePath, mediaKind: 'image', mimeType: 'image/png' }] };
+  });
+  f.setUpload(async (_method, form) => {
+    const value = form.get('photo'); attempts.push(typeof value === 'string' ? value : 'uploaded');
+    if (typeof value === 'string') return new Response(JSON.stringify({ ok: false, description: 'wrong file identifier', error_code: 400 }), { status: 400 });
+    assert.deepEqual(Buffer.from(await value.arrayBuffer()), await photoBytes());
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 2000 + attempts.length, photo: [{ file_id: 'refreshed-photo-id' }] } }));
+  });
+  await f.handle({ message_id: 500, text: url });
+  const cache = JSON.parse(await fs.readFile(f.root + '/runtime/media-cache/index.json'));
+  await fs.rm(path.join(f.root, 'runtime/media-cache', cache.entries[0].id, cache.entries[0].files[0].name));
+  await f.handle({ message_id: 501, text: url });
+  assert.deepEqual(attempts, ['uploaded', 'refreshed-photo-id', 'uploaded']);
+  assert.equal(temporaryDirectories.length, 2);
+  for (const dir of temporaryDirectories) await assert.rejects(fs.stat(dir), { code: 'ENOENT' });
+  const operation = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+  assert.equal(operation.status, 'done'); assert.equal(operation.deliveryRoute, 'source');
 });
 
 test('one story cannot send three unverified images or cache them as its verified source',async t=>{

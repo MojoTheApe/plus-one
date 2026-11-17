@@ -74,6 +74,8 @@ the existing video route. Do not equate an empty/blocked source response with an
 unsupported file format. Source backoff can apply across groups and survives a
 restart. Known verified files may be resent from Telegram without downloading.
 Captions show title/source/link, without the requester or service message ID.
+Recorded deliveryRoute distinguishes a source fetch, prepared cache and Telegram
+file-ID reuse. The source-verification provider alone does not prove a fresh fetch.
 
 ## Additional setup
 
