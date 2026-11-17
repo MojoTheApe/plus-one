@@ -11,6 +11,8 @@ import { nativeExtractorSource, verifiedMediaSource } from "../src/media-source.
 import { MediaCache } from "../src/media-cache.js";
 import { MediaOperations } from "../src/media-operations.js";
 import { ConversationStore } from "../src/conversation-store.js";
+const fixturePhoto = fs.readFile(path.resolve("test-support/media-photo.png"));
+async function photoBytes(marker = 0) { return Buffer.concat([await fixturePhoto, Buffer.from([marker])]); }
 
 async function fixture(t, profile = "legacy", owner, configure = async () => {}, answerBackend = "codex", voice = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "bot-reliability-"));
@@ -230,7 +232,7 @@ test('a long media job leaves its durable inbox pending while a same-chat questi
 
 test('an unconfirmed upload is not retried automatically; an explicit retry uses the prepared cache after restart', async t => {
   const f=await fixture(t);let downloads=0,uploads=0;
-  const file=path.join(f.root,'image.jpg');await fs.writeFile(file,new Uint8Array([1,2,3]));
+  const file=path.join(f.root,'image.jpg');await fs.writeFile(file,await photoBytes());
   const source=nativeExtractorSource('https://www.instagram.com/p/fixture/',{extractor_key:'Instagram',id:'fixture',channel:'fixture'});
   f.setDownloader(async()=>{downloads++;return {source,files:[{filePath:file,mediaKind:'image',mimeType:'image/jpeg',title:'Fixture'}]};});
   f.setUpload(async()=>{uploads++;throw Object.assign(new Error('connection interrupted'),{code:'ECONNRESET'});});
@@ -250,17 +252,63 @@ test('an unconfirmed upload is not retried automatically; an explicit retry uses
   assert.equal(uploads,2);
 });
 
+test('a repeated verified publication uses its Telegram file after restart and disk eviction, without exposing the requester', async t => {
+  const f = await fixture(t), url = 'https://www.instagram.com/p/reuse/';
+  const filePath = path.join(f.root, 'reuse.png'); await fs.writeFile(filePath, await photoBytes());
+  const source = nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'reuse', channel: 'source_author' });
+  let downloads = 0, uploads = 0;
+  const download = async () => { downloads++; return { source, title: 'Original publication', files: [{ filePath, mediaKind: 'image', mimeType: 'image/png' }] }; };
+  f.setDownloader(download);
+  f.setUpload(async (method, form) => {
+    assert.equal(method, 'sendPhoto'); assert.ok(form.get('photo') instanceof Blob); uploads++;
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 2000, photo: [{ file_id: 'saved-telegram-photo' }] } }));
+  });
+  await f.handle({ message_id: 500, text: url + '?igsh=one' });
+  const cache = JSON.parse(await fs.readFile(f.root + '/runtime/media-cache/index.json'));
+  await fs.rm(path.join(f.root, 'runtime/media-cache', cache.entries[0].id, cache.entries[0].files[0].name));
+  await f.restart(); f.setDownloader(download);
+  f.setUpload(async (method, form) => {
+    assert.equal(form.get('photo'), 'saved-telegram-photo');
+    assert.equal(form.get('reply_to_message_id'), '501');
+    assert.match(form.get('caption'), /Original publication/);
+    assert.doesNotMatch(form.get('caption'), /Fixture|#50[01]|Requested by|Запит від/);
+    assert.ok(form.get('caption').includes(url)); uploads++;
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 2001, photo: [{ file_id: 'saved-telegram-photo' }] } }));
+  });
+  await f.handle({ message_id: 501, text: url + '?igsh=two' });
+  assert.equal(downloads, 1); assert.equal(uploads, 2);
+  assert.equal(JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0].status, 'done');
+});
+
+test('a definitely rejected stale Telegram file ID falls back once to the prepared file without a source download', async t => {
+  const f = await fixture(t), url = 'https://www.instagram.com/p/stale/';
+  const filePath = path.join(f.root, 'stale.png'); await fs.writeFile(filePath, await photoBytes());
+  const source = nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'stale' });
+  let downloads = 0; const attempts = [];
+  f.setDownloader(async () => { downloads++; return { source, files: [{ filePath, mediaKind: 'image', mimeType: 'image/png' }] }; });
+  f.setUpload(async (_method, form) => {
+    const value = form.get('photo'); attempts.push(typeof value === 'string' ? value : 'uploaded');
+    if (typeof value === 'string') return new Response(JSON.stringify({ ok: false, description: 'wrong file identifier', error_code: 400 }), { status: 400 });
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 2000 + attempts.length, photo: [{ file_id: 'stale-photo-id' }] } }));
+  });
+  await f.handle({ message_id: 500, text: url });
+  await f.handle({ message_id: 501, text: url });
+  assert.deepEqual(attempts, ['uploaded', 'stale-photo-id', 'uploaded']);
+  assert.equal(downloads, 1);
+  assert.equal(JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0].status, 'done');
+});
+
 test('one story cannot send three unverified images or cache them as its verified source',async t=>{
   const f=await fixture(t);const files=[];
   for(let index=0;index<3;index++){
-    const filePath=path.join(f.root,`unverified-${index}.jpg`);await fs.writeFile(filePath,Buffer.from([index,2,3]));
+    const filePath=path.join(f.root,`unverified-${index}.jpg`);await fs.writeFile(filePath,await photoBytes(index));
     files.push({filePath,mediaKind:'image',mimeType:'image/jpeg'});
   }
   f.setDownloader(async()=>({files,title:'Unbound provider images'}));
   await f.handle({message_id:500,text:'https://www.instagram.com/stories/fixture/64/'});
   assert.equal(f.calls.filter(call=>['sendPhoto','sendVideo','sendMediaGroup','sendDocument'].includes(call.method)).length,0);
   assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/SOURCE_UNVERIFIED/);
-  await assert.rejects(fs.access(f.root+'/runtime/media-cache/index.json'),{code:'ENOENT'});
+  assert.deepEqual(JSON.parse(await fs.readFile(f.root+'/runtime/media-cache/index.json')).entries, []);
   const operation=JSON.parse(await fs.readFile(f.root+'/runtime/media.json')).operations[0];
   assert.equal(operation.status,'failed');assert.equal(operation.source.status,'unverified');
   assert.equal(operation.deliveredFileCount,undefined);
@@ -269,7 +317,7 @@ test('one story cannot send three unverified images or cache them as its verifie
 for (const semantic of [false, true]) test(`a legacy masked rate limit supports ${semantic ? 'semantic' : 'canonical'} explicit retry through fresh verified retrieval`, async t => {
   const f = await fixture(t); let downloads = 0;
   const url = 'https://www.instagram.com/reel/recovery/';
-  const filePath = path.join(f.root, 'recovery.jpg'); await fs.writeFile(filePath, 'fixture');
+  const filePath = path.join(f.root, 'recovery.jpg'); await fs.writeFile(filePath, await photoBytes());
   const original = { chatId: -123, topicId: 9, userId: 88, sourceMessageId: 500, errorMessageId: 600,
     url, status: 'failed', downloader: 'snapinsta', source: { status: 'unverified' },
     failure: { code: 'SOURCE_UNVERIFIED', retryable: false, stage: 'download', causes: [
@@ -307,7 +355,7 @@ test('a forged verified flag cannot hide mismatched native identity',async t=>{
 test('a verified carousel binds each Telegram photo to its own file, including after restart',async t=>{
   const f=await fixture(t);const files=[];
   for(let index=0;index<3;index++){
-    const filePath=path.join(f.root,`item-${index}.jpg`);await fs.writeFile(filePath,Buffer.from([index,2,3]));
+    const filePath=path.join(f.root,`item-${index}.jpg`);await fs.writeFile(filePath,await photoBytes(index));
     files.push({filePath,mediaKind:'image',mimeType:'image/jpeg'});
   }
   const url='https://www.tiktok.com/@fixture/photo/123/';
@@ -321,10 +369,10 @@ test('a verified carousel binds each Telegram photo to its own file, including a
   await f.handle({message_id:500,text:url});
   const payload=f.calls.find(call=>call.method==='sendMediaGroup').payload;
   const caption=JSON.parse(payload.media)[0].caption;
-  assert.ok(caption.length<=1000);assert.match(caption,/@Fixture/);assert.ok(caption.includes(url));
+  assert.ok(caption.length<=1000);assert.doesNotMatch(caption,/@Fixture|#500|Запит від|Requested by|По запросу/);assert.ok(caption.includes(url));
   await f.restart();let scope='item',inspected=[];
   f.setAnswer(async args=>{
-    if(args.images?.length){inspected=await Promise.all(args.images.map(async file=>(await fs.readFile(file))[0]));return {text:'Опис фактично вибраних файлів.',searchStatus:{succeeded:false}};}
+    if(args.images?.length){inspected=await Promise.all(args.images.map(async file=>(await fs.readFile(file)).at(-1)));return {text:'Опис фактично вибраних файлів.',searchStatus:{succeeded:false}};}
     return {text:JSON.stringify({action:'analyze',language:'uk',targetMessageId:2001,mediaScope:scope}),searchStatus:{succeeded:false}};
   });
   await f.handle({message_id:3000,text:'@ReliabilityTestBot поясни це фото',reply_to_message:{message_id:2001,from:{id:77,is_bot:true},photo:[{file_id:'photo-1',file_size:3}]}});
@@ -391,7 +439,7 @@ test('an unavailable verified single-file receipt may use a matching source copy
 
 test('a short album receipt remains unknown and cannot create guessed file bindings',async t=>{
   const f=await fixture(t),files=[];const url='https://www.tiktok.com/@fixture/photo/123/';
-  for(let index=0;index<3;index++){const filePath=path.join(f.root,`short-receipt-${index}.jpg`);await fs.writeFile(filePath,Buffer.from([index,2,3]));files.push({filePath,mediaKind:'image',mimeType:'image/jpeg'});}
+  for(let index=0;index<3;index++){const filePath=path.join(f.root,`short-receipt-${index}.jpg`);await fs.writeFile(filePath,await photoBytes(index));files.push({filePath,mediaKind:'image',mimeType:'image/jpeg'});}
   const source=verifiedMediaSource(url,{provider:'tiktok-api',id:'123',owner:'fixture'});
   f.setDownloader(async()=>({source,files}));let uploads=0;
   f.setUpload(async()=>{uploads++;return new Response(JSON.stringify({ok:true,result:[{message_id:600}]}));});
@@ -443,7 +491,7 @@ test('voice transcription leaves independent questions responsive and a reply wa
 test('an interrupted album retry sends only files without acknowledged delivery', async t => {
   const f=await fixture(t,'legacy',undefined,async()=>{process.env.SOCIAL_VIDEO_MAX_MEDIA_ITEMS='20';});let downloads=0;const uploads=[];
   const files=[];
-  for(let i=0;i<11;i++){const file=path.join(f.root,`image-${i}.jpg`);await fs.writeFile(file,new Uint8Array([i,2,3]));files.push({filePath:file,mediaKind:'image',mimeType:'image/jpeg'});}
+  for(let i=0;i<11;i++){const file=path.join(f.root,`image-${i}.jpg`);await fs.writeFile(file,await photoBytes(i));files.push({filePath:file,mediaKind:'image',mimeType:'image/jpeg'});}
   const source=verifiedMediaSource('https://www.tiktok.com/@fixture/photo/123/',{provider:'tiktok-api',id:'123',owner:'fixture'});
   f.setDownloader(async()=>{downloads++;return {source,files};});
   f.setUpload(async method=>{

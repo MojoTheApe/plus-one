@@ -26,7 +26,7 @@ import { resolveActionTarget, actionRestriction } from "./dialogue-actions.js";
 import { prepareMediaEvidence } from "./media-evidence.js";
 import { MediaBudget } from "./media-budget.js";
 import { MediaCache } from "./media-cache.js";
-import { assertVerifiedMediaSource, mediaReference, sourceIdentityError } from "./media-source.js";
+import { assertVerifiedMediaSource, verifiedMediaSource, mediaReference, sourceIdentityError } from "./media-source.js";
 import { observeTelegramUpload } from "./telegram-upload-observer.js";
 import { historyIntent, selectContext, historyPage, localTime, dialoguePolicy, responseDecision, researchForReply } from "./conversation-context.js";
 import { UpdateInbox, ChatQueue, isPermanentUpdateError } from "./update-inbox.js";
@@ -226,9 +226,7 @@ const socialVideoDownloader = process.env.SOCIAL_VIDEO_DOWNLOADER || "yt-dlp";
 const socialVideoFfprobe = process.env.SOCIAL_VIDEO_FFPROBE || "ffprobe";
 const socialVideoFfmpeg = process.env.SOCIAL_VIDEO_FFMPEG || "ffmpeg";
 const socialVideoTikTokFallbackApi = (process.env.SOCIAL_VIDEO_TIKTOK_FALLBACK_API || "https://www.tikwm.com/api/").trim();
-const socialVideoInstagramFallback = parseBoolean(process.env.SOCIAL_VIDEO_INSTAGRAM_FALLBACK, true);
 const socialVideoMaxMediaItems = Number.parseInt(process.env.SOCIAL_VIDEO_MAX_MEDIA_ITEMS || "20", 10);
-const socialVideoSnapinstaBaseUrl = (process.env.SOCIAL_VIDEO_SNAPINSTA_BASE_URL || "https://snapinsta.ai").replace(/\/+$/, "");
 const socialVideoHttpTimeoutMs = clampInteger(Number.parseInt(process.env.SOCIAL_VIDEO_HTTP_TIMEOUT_MS || "45000", 10), 5000, 120000);
 const socialVideoCircuitFailureThreshold = clampInteger(Number.parseInt(process.env.SOCIAL_VIDEO_CIRCUIT_FAILURE_THRESHOLD || "3", 10), 1, 20);
 const socialVideoCircuitCooldownMs = clampInteger(Number.parseInt(process.env.SOCIAL_VIDEO_CIRCUIT_COOLDOWN_MS || String(10 * 60 * 1000), 10), 30000, 60 * 60 * 1000);
@@ -278,14 +276,13 @@ const socialDownloader = createSocialDownloader({
   cleanErrorMessage,
   downloader: socialVideoDownloader,
   durationLimitError: socialVideoDurationLimitError,
-  downloadInstagram: downloadInstagramWithSnapinsta,
   downloadThreads: downloadThreadsFromPage,
   downloadTikTok: downloadTikTokWithFallbackApi,
   execFileAsync,
   fetch,
   findDownloadedVideo: findDownloadedSocialVideo,
   fs,
-  defaultReferer: socialVideoSnapinstaBaseUrl,
+  defaultReferer: "https://www.instagram.com/",
   getMaxMediaItems: getSocialVideoMaxMediaItems,
   httpTimeoutMs: socialVideoHttpTimeoutMs,
   isDurationLimitError: isSocialVideoDurationLimitError,
@@ -294,12 +291,14 @@ const socialDownloader = createSocialDownloader({
   logInfo,
   maxBytes: socialVideoMaxBytes,
   maxDurationSeconds: socialVideoMaxDurationSeconds,
+  python: process.env.SOCIAL_MEDIA_PYTHON || whisperPython,
+  instagramScript: path.join(rootDir, "scripts/instagram-media.py"),
+  instagramSession: process.env.INSTAGRAM_SESSION_FILE || "",
+  journal: mediaOperations,
   rootDir,
-  shouldTryInstagramFallback,
   shouldTryThreadsFallback,
   shouldTryTikTokFallback,
   selectMediaFiles: selectSocialMediaFiles,
-  snapinstaBaseUrl: socialVideoSnapinstaBaseUrl,
   tiktokFallbackApiUrl: socialVideoTikTokFallbackApi,
   uniqueMediaFiles,
   validateDownloadedVideo: validateDownloadedSocialVideo,
@@ -920,6 +919,8 @@ async function checkStartupDependencies() {
   if (codexBackend) checks.push(checkExecutable("codex_cli", codexBackend.cli, ["--version"], { required: true }));
   else checks.push(checkExecutable("openclaw_cli", openclawCli, ["--version"], { required: answerBackend === "openclaw" || visualSummaryEnabled }));
   checks.push(checkExecutable("social_video_downloader", socialVideoDownloader, ["--version"], { required: socialVideoEnabled }));
+  checks.push(checkExecutable("instagram_adapter", process.env.SOCIAL_MEDIA_PYTHON || whisperPython,
+    ["-c", "import instaloader; print(instaloader.__version__)"], { required: socialVideoEnabled }));
   checks.push(checkExecutable("ffprobe", socialVideoFfprobe, ["-version"], { required: socialVideoEnabled }));
   checks.push(checkExecutable("ffmpeg", socialVideoFfmpeg, ["-version"], { required: socialVideoEnabled }));
   checks.push(checkExecutable("whisper_python", whisperPython, ["--version"], { required: voiceTranscriptionEnabled }));
@@ -2382,9 +2383,14 @@ async function maybeHandleSocialVideo(message, retry = null) {
     return true;
   }
   try {
-    let cached = retry && await mediaCache.get({ chatId: message.chat.id, topicId: judgeThreadId(message), messageId: retry.sourceMessageId });
+    let cached = await mediaCache.forDelivery({ chatId: message.chat.id, topicId: judgeThreadId(message), botId: botInfo.id,
+      ...(retry ? { entryId: retry.cacheId, messageId: retry.sourceMessageId } : { sourceUrl: url }) });
     if (cached) {
-      try { assertVerifiedMediaSource(cached.source, url); }
+      try {
+        assertVerifiedMediaSource(cached.source, cached.source.requested.url);
+        cached.source = verifiedMediaSource(url, { provider: cached.source.provider, resolvedUrl: cached.source.resolved.url,
+          id: cached.source.resolved.id, owner: cached.source.resolved.owner, kind: cached.source.resolved.kind });
+      }
       catch { cached = null; }
     }
     if (retry?.deliveredFileCount && !cached?.complete) {
@@ -2395,7 +2401,7 @@ async function maybeHandleSocialVideo(message, retry = null) {
     tempDir = result.tempDir;
     const source = assertVerifiedMediaSource(result.source, url);
     operation = await mediaOperations.record({ ...operation, source, downloader: source.provider,
-      attempts: result.previousFailure ? [{ downloader: "yt-dlp", failure: mediaFailure(result.previousFailure, { stage: "download" }) }, { downloader: source.provider, status: "verified" }] : operation.attempts || [{ downloader: source.provider, status: "verified" }] });
+      attempts: result.previousFailure ? [{ downloader: result.previousFailure.downloader || "yt-dlp", failure: mediaFailure(result.previousFailure, { stage: "download" }) }, { downloader: source.provider, status: "verified" }] : operation.attempts || [{ downloader: source.provider, status: "verified" }] });
     const downloadedFiles = result.files || [
       {
         filePath: result.filePath,
@@ -2407,20 +2413,16 @@ async function maybeHandleSocialVideo(message, retry = null) {
     logInfo("media_stage_completed", messageLogMeta(message, { diagnosticId: operation?.id, stage: "download", cached: Boolean(cached?.complete), elapsedMs: Date.now() - downloadStarted, files: downloadedFiles.length }));
     stage = "prepare";
     const prepareStarted = Date.now();
-    const mediaFiles = await prepareMediaForTelegram(downloadedFiles, { maxDurationSeconds: socialVideoMaxDurationSeconds,
+    let mediaFiles = await prepareMediaForTelegram(downloadedFiles, { maxDurationSeconds: socialVideoMaxDurationSeconds,
       ffmpeg: socialVideoFfmpeg, ffprobe: socialVideoFfprobe, deadline:message._mediaDeadline });
     preparedCache = cached?.complete ? cached : await mediaCache.put({ chatId: message.chat.id, topicId: judgeThreadId(message),
-      sourceMessageId: operation?.sourceMessageId || message.message_id, sourceUrl: url, source, files: mediaFiles })
-      .catch(error => { logError("media_cache_failed", error, messageLogMeta(message)); return null; });
+      sourceMessageId: operation?.sourceMessageId || message.message_id, sourceUrl: url, source, title: result.title, files: mediaFiles, pending: true });
+    if (cached?.complete) await mediaCache.hold(cached.id);
     logInfo("media_stage_completed", messageLogMeta(message, { diagnosticId: operation?.id, stage, elapsedMs: Date.now() - prepareStarted,
       bytes: mediaFiles.reduce((sum, file) => sum + (file.size || 0), 0), converted: mediaFiles.filter(file => file.converted).length }));
-    const requester = displayName(message.from).replace(/\s+/gu, " ").slice(0, 80);
-    const attribution = say(behavior().locale, `Requested by ${requester} · #${message.message_id}`,
-      `По запросу ${requester} · #${message.message_id}`, `Запит від ${requester} · #${message.message_id}`) + "\n" + source.resolved.url;
     const caption = formatSocialVideoCaption(source.resolved.url, result.title || mediaFiles[0]?.title)
-      .slice(0, Math.max(0, 999 - attribution.length)) + "\n" + attribution;
+      .slice(0, Math.max(0, 999 - source.resolved.url.length)) + "\n" + source.resolved.url;
     if (operation) operation = await mediaOperations.record({ ...operation, status: "prepared", stage: "upload", failure: null, cacheId: preparedCache?.id });
-    const alreadyDelivered = operation?.deliveredFileCount || 0;
     const recordSent = async (items, fileCount) => {
       if (!operation) return;
       const startIndex = operation.deliveredFileCount || 0;
@@ -2428,7 +2430,7 @@ async function maybeHandleSocialVideo(message, retry = null) {
         deliveredFileCount: (operation.deliveredFileCount || 0) + fileCount };
       try { operation = await mediaOperations.record(operation); }
       catch (error) { throw Object.assign(error, { deliveryUnknown: true }); }
-      if (preparedCache) await mediaCache.bind(preparedCache.id, items.map(item => item.message_id), { startIndex })
+      if (preparedCache) await mediaCache.bind(preparedCache.id, items.map(item => item.message_id), { startIndex, items, botId: botInfo.id, sourceMessageId: message.message_id })
         .catch(error => logError("media_cache_failed", error, messageLogMeta(message)));
       for (const [index, item] of items.entries()) await rememberMessage({ ...item, chat: item.chat || message.chat,
         from: { ...(item.from || botInfo), is_bot: true }, _sourceUrl: url, _mediaSource: source,
@@ -2440,13 +2442,49 @@ async function maybeHandleSocialVideo(message, retry = null) {
     if (operation) operation = await mediaOperations.record({ ...operation, status: "uploading" });
     stage = "upload";
     const uploadStarted = Date.now();
-    const remainingFiles = mediaFiles.slice(alreadyDelivered);
-    const sent = remainingFiles.length ? await sendTelegramSocialMedia(message, remainingFiles, alreadyDelivered ? "" : caption, recordSent) : [];
+    const deliverRemaining = () => {
+      const delivered = operation.deliveredFileCount || 0;
+      const remaining = mediaFiles.slice(delivered);
+      return remaining.length ? sendTelegramSocialMedia(message, remaining, delivered ? "" : caption, recordSent) : [];
+    };
+    let sent;
+    try { sent = await deliverRemaining(); }
+    catch (error) {
+      const delivered = operation.deliveredFileCount || 0;
+      if (error.deliveryUnknown || error.status !== 400 || !/wrong (?:remote )?file|file[_ ]?id|file reference.*expired|invalid.*file.*identifier/iu.test(error.message) ||
+          !mediaFiles.slice(delivered).some(file => file.telegramFileId)) throw error;
+      operation = await mediaOperations.record({ ...operation, status: "prepared", failure: null });
+      await mediaCache.invalidateReceipts(preparedCache.id, mediaFiles.slice(delivered).map((_, index) => delivered + index));
+      if (mediaFiles.slice(delivered).some(file => !file.filePath)) {
+        stage = "download";
+        const fresh = await downloadSocialVideo(url, { deadline: message._mediaDeadline });
+        try {
+          const freshSource = assertVerifiedMediaSource(fresh.source, url);
+          const candidates = fresh.files || [{ ...fresh, mediaKind: fresh.mediaKind }];
+          if (freshSource.resolved.id !== source.resolved.id || candidates.length !== mediaFiles.length ||
+              candidates.some((file, index) => file.mediaKind !== mediaFiles[index].mediaKind)) throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", freshSource.provider);
+          stage = "prepare";
+          const replacement = await prepareMediaForTelegram(candidates, { maxDurationSeconds: socialVideoMaxDurationSeconds,
+            ffmpeg: socialVideoFfmpeg, ffprobe: socialVideoFfprobe, deadline: message._mediaDeadline });
+          const previousCache = preparedCache;
+          preparedCache = await mediaCache.put({ chatId: message.chat.id, topicId: judgeThreadId(message), sourceMessageId: operation.sourceMessageId,
+            sourceUrl: url, source, title: result.title, files: replacement, pending: true });
+          mediaFiles = replacement.map((file, index) => ({ ...file, filePath: preparedCache.files.find(item => item.index === index).filePath }));
+          await mediaCache.release(previousCache.id);
+          operation = await mediaOperations.record({ ...operation, cacheId: preparedCache.id });
+        } finally { if (fresh.tempDir) await fs.promises.rm(fresh.tempDir, { recursive: true, force: true }); }
+      } else mediaFiles = mediaFiles.map(file => { const { telegramFileId, ...local } = file; return local; });
+      // A rejected file_id is a definite rejection; one fresh upload is safe.
+      stage = "upload";
+      operation = await mediaOperations.record({ ...operation, status: "uploading" });
+      sent = await deliverRemaining();
+    }
     logInfo("media_stage_completed", messageLogMeta(message, { diagnosticId: operation?.id, stage, elapsedMs: Date.now() - uploadStarted, files: sent.length }));
     socialVideoBudget.complete(budget.reservation, { success: true });
     const sentMessageIds = [...new Set([...(operation?.sentMessageIds || []), ...sent.map(item => item.message_id).filter(Number.isSafeInteger)])];
     if (operation) await mediaOperations.record({ ...operation, status: "done", sentMessageIds }).catch(error => logError("media_journal_failed", error, messageLogMeta(message)));
-    await cacheRecentVisualMedia(message.chat.id, mediaFiles, {
+    if (preparedCache) await mediaCache.release(preparedCache.id).catch(error => logError("media_cache_failed", error, messageLogMeta(message)));
+    await cacheRecentVisualMedia(message.chat.id, mediaFiles.filter(file => file.filePath), {
       sourceUrl: url,
       title: result.title || mediaFiles[0]?.title || "",
       sourceMessageId: message.message_id,
@@ -2515,10 +2553,6 @@ async function downloadSocialVideo(url, options) {
   return socialDownloader.download(url, options);
 }
 
-function shouldTryInstagramFallback(url) {
-  return socialVideoInstagramFallback && isInstagramSocialVideoUrl(url);
-}
-
 function shouldTryTikTokFallback(url) {
   return isTikTokSocialVideoUrl(url);
 }
@@ -2537,10 +2571,6 @@ function isInstagramSocialVideoUrl(url) {
 
 function isThreadsSocialVideoUrl(url) {
   return socialIsThreadsSocialVideoUrl(url);
-}
-
-async function downloadInstagramWithSnapinsta(url, tempDir) {
-  return socialDownloader.downloadInstagram(url, tempDir);
 }
 
 async function downloadThreadsFromPage(url, tempDir) {
@@ -2677,7 +2707,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   return socialDownloader.fetchWithTimeout(url, options, timeoutMs);
 }
 
-async function downloadRemoteMediaFile(url, tempDir, baseName, referer = socialVideoSnapinstaBaseUrl, forcedMediaKind = "") {
+async function downloadRemoteMediaFile(url, tempDir, baseName, referer = "https://www.instagram.com/", forcedMediaKind = "") {
   return socialDownloader.downloadRemoteMediaFile(url, tempDir, baseName, referer, forcedMediaKind);
 }
 
@@ -2791,7 +2821,7 @@ async function sendTelegramSocialMedia(message, mediaFiles, caption, onSent = as
 async function sendTelegramSingleSocialMedia(message, media, caption) {
   if (!media) throw new Error("no media to send");
   if (media.mediaKind === "image") {
-    return sendTelegramMultipartMedia("sendPhoto", message, "photo", media.filePath, caption, media.mimeType);
+    return sendTelegramMultipartMedia("sendPhoto", message, "photo", media.filePath, caption, media.mimeType, media);
   }
   if (media.mediaKind === "video") {
     return sendTelegramMultipartMedia("sendVideo", message, "video", media.filePath, caption, media.mimeType || "video/mp4", media);
@@ -2808,14 +2838,12 @@ async function sendTelegramMediaGroup(message, mediaFiles, caption) {
 
   for (const [index, item] of mediaFiles.slice(0, 10).entries()) {
     const fieldName = `media${index}`;
-    const buffer = await fs.promises.readFile(item.filePath);
-    const fileName = path.basename(item.filePath);
     const type = item.mediaKind === "video" ? "video" : "photo";
     const mimeType = item.mimeType || (type === "photo" ? "image/jpeg" : "video/mp4");
-    form.set(fieldName, new Blob([buffer], { type: mimeType }), fileName);
+    if (!item.telegramFileId) form.set(fieldName, await fs.openAsBlob(item.filePath, { type: mimeType }), path.basename(item.filePath));
     const mediaItem = {
       type,
-      media: `attach://${fieldName}`,
+      media: item.telegramFileId || `attach://${fieldName}`,
       ...(index === 0 && caption ? { caption: caption.slice(0, 1000) } : {}),
     };
     if (type === "video") {
@@ -2835,8 +2863,6 @@ async function sendTelegramMediaGroup(message, mediaFiles, caption) {
 }
 
 async function sendTelegramMultipartMedia(method, message, fieldName, filePath, caption, mimeType, media = null, options = {}) {
-  const buffer = await fs.promises.readFile(filePath);
-  const fileName = path.basename(filePath);
   const form = new FormData();
   form.set("chat_id", String(message.chat.id));
   form.set("reply_to_message_id", String(message.message_id));
@@ -2854,20 +2880,20 @@ async function sendTelegramMultipartMedia(method, message, fieldName, filePath, 
     if (Number.isFinite(duration) && duration > 0) form.set("duration", String(Math.round(duration)));
     form.set("supports_streaming", "true");
   }
-  form.set(fieldName, new Blob([buffer], { type: mimeType }), fileName);
+  if (media?.telegramFileId) form.set(fieldName, media.telegramFileId);
+  else form.set(fieldName, await fs.openAsBlob(filePath, { type: mimeType }), path.basename(filePath));
 
   return telegramMultipart(method, form, {deadline:message._mediaDeadline, diagnosticId:message._mediaOperationId});
 }
 
 async function sendTelegramDocument(message, filePath, caption, mimeType = "application/octet-stream") {
-  const buffer = await fs.promises.readFile(filePath);
   const fileName = path.basename(filePath);
   const form = new FormData();
   form.set("chat_id", String(message.chat.id));
   form.set("reply_to_message_id", String(message.message_id));
   form.set("disable_content_type_detection", "true");
   if (caption) form.set("caption", caption.slice(0, 1000));
-  form.set("document", new Blob([buffer], { type: mimeType }), fileName);
+  form.set("document", await fs.openAsBlob(filePath, { type: mimeType }), fileName);
 
   return telegramMultipart("sendDocument", form, {deadline:message._mediaDeadline, diagnosticId:message._mediaOperationId});
 }

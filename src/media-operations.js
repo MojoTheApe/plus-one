@@ -18,6 +18,8 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
     reason: "Не отримав підтвердження від Telegram. Файл міг уже з’явитися в чаті, тому автоматично його не дублюю. Перевір чат; якщо файлу немає, попроси повторити надсилання." };
   if (error?.code === "MEDIA_RETRY_CACHE_MISSING") return { code: "RETRY_CACHE_MISSING", retryable: false, stage: "prepare", status: null,
     reason: "Частину файлів уже надіслано, але підготовлена копія решти більше недоступна. Не повторюю весь набір, щоб не дублювати вже надіслане. Потрібні відсутні файли окремо." };
+  if (error?.code === "MEDIA_CACHE_CAPACITY") return { code: "CACHE_BUSY", retryable: true, stage: "prepare", status: null,
+    reason: "Місце для підготовлених файлів зайняте незавершеними надсиланнями. Цю публікацію ще не надіслано; повтори пізніше." };
   if (error?.code === "THREADS_RENDER_UNAVAILABLE") return { code: "SOURCE_CONTENT_UNAVAILABLE", retryable: true, stage: "download", status: null,
     reason: "Threads повернув сторінку без самого вмісту публікації, тому отримати файл цим способом зараз не вдалося. Це не помилка формату відео. Можна надіслати сам файл або іншу доступну копію." };
   if(error?.code === 'SOCIAL_DOWNLOAD_TIMEOUT') return {
@@ -54,24 +56,27 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
     reason = size + (stage === "upload" || error.code === "MEDIA_UPLOAD_SIZE"
       ? `Файл перевищує допустимий розмір надсилання (робочий ліміт ${(maxUploadBytes / 1024 / 1024).toFixed(0)} МіБ). Потрібна менша версія.`
       : "Файл перевищує ліміт завантаження або сервіс відхилив завеликий запит. Потрібна менша версія.");
-  } else if (error?.code === "SOCIAL_VIDEO_PROVIDER_COOLDOWN" || status === 429 || /cooling down|rate.?limit|too many requests|\b429\b/i.test(message)) {
+  } else if (["RATE_LIMIT", "SOCIAL_VIDEO_PROVIDER_COOLDOWN"].includes(error?.code) || status === 429 || /cooling down|rate.?limit|too many requests|\b429\b/i.test(message)) {
     code = "RATE_LIMIT"; retryable = true;
     reason = "Сервіс тимчасово обмежив кількість запитів. Спробуй ще раз пізніше.";
+  } else if (error?.code === "SERVICE_ERROR" || (status >= 500 && status <= 599)) {
+    code = "SERVICE_ERROR"; retryable = true;
+    reason = "Сервіс завантаження або Telegram повернув тимчасову мережеву помилку. Можна повторити спробу.";
   } else if (error?.killed || error?.name === "AbortError" || error?.code === "SOCIAL_DOWNLOAD_TIMEOUT" || /AbortError|aborted|timeout|timed out/i.test(message)) {
     code = "TIMEOUT"; retryable = true;
     reason = "Сервіс не відповів за відведений час, тому спробу зупинено. Можна повторити завантаження.";
     if (Number.isFinite(error.elapsedSeconds)) reason += ` Спроба тривала ${Math.round(error.elapsedSeconds)} с.`;
-  } else if (status === 401 || /private|log[ -]?in|sign[ -]?in|authentication|login.required|cookies? (?:are )?required|use --cookies/i.test(message)) {
+  } else if (error?.code === "AUTH_REQUIRED" || status === 401 || /private|log[ -]?in|sign[ -]?in|authentication|login.required|cookies? (?:are )?required|use --cookies/i.test(message)) {
     code = "AUTH_REQUIRED"; reason = "Цей спосіб завантаження повідомив, що потрібен вхід в акаунт або доступ до приватного медіа. Можна надіслати сам файл.";
   } else if (/unsupported URL|no suitable extractor|unsupported site/i.test(message)) {
     code = "UNSUPPORTED"; reason = "Завантажувач не підтримує цей формат посилання. Повтор тієї самої спроби не допоможе; можна надіслати пряме посилання на допис або сам файл.";
-  } else if (status === 403 || status === 404 || /deleted|not available|unavailable|not accessible|audience|geo.?restrict|\b404\b/i.test(message)) {
+  } else if (error?.code === "UNAVAILABLE" || status === 403 || status === 404 || /deleted|not available|unavailable|not accessible|audience|geo.?restrict|\b404\b/i.test(message)) {
     code = "UNAVAILABLE"; reason = "Сервіс не повернув доступне медіа: допис міг бути видалений, обмежений або недоступний через цей спосіб завантаження.";
-  } else if (/no (?:downloadable |playable )?(?:media|images|video)|empty media response|media response was empty|returned no media/i.test(message)) {
+  } else if (error?.code === "NO_MEDIA" || /no (?:downloadable |playable )?(?:media|images|video)|empty media response|media response was empty|returned no media/i.test(message)) {
     code = "NO_MEDIA"; retryable = true; reason = "Спосіб завантаження не повернув медіафайлів. Саме по собі це не пояснює, чому допис недоступний.";
-  } else if (/ENOENT|ffprobe|media validator/i.test(message)) {
+  } else if (error?.code === "MEDIA_ADAPTER_MISSING" || /ENOENT|ffprobe|media validator/i.test(message)) {
     code = "SERVER_TOOL"; reason = "На сервері не вдалося запустити інструмент завантаження або перевірки медіа. Потрібна перевірка конфігурації.";
-  } else if (/stream|returned HTML|media type|convert|encode/i.test(message)) {
+  } else if (error?.code === "MEDIA_IMAGE_INVALID" || /stream|returned HTML|media type|convert|encode/i.test(message)) {
     code = "FORMAT"; reason = "Сервіс повернув непідтримуваний або пошкоджений медіафайл; підготувати його для Telegram не вдалося.";
   } else if (status >= 500 || /ECONNRESET|fetch failed|network/i.test(message)) {
     code = "SERVICE_ERROR"; retryable = true; reason = "Сервіс завантаження або Telegram повернув тимчасову мережеву помилку. Можна повторити спробу.";
@@ -126,29 +131,62 @@ export function isMediaRetryText(text, username = "") {
 
 export class MediaOperations {
   constructor(file, now = Date.now) { this.file = file; this.now = now; this.queue = Promise.resolve(); }
-  async read() {
+  async readState() {
     try {
       const data = JSON.parse(await fs.readFile(this.file, "utf8"));
       if (data.version !== 1 || !Array.isArray(data.operations)) throw new Error("Invalid media operations state");
-      return data.operations.filter(op => this.now() - op.updatedAt < 48 * 3600 * 1000);
-    } catch (error) { if (error.code !== "ENOENT") throw error; return []; }
+      data.operations = data.operations.filter(op => this.now() - op.updatedAt < 48 * 3600 * 1000);
+      data.providers ||= {};
+      return data;
+    } catch (error) { if (error.code !== "ENOENT") throw error; return { version: 1, operations: [], providers: {} }; }
+  }
+  async read() { return (await this.readState()).operations; }
+  async change(update) {
+    const work = this.queue.then(async () => {
+      const state = await this.readState(), result = update(state);
+      await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
+      const temp = `${this.file}.${randomUUID()}.tmp`;
+      try { await fs.writeFile(temp, JSON.stringify(state), { mode: 0o600 }); await fs.rename(temp, this.file); }
+      finally { await fs.rm(temp, { force: true }); }
+      return result;
+    });
+    this.queue = work.catch(() => {});
+    return work;
+  }
+  async sourceState(provider) {
+    const entry = (await this.readState()).providers[provider];
+    return { notBefore: Number(entry?.notBefore) || 0, failures: Math.min(10, Number(entry?.failures) || 0) };
+  }
+  async sourceResult(provider, failure = null) {
+    if (!["instagram", "tiktok", "threads"].includes(provider)) return;
+    return this.change(state => {
+      const previous = state.providers[provider] || {}, failures = Math.min(10, (previous.failures || 0) + 1);
+      if (!failure) state.providers[provider] = { notBefore: 0, failures: 0 };
+      else if (["RATE_LIMIT", "TIMEOUT", "SERVICE_ERROR"].includes(failure.code)) {
+        const seconds = Math.max(Number(failure.retryAfterSeconds) || 0,
+          Math.min(900, (failure.code === "RATE_LIMIT" ? 60 : 5) * 2 ** (failures - 1)));
+        state.providers[provider] = { failures, notBefore: this.now() + seconds * 1000 };
+      }
+    });
   }
   async record(operation) {
-    const work = this.queue.then(async () => {
-      const all = await this.read();
+    return this.change(state => {
+      const all = state.operations;
       const previous = all.find(op => op.id === operation.id);
       const entry = { ...previous, ...operation, id: operation.id || randomUUID().slice(0, 8), updatedAt: this.now() };
       entry.topicId = operation.topicId !== undefined ? operation.topicId : entry.topicId ?? entry.threadId ?? null;
       entry.threadId = entry.topicId;
       entry.referenceMessageIds = [...new Set([...operationReferences(previous), ...operationReferences(entry)])].slice(-50);
-      const next = [entry, ...all.filter(op => op.id !== entry.id)].slice(0, 300);
-      await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
-      const temp = `${this.file}.${randomUUID()}.tmp`;
-      try { await fs.writeFile(temp, JSON.stringify({ version: 1, operations: next }), { mode: 0o600 }); await fs.rename(temp, this.file); }
-      finally { await fs.rm(temp, { force: true }); }
+      state.operations = [entry, ...all.filter(op => op.id !== entry.id)].slice(0, 300);
+      const day = new Date(this.now()).toISOString().slice(0, 10);
+      state.metrics ||= {};
+      for (const key of Object.keys(state.metrics)) if (key < new Date(this.now() - 30 * 86400000).toISOString().slice(0, 10)) delete state.metrics[key];
+      if (previous?.status !== entry.status && ["done", "failed", "unknown"].includes(entry.status)) {
+        const counter = state.metrics[day] ||= {}, outcome = entry.status === "failed" ? entry.failure?.code || "UNKNOWN_ERROR" : entry.status;
+        counter[outcome] = (counter[outcome] || 0) + 1;
+      }
       return entry;
     });
-    this.queue = work.catch(() => {}); return work;
   }
   async find(message, allowLatest = false, scope = {}) {
     const chatId = scope.chatId ?? message.chat.id;

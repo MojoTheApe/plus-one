@@ -69,6 +69,11 @@ Automatic public-link downloads are enabled for new configured groups: supported
 Instagram, Threads and TikTok URLs, bot administrator rights and installed tools
 are required. Private posts, login requirements, site blocks, quotas and file
 limits can prevent downloading. Previously saved disabled settings stay disabled.
+Instagram photos/mixed posts have a native-identity library adapter; Reels use
+the existing video route. Do not equate an empty/blocked source response with an
+unsupported file format. Source backoff can apply across groups and survives a
+restart. Known verified files may be resent from Telegram without downloading.
+Captions show title/source/link, without the requester or service message ID.
 
 ## Additional setup
 

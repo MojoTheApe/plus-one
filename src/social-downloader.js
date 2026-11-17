@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { mediaReference, nativeExtractorSource, verifiedMediaSource, sourceIdentityError } from "./media-source.js";
+import { mediaReference, nativeExtractorSource, verifiedMediaSource, assertVerifiedMediaSource, sourceIdentityError, instagramMediaCode } from "./media-source.js";
 import { mediaFailure } from "./media-operations.js";
 import {
   isCircuitBreakerOpen,
@@ -22,9 +22,17 @@ import {
 } from "./social-video.js";
 
 export function createSocialDownloader(deps) {
+  const sources = new Map();
+  const download = (url, options) => {
+    const provider = mediaReference(url)?.platform || "unknown";
+    const previous = sources.get(provider) || Promise.resolve();
+    const work = previous.catch(() => {}).then(() => downloadWithinDeadline(url, deps, options));
+    sources.set(provider, work);
+    work.finally(() => { if (sources.get(provider) === work) sources.delete(provider); }).catch(() => {});
+    return work;
+  };
   return {
-    download: (url, options) => downloadWithinDeadline(url, deps, options),
-    downloadInstagram: (url, tempDir) => downloadInstagramWithSnapinsta(url, tempDir, deps),
+    download,
     downloadTikTok: (url, tempDir, titleHint = "") => downloadTikTokWithFallbackApi(url, tempDir, titleHint, deps),
     downloadThreads: (url, tempDir) => downloadThreadsFromPage(url, tempDir, deps),
     downloadWithYtDlp: (url, tempDir) => downloadSocialVideoWithYtDlp(url, tempDir, deps),
@@ -38,11 +46,16 @@ export function createSocialDownloader(deps) {
 }
 
 async function downloadWithinDeadline(url, deps, options = {}) {
+  if (Date.now() >= (options.deadline || Infinity)) throw Object.assign(new Error("Media attempt deadline exceeded"), { code: "SOCIAL_DOWNLOAD_TIMEOUT" });
+  const provider = mediaReference(url)?.platform;
+  const state = await deps.journal?.sourceState(provider);
+  if (state?.notBefore > Date.now()) throw Object.assign(new Error("Source request cooldown"), {
+    code: "SOCIAL_VIDEO_PROVIDER_COOLDOWN", retryAfterSeconds: Math.ceil((state.notBefore - Date.now()) / 1000) });
   const controller = new AbortController();
   const budgetMs = Math.max(1, Math.min(deps.totalTimeoutMs || 90000, (options.deadline || Infinity) - Date.now()));
   const deadline = Date.now() + budgetMs;
   const timer = setTimeout(() => controller.abort(), budgetMs);
-  const scoped = { ...deps, signal: controller.signal, deadline,
+  const scoped = { ...deps, signal: controller.signal, deadline, downloadBudget: { bytes: 0, maxBytes: 256 * 1024 * 1024 },
     fetch: (input, options = {}) => deps.fetch(input, { ...options,
       signal: options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal }),
     execFileAsync: (file, args, options = {}) => deps.execFileAsync(file, args, { ...options,
@@ -50,20 +63,68 @@ async function downloadWithinDeadline(url, deps, options = {}) {
   };
   scoped.validateDownloadedVideo = (file, options = {}) => deps.validateDownloadedVideo(file, {...options,deadline,signal:controller.signal});
   scoped.downloadThreads = (input, dir) => downloadThreadsFromPage(input, dir, scoped);
-  scoped.downloadInstagram = (input, dir) => downloadInstagramWithSnapinsta(input, dir, scoped);
   scoped.downloadTikTok = (input, dir) => downloadTikTokWithFallbackApi(input, dir, "", scoped);
+  let result, completed = false;
   try {
-    const result = await downloadSocialVideo(url, scoped);
+    const resolvedUrl = await resolveSocialMediaUrl(url, scoped);
+    result = await downloadSocialVideo(resolvedUrl, scoped);
+    if (resolvedUrl !== url) {
+      const native = assertVerifiedMediaSource(result.source, resolvedUrl);
+      result.source = verifiedMediaSource(url, { provider: native.provider, resolvedUrl: native.resolved.url,
+        id: native.resolved.id, owner: native.resolved.owner, kind: native.resolved.kind });
+    }
     if (controller.signal.aborted) {
-      if (result.tempDir) await deps.fs.promises.rm(result.tempDir,{recursive:true,force:true});
       throw Object.assign(new Error("Download deadline exceeded"),{code:"SOCIAL_DOWNLOAD_TIMEOUT"});
     }
+    await deps.journal?.sourceResult(provider);
+    completed = true;
     return result;
   }
   catch (error) {
     if (controller.signal.aborted) error.code = "SOCIAL_DOWNLOAD_TIMEOUT";
+    await deps.journal?.sourceResult(provider, mediaFailure(error));
     throw error;
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    if (!completed && result?.tempDir) await deps.fs.promises.rm(result.tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+export async function resolveSocialMediaUrl(url, deps) {
+  const requested = mediaReference(url);
+  // Threads exposes its canonical post together with the page contents; its
+  // page adapter resolves both in one request instead of fetching twice.
+  if (!requested || requested.id || requested.platform === "threads") return url;
+  let current = url;
+  for (let redirects = 0; redirects < 5; redirects++) {
+    const response = await fetchWithTimeout(current, { redirect: "manual", headers: { "user-agent": "Mozilla/5.0" } }, deps.httpTimeoutMs, deps.fetch);
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      const next = location && new URL(location, current).href;
+      if (!next || mediaReference(next)?.platform !== requested.platform) throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", "redirect");
+      current = next;
+      if (mediaReference(current)?.id) return current;
+      continue;
+    }
+    if (!response.ok) throw httpFailure("Short media link failed", response.status, response.headers);
+    const reader = response.body?.getReader(), chunks = [];
+    let size = 0;
+    if (reader) {
+      try {
+        while (size < 1024 * 1024) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          size += chunk.value.length;
+          chunks.push(Buffer.from(chunk.value));
+        }
+      } finally { await reader.cancel().catch(() => {}); }
+    }
+    const canonical = extractHtmlMetaContent(Buffer.concat(chunks).toString("utf8"), "og:url");
+    if (mediaReference(canonical)?.platform === requested.platform && mediaReference(canonical)?.id) return canonical;
+    throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "redirect");
+  }
+  throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "redirect");
 }
 
 // Keep the actual failures together. A fallback saying "no media" must not erase
@@ -73,14 +134,17 @@ export function socialDownloadFailure(primary, fallback, provider) {
   error.code = "SOCIAL_DOWNLOAD_FAILED";
   error.downloader = primary.downloader || "yt-dlp";
   error.attempts = [
-    ...(Array.isArray(primary.attempts) ? primary.attempts : [{ provider: "yt-dlp", error: primary }]),
+    ...(Array.isArray(primary.attempts) ? primary.attempts : [{ provider: primary.downloader || "yt-dlp", error: primary }]),
     { provider, error: fallback },
   ];
   return error;
 }
 
-function httpFailure(message, status) {
-  return Object.assign(new Error(`${message}: ${status}`), { status });
+function httpFailure(message, status, headers) {
+  const value = headers?.get?.("retry-after");
+  const seconds = value ? Number.isFinite(Number(value)) ? Number(value) : (Date.parse(value) - Date.now()) / 1000 : NaN;
+  return Object.assign(new Error(`${message}: ${status}`), { status,
+    ...(Number.isFinite(seconds) && seconds > 0 ? { retryAfterSeconds: Math.ceil(seconds) } : {}) });
 }
 
 export async function downloadTikTokWithFallbackApi(url, tempDir, titleHint = "", deps) {
@@ -106,7 +170,7 @@ export async function downloadTikTokWithFallbackApi(url, tempDir, titleHint = ""
     deps.httpTimeoutMs,
     deps.fetch,
   );
-  if (!response.ok) throw httpFailure("TikTok fallback API failed", response.status);
+  if (!response.ok) throw httpFailure("TikTok fallback API failed", response.status, response.headers);
 
   const body = await response.json().catch(() => null);
   if (!body || body.code !== 0 || !body.data) {
@@ -186,7 +250,7 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
     deps.httpTimeoutMs,
     deps.fetch,
   );
-  if (!response.ok) throw httpFailure("Threads fetch failed", response.status);
+  if (!response.ok) throw httpFailure("Threads fetch failed", response.status, response.headers);
 
   const html = await response.text();
   const resolvedUrl = response.url || url;
@@ -246,82 +310,44 @@ export async function downloadInstagramWithSnapinsta(url, tempDir, deps) {
   throw Object.assign(sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "snapinsta"), { fallbackDisabled: true });
 }
 
-export async function fetchSnapinstaToken(deps) {
-  const response = await fetchWithTimeout(
-    `${deps.snapinstaBaseUrl}/`,
-    {
-      headers: {
-        accept: "text/html",
-        "user-agent": "Mozilla/5.0 TelegramSocialVideoBot/1.0",
-      },
-    },
-    deps.httpTimeoutMs,
-    deps.fetch,
-  );
-  if (!response.ok) throw httpFailure("third-party Instagram token fetch failed", response.status);
-
-  const body = await response.text();
-  const match =
-    body.match(/name=["']token["'][^>]*value=["']([^"']+)["']/i) ||
-    body.match(/value=["']([^"']+)["'][^>]*name=["']token["']/i);
-  if (!match) throw new Error("third-party Instagram token not found");
-  return match[1];
-}
-
-export function decodeSnapinstaActionResponse(jsCode) {
-  const match = String(jsCode || "").match(/\("([^"]+)",\d+,"([^"]+)",(\d+),(\d+),\d+\)/);
-  if (!match) throw new Error("third-party Instagram response could not be decoded");
-  const decoded = decodeSnapinstaObfuscated(match[1], match[2], Number(match[3]), Number(match[4]));
-  return decodeByteString(decoded);
-}
-
-function decodeSnapinstaObfuscated(source, alphabet, offset, base) {
-  let decoded = "";
-  let index = 0;
-  while (index < source.length) {
-    let chunk = "";
-    while (index < source.length && source[index] !== alphabet[base]) {
-      chunk += source[index];
-      index++;
-    }
-    const encoded = chunk
-      .split("")
-      .map((char) => alphabet.indexOf(char))
-      .join("");
-    decoded += String.fromCharCode(Number.parseInt(convertSnapinstaBase(encoded, base, 10), 10) - offset);
-    index++;
-  }
-  return decoded;
-}
-
-function convertSnapinstaBase(value, fromBase, toBase) {
-  const alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/";
-  const fromAlphabet = alphabet.slice(0, fromBase);
-  const toAlphabet = alphabet.slice(0, toBase);
-  const decimal = value
-    .split("")
-    .reverse()
-    .reduce((sum, char, index) => {
-      const digit = fromAlphabet.indexOf(char);
-      return digit === -1 ? sum : sum + digit * Math.pow(fromBase, index);
-    }, 0);
-
-  let result = "";
-  let remaining = decimal;
-  while (remaining) {
-    result = toAlphabet[remaining % toBase] + result;
-    remaining = Math.floor(remaining / toBase);
-  }
-  return result || "0";
-}
-
-function decodeByteString(value) {
+export async function downloadInstagramPost(url, tempDir, deps) {
+  let manifest;
   try {
-    const bytes = Uint8Array.from(String(value), (char) => char.charCodeAt(0) & 0xff);
-    return new TextDecoder().decode(bytes);
-  } catch {
-    return value;
+    const { stdout } = await deps.execFileAsync(deps.python || "python3", [deps.instagramScript, "--url", url,
+      "--max-items", String(Math.min(20, deps.getMaxMediaItems())),
+      ...(deps.instagramSession ? ["--session", deps.instagramSession] : [])], {
+      timeout: 45000, maxBuffer: 2 * 1024 * 1024,
+      env: { PATH: process.env.PATH || "/usr/bin:/bin", LANG: "C.UTF-8" },
+    });
+    manifest = JSON.parse(stdout);
+    if (manifest.error) throw Object.assign(new Error(`Instagram retrieval: ${manifest.error.code}`), manifest.error);
+  } catch (error) { error.downloader = "instaloader"; throw error; }
+  if (!/^\d+$/u.test(String(manifest.publicationId)) || instagramMediaCode(manifest.publicationId) !== manifest.id) {
+    throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader");
   }
+  const source = verifiedMediaSource(url, { provider: "instaloader", resolvedUrl: manifest.url, id: manifest.id, owner: manifest.owner });
+  const count = Number(manifest.count), selected = Math.min(20, deps.getMaxMediaItems(), count);
+  if (!Number.isSafeInteger(count) || count < 1 || !Array.isArray(manifest.items) || manifest.items.length !== selected) {
+    throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader");
+  }
+  const files = [];
+  let bytes = 0;
+  for (const [index, item] of manifest.items.entries()) {
+    let target;
+    try { target = new URL(item.url); } catch { throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader"); }
+    if (item.index !== index || !["image", "video"].includes(item.kind) || target.protocol !== "https:" || target.username || target.password ||
+        (target.port && target.port !== "443") || !["cdninstagram.com", "fbcdn.net"].some(host => target.hostname.endsWith("." + host))) {
+      throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader");
+    }
+    const file = await downloadRemoteMediaFile(item.url, tempDir, `instagram-${index + 1}`, source.resolved.url, item.kind,
+      { ...deps, maxBytes: Math.min(deps.maxBytes, 256 * 1024 * 1024 - bytes) });
+    bytes += file.size;
+    file.title = manifest.title || "Instagram media";
+    file.sourceItemId = `${source.resolved.id}:${index}`;
+    if (item.kind === "video") Object.assign(file, await deps.validateDownloadedVideo(file.filePath, { requireAudio: false }));
+    files.push(file);
+  }
+  return { tempDir, files, source, title: manifest.title || "Instagram media" };
 }
 
 export async function downloadSocialVideo(url, deps) {
@@ -330,6 +356,15 @@ export async function downloadSocialVideo(url, deps) {
     // yt-dlp has no Threads extractor. Its generic unsupported-URL error says
     // nothing about the media format and must not mask the actual page result.
     if (isThreadsSocialVideoUrl(url)) return await runSocialVideoFallback("threads", () => deps.downloadThreads(url, tempDir), deps);
+    if (mediaReference(url)?.platform === "instagram" && mediaReference(url)?.kind === "post" && deps.instagramScript) {
+      try { return await downloadInstagramPost(url, tempDir, deps); }
+      catch (error) {
+        if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error.code) || deps.signal?.aborted || mediaFailure(error).code === "RATE_LIMIT") throw error;
+        // Preserve native video posts when the photo adapter cannot access them.
+        try { return { ...await downloadSocialVideoWithYtDlp(url, tempDir, deps), previousFailure: error }; }
+        catch (native) { throw socialDownloadFailure(error, native, "yt-dlp"); }
+      }
+    }
     try {
       return await downloadSocialVideoWithYtDlp(url, tempDir, deps);
     } catch (error) {
@@ -358,13 +393,6 @@ export function selectFallback(url, deps) {
       download: (tempDir) => deps.downloadTikTok(url, tempDir),
     };
   }
-  if (deps.shouldTryInstagramFallback(url)) {
-    return {
-      provider: "instagram",
-      logEvent: "instagram_downloader_fallback_triggered",
-      download: (tempDir) => deps.downloadInstagram(url, tempDir),
-    };
-  }
   if (deps.shouldTryThreadsFallback(url)) {
     return {
       provider: "threads",
@@ -391,6 +419,7 @@ export async function runSocialVideoFallback(provider, operation, deps) {
   } catch (error) {
     if (deps.signal?.aborted) throw error;
     if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error.code)) throw error;
+    if (!["RATE_LIMIT", "TIMEOUT", "SERVICE_ERROR"].includes(mediaFailure(error).code)) throw error;
     const nextState = recordCircuitBreakerFailure(
       state,
       {
@@ -416,7 +445,7 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
     error.downloader = "yt-dlp";
     const failure = mediaFailure(error);
     const delayMs = 2000;
-    if (deps.signal?.aborted || !["RATE_LIMIT", "TIMEOUT", "SERVICE_ERROR"].includes(failure.code) ||
+    if (deps.signal?.aborted || !["TIMEOUT", "SERVICE_ERROR"].includes(failure.code) ||
         (deps.deadline || Infinity) - Date.now() <= delayMs) throw error;
     previousFailure = error;
     deps.logInfo("social_video_metadata_retry", { provider: "yt-dlp", code: failure.code, delayMs });
@@ -435,6 +464,8 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
 
   const maxMb = Math.max(1, Math.floor(deps.maxBytes / 1024 / 1024));
   const outputTemplate = path.join(tempDir, "%(title).80B.%(id)s.%(ext)s");
+  const metadataPath = path.join(tempDir, "verified-info.json");
+  await deps.fs.promises.writeFile(metadataPath, JSON.stringify(info), { mode: 0o600 });
   await deps.execFileAsync(
     deps.downloader,
     [
@@ -458,7 +489,7 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
       "mp4",
       "-o",
       outputTemplate,
-      url,
+      "--load-info-json", metadataPath,
     ],
     {
       cwd: deps.rootDir,
@@ -535,15 +566,15 @@ export async function downloadRemoteBinaryFile(url, filePath, { accept = "*/*", 
     deps.httpTimeoutMs,
     deps.fetch,
   );
-  if (!response.ok) throw httpFailure("remote media download failed", response.status);
+  if (!response.ok) throw httpFailure("remote media download failed", response.status, response.headers);
 
   const contentLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > deps.maxBytes) {
+    await response.body?.cancel?.().catch(() => {});
     throw new Error("remote media exceeds configured file limit");
   }
 
-  const buffer = await readLimitedResponseBuffer(response, deps.maxBytes);
-  await deps.fs.promises.writeFile(filePath, buffer);
+  await writeLimitedResponseFile(response, filePath, deps);
 }
 
 export async function downloadRemoteMediaFile(url, tempDir, baseName, referer, forcedMediaKind, deps) {
@@ -559,7 +590,7 @@ export async function downloadRemoteMediaFile(url, tempDir, baseName, referer, f
     deps.httpTimeoutMs,
     deps.fetch,
   );
-  if (!response.ok) throw httpFailure("remote media download failed", response.status);
+  if (!response.ok) throw httpFailure("remote media download failed", response.status, response.headers);
   const contentType = String(response.headers.get("content-type") || "").toLowerCase();
   if (contentType.startsWith("text/html")) throw new Error("remote media returned HTML instead of a file");
   const mediaKind = forcedMediaKind || inferRemoteMediaKind(url, contentType);
@@ -567,40 +598,50 @@ export async function downloadRemoteMediaFile(url, tempDir, baseName, referer, f
 
   const contentLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > deps.maxBytes) {
+    await response.body?.cancel?.().catch(() => {});
     throw new Error("remote media exceeds configured file limit");
   }
 
-  const buffer = await readLimitedResponseBuffer(response, deps.maxBytes);
   const mimeType = normalizeMediaMimeType(contentType, mediaKind);
   const extension = mediaExtensionForMimeType(mimeType) || extensionFromUrl(url) || (mediaKind === "image" ? "jpg" : "mp4");
   const filePath = path.join(tempDir, `${baseName}.${extension}`);
-  await deps.fs.promises.writeFile(filePath, buffer);
-  const stat = await deps.fs.promises.stat(filePath);
+  const downloaded = await writeLimitedResponseFile(response, filePath, deps);
   return {
     filePath,
     mediaKind,
     mimeType,
-    size: stat.size,
-    hash: crypto.createHash("sha256").update(buffer).digest("hex"),
+    size: downloaded.size,
+    hash: downloaded.hash,
     title: mediaKind === "image" ? "Instagram image" : "Instagram video",
   };
 }
 
-async function readLimitedResponseBuffer(response, maxBytes) {
-  const chunks = [];
+async function writeLimitedResponseFile(response, filePath, deps) {
   let totalBytes = 0;
   const reader = response.body?.getReader();
   if (!reader) throw new Error("remote media response was empty");
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = Buffer.from(value);
-    totalBytes += chunk.length;
-    if (totalBytes > maxBytes) throw new Error("remote media exceeds configured file limit");
-    chunks.push(chunk);
+  const file = await deps.fs.promises.open(filePath, "wx", 0o600), hash = crypto.createHash("sha256");
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      totalBytes += chunk.length;
+      if (totalBytes > deps.maxBytes) throw new Error("remote media exceeds configured file limit");
+      if (deps.downloadBudget) {
+        deps.downloadBudget.bytes += chunk.length;
+        if (deps.downloadBudget.bytes > deps.downloadBudget.maxBytes) throw new Error("Media operation exceeds configured file limit");
+      }
+      hash.update(chunk);
+      await file.writeFile(chunk);
+    }
+    if (!totalBytes) throw new Error("remote media response was empty");
+    return { size: totalBytes, hash: hash.digest("hex") };
+  } catch (error) {
+    await reader.cancel?.().catch(() => {});
+    await deps.fs.promises.rm(filePath, { force: true }).catch(() => {});
+    throw error;
+  } finally {
+    await file.close();
   }
-
-  if (!totalBytes) throw new Error("remote media response was empty");
-  return Buffer.concat(chunks);
 }

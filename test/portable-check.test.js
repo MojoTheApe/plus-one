@@ -39,8 +39,9 @@ test('Telegram verification requires numeric ownership and group reception setti
 test('media readiness loads Whisper rather than merely checking Python version', async () => {
   const calls = [];
   await checkMedia({ env: {}, run: async (command, args) => { calls.push({ command, args }); } });
-  assert.equal(calls.length, 4);
-  assert.match(calls[3].args[1], /WhisperModel/);
+  assert.equal(calls.length, 5);
+  assert.match(calls[3].args[1], /instaloader/);
+  assert.match(calls[4].args[1], /WhisperModel/);
   assert.ok(!calls.some(call => call.command.includes('telegram')));
   await assert.rejects(checkMedia({ env: { SOCIAL_VIDEO_ENABLED: 'false' }, run: async () => { throw new Error('model download failed'); } }), /speech model/);
 });

@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
+import { mediaPublicationKey } from "./media-source.js";
 
 // Success quota and protection against repeated upstream failures are independent.
 // Synchronous reservations also prevent two simultaneous requests overspending it.
@@ -85,7 +86,7 @@ function denied(reason, seconds) {
 }
 
 function mediaUrlKey(value) {
-  let normalized = String(value || "").trim();
+  let normalized = mediaPublicationKey(value).trim();
   try { const url = new URL(normalized); url.hash = ""; normalized = url.href; } catch { /* Keep opaque identifiers stable. */ }
   return createHash("sha256").update(normalized).digest("hex");
 }

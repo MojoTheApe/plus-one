@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { MediaOperations } from "../src/media-operations.js";
 import {
   createSocialDownloader,
   downloadRemoteBinaryFile,
@@ -12,12 +16,14 @@ import {
   fetchWithTimeout,
   inspectSocialVideo,
   selectFallback,
+  downloadInstagramPost,
+  resolveSocialMediaUrl,
 } from "../src/social-downloader.js";
 import { mediaFailure, failureMessage } from "../src/media-operations.js";
 
 test('a transient native metadata failure recovers once and still verifies the exact requested publication', async () => {
   let inspections = 0, downloads = 0;
-  const first = Object.assign(new Error('upstream busy'), { status: 429 });
+  const first = Object.assign(new Error('upstream busy'), { status: 503 });
   const result = await downloadSocialVideoWithYtDlp('https://www.instagram.com/reel/recovery/', '/tmp/social', {
     ...baseDeps(mockFs()),
     execFileAsync: async (_command, args) => {
@@ -45,12 +51,11 @@ test('persistent native throttling stays retryable and the disabled fallback nev
   await assert.rejects(downloadSocialVideo('https://www.instagram.com/reel/recovery/', deps), error => {
     const failure = mediaFailure(error);
     assert.equal(failure.code, 'RATE_LIMIT'); assert.equal(failure.retryable, true);
-    assert.deepEqual(failure.causes.map(cause => cause.code), ['RATE_LIMIT', 'SOURCE_UNVERIFIED']);
-    assert.equal(failure.causes[1].fallbackDisabled, true);
+    assert.equal(failure.causes, undefined);
     assert.doesNotMatch(failureMessage(failure, 'fixture'), /SOURCE_UNVERIFIED|неперевірен/);
     return true;
   });
-  assert.equal(inspections, 2); assert.equal(fetches, 0);
+  assert.equal(inspections, 1); assert.equal(fetches, 0);
 });
 
 test('native retry never repeats authentication, absent media or identity failures', async () => {
@@ -86,7 +91,7 @@ test('cancellation during metadata backoff stops before a second extractor or an
   try {
     await assert.rejects(downloadSocialVideoWithYtDlp('https://www.instagram.com/reel/recovery/', '/tmp/social', {
       ...baseDeps(mockFs()), signal: controller.signal,
-      execFileAsync: async () => { calls++; throw Object.assign(new Error('upstream busy'), { status: 429 }); },
+      execFileAsync: async () => { calls++; throw Object.assign(new Error('upstream busy'), { status: 503 }); },
     }), { name: 'AbortError' });
     assert.equal(calls, 1);
   } finally { clearTimeout(timer); }
@@ -135,7 +140,9 @@ test("selectFallback chooses providers in expected order", () => {
     downloadInstagram: () => {},
   };
 
-  assert.equal(selectFallback("https://example.com", deps).provider, "instagram");
+  assert.equal(selectFallback("https://example.com", deps).provider, "threads");
+  deps.shouldTryThreadsFallback = () => false;
+  assert.equal(selectFallback("https://www.instagram.com/p/fixture/", deps), null);
 });
 
 test("downloadSocialVideo returns primary downloader result without fallback", async () => {
@@ -166,21 +173,21 @@ test("downloadSocialVideo uses fallback and records provider cooldown failures",
       execFileAsync: async () => {
         throw new Error("primary failed");
       },
-      shouldTryInstagramFallback: () => true,
-      downloadInstagram: async () => {
-        throw new Error("fallback failed");
+      shouldTryTikTokFallback: () => true,
+      downloadTikTok: async () => {
+        throw Object.assign(new Error("fallback failed"), { status: 503 });
       },
     }),
     /fallback failed/,
   );
 
-  assert.equal(circuitByProvider.get("instagram").failures, 1);
+  assert.equal(circuitByProvider.get("tiktok").failures, 1);
   assert.equal(fsMock.removed.length, 1);
 });
 
 test("downloadSocialVideo blocks open fallback circuit", async () => {
   const fsMock = mockFs();
-  const circuitByProvider = new Map([["instagram", { failures: 3, openedUntil: Date.now() + 60000 }]]);
+  const circuitByProvider = new Map([["tiktok", { failures: 3, openedUntil: Date.now() + 60000 }]]);
 
   await assert.rejects(
     downloadSocialVideo("https://example.com/video", {
@@ -189,10 +196,17 @@ test("downloadSocialVideo blocks open fallback circuit", async () => {
       execFileAsync: async () => {
         throw new Error("primary failed");
       },
-      shouldTryInstagramFallback: () => true,
+      shouldTryTikTokFallback: () => true,
     }),
     /cooling down/,
   );
+});
+
+test("one inaccessible publication cannot open the provider circuit for other posts", async () => {
+  const state = new Map(), downloader = createSocialDownloader({ ...baseDeps(mockFs()), circuitByProvider: state, circuitFailureThreshold: 1 });
+  await assert.rejects(downloader.runFallback("threads", async () => { throw Object.assign(new Error("Login required"), { status: 401 }); }));
+  assert.equal(state.has("threads"), false);
+  assert.equal(await downloader.runFallback("threads", async () => "retrieved another post"), "retrieved another post");
 });
 
 test("stream validation triggers only one provider fallback and preserves both causes", async () => {
@@ -239,6 +253,66 @@ test("inspectSocialVideo and downloadSocialVideoWithYtDlp call yt-dlp with expec
   assert.equal(calls[1].args.includes("--dump-single-json"), true);
   assert.equal(calls[2].args.includes("--max-filesize"), true);
   assert.equal(calls[2].args.includes("--merge-output-format"), true);
+  assert.equal(calls[2].args.includes("--load-info-json"), true);
+  assert.equal(calls[2].args.includes(url), false, "The download consumes verified metadata instead of extracting the URL again");
+});
+
+test("Instagram photos and mixed albums preserve native identity and order without an unbound fallback", async () => {
+  const storage = mockFs(), fetched = [];
+  const manifest = { id: "BA", publicationId: "64", owner: "fixture", url: "https://www.instagram.com/p/BA/", title: "Original title", count: 2,
+    items: [{ index: 0, kind: "image", url: "https://scontent.example.cdninstagram.com/photo.jpg" },
+      { index: 1, kind: "video", url: "https://video.example.fbcdn.net/clip.mp4" }] };
+  const deps = { ...baseDeps(storage), instagramScript: "/adapter.py", execFileAsync: async () => ({ stdout: JSON.stringify(manifest) }),
+    fetch: async url => { fetched.push(url); return mockResponse({ headers: { "content-type": url.endsWith("jpg") ? "image/jpeg" : "video/mp4" } }); } };
+  const result = await downloadInstagramPost("https://www.instagram.com/p/BA/?igsh=tracking", "/tmp/social", deps);
+  assert.equal(result.source.status, "verified"); assert.equal(result.source.provider, "instaloader");
+  assert.deepEqual(result.files.map(file => file.mediaKind), ["image", "video"]);
+  assert.deepEqual(fetched, manifest.items.map(item => item.url));
+  manifest.publicationId = "65"; fetched.length = 0;
+  await assert.rejects(downloadInstagramPost("https://www.instagram.com/p/BA/", "/tmp/social", deps), { code: "MEDIA_SOURCE_UNVERIFIED" });
+  assert.deepEqual(fetched, []);
+  manifest.publicationId = "64"; manifest.items[0].url = "https://unrelated.example/preview.jpg";
+  await assert.rejects(downloadInstagramPost("https://www.instagram.com/p/BA/", "/tmp/social", deps), { code: "MEDIA_SOURCE_UNVERIFIED" });
+  assert.deepEqual(fetched, []);
+});
+
+test("short links resolve only inside their platform and retain a native post key", async () => {
+  const visited = [];
+  const deps = { httpTimeoutMs: 1000, fetch: async (url, options) => {
+    visited.push(url); assert.equal(options.redirect, "manual");
+    return new Response(null, { status: 302, headers: { location: "https://www.instagram.com/p/BA/?igsh=two" } });
+  } };
+  assert.equal(await resolveSocialMediaUrl("https://www.instagram.com/share/fixture/", deps), "https://www.instagram.com/p/BA/?igsh=two");
+  assert.equal(visited.length, 1);
+  deps.fetch = async () => new Response(null, { status: 302, headers: { location: "http://127.0.0.1/private" } });
+  await assert.rejects(resolveSocialMediaUrl("https://www.instagram.com/share/fixture/", deps), { code: "MEDIA_SOURCE_MISMATCH" });
+});
+
+test("source throttling is shared across URLs and survives a downloader and journal restart", async t => {
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "source-backoff-"));
+  t.after(() => fs.promises.rm(directory, { recursive: true, force: true }));
+  let calls = 0;
+  const make = () => createSocialDownloader({ ...baseDeps(mockFs()), journal: new MediaOperations(path.join(directory, "operations.json")),
+    execFileAsync: async () => { calls++; throw Object.assign(new Error("Busy"), { status: 429, retryAfterSeconds: 120 }); } });
+  await assert.rejects(make().download("https://www.instagram.com/reel/first/"), error => mediaFailure(error).code === "RATE_LIMIT");
+  await assert.rejects(make().download("https://www.instagram.com/reel/second/"), error => error.code === "SOCIAL_VIDEO_PROVIDER_COOLDOWN" && error.retryAfterSeconds > 100);
+  assert.equal(calls, 1);
+  const state = await new MediaOperations(path.join(directory, "operations.json")).sourceState("instagram");
+  assert.ok(state.notBefore > Date.now() + 100000);
+});
+
+test("remote media streams to a private file and an oversized body is cancelled and removed", async t => {
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "stream-media-"));
+  t.after(() => fs.promises.rm(directory, { recursive: true, force: true }));
+  let cancelled = false, index = 0;
+  const response = { ok: true, headers: new Headers({ "content-type": "image/jpeg" }), body: { getReader: () => ({
+    read: async () => index++ < 3 ? { value: Buffer.alloc(3), done: false } : { done: true }, cancel: async () => { cancelled = true; },
+  }) } };
+  await assert.rejects(downloadRemoteMediaFile("https://cdn.example/photo.jpg", directory, "bounded", "", "image", {
+    ...baseDeps(fs), fs, maxBytes: 5, fetch: async () => response,
+  }), /exceeds/);
+  assert.equal(cancelled, true);
+  assert.deepEqual(await fs.promises.readdir(directory), []);
 });
 
 test("downloadSocialVideoWithYtDlp rejects live and overlong videos", async () => {
@@ -576,6 +650,10 @@ function mockFs() {
       stat: async (target) => ({ size: writes.get(target)?.length || 0 }),
       writeFile: async (target, buffer) => {
         writes.set(target, Buffer.from(buffer));
+      },
+      open: async target => {
+        writes.set(target, Buffer.alloc(0));
+        return { writeFile: async chunk => writes.set(target, Buffer.concat([writes.get(target), Buffer.from(chunk)])), close: async () => {} };
       },
     },
   };
