@@ -30,7 +30,7 @@ import { assertVerifiedMediaSource, mediaReference, sourceIdentityError } from "
 import { observeTelegramUpload } from "./telegram-upload-observer.js";
 import { historyIntent, selectContext, historyPage, localTime, dialoguePolicy, responseDecision, researchForReply } from "./conversation-context.js";
 import { UpdateInbox, ChatQueue, isPermanentUpdateError } from "./update-inbox.js";
-import { MediaOperations, mediaFailure, failureMessage, isMediaRetryText } from "./media-operations.js";
+import { MediaOperations, mediaFailure, failureMessage, isMediaRetryText, canRetryMediaOperation } from "./media-operations.js";
 import { prepareMediaForTelegram, telegramUploadBudget } from "./media-preparation.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -2298,7 +2298,7 @@ async function maybeHandleMediaRetry(message) {
     await telegram("sendMessage", { chat_id: message.chat.id, text: "Цю спробу вже успішно виконано.", reply_to_message_id: message.message_id }); return true;
   }
   if (!operation.failure) operation.failure = { code: "INTERRUPTED", retryable: true, stage: "download", reason: "Попередню спробу було перервано до завершення." };
-  if (!operation.failure.retryable && !(operation.failure.code === "DURATION_LIMIT" && operation.failure.actualDurationSeconds <= socialVideoMaxDurationSeconds)) {
+  if (!canRetryMediaOperation(operation) && !(operation.failure.code === "DURATION_LIMIT" && operation.failure.actualDurationSeconds <= socialVideoMaxDurationSeconds)) {
     await telegram("sendMessage", { chat_id: message.chat.id, text: failureMessage(operation.failure, operation.id, behavior().locale) + "\n" + say(behavior().locale, "Repeating without changing this condition will not help.", "Повтор без изменения этого условия не поможет.", "Повтор без зміни цієї умови не допоможе."), reply_to_message_id: message.message_id,
       ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}) });
     return true;
@@ -2471,10 +2471,10 @@ async function maybeHandleSocialVideo(message, retry = null) {
       text: failureMessage(failure, operation?.id, behavior().locale),
       disable_web_page_preview: true,
     }).catch(() => {});
-    const sourceError = [error, ...(error.attempts || []).map(attempt => attempt.error)].find(error => error.sourceCheck);
+    const sourceError = [error, ...(error.attempts || []).map(attempt => attempt.error)].find(error => error.sourceCheck && !error.fallbackDisabled);
     if (operation) await mediaOperations.record({ ...operation, status: error.deliveryUnknown ? "unknown" : "failed", failure,
       source: sourceError ? { version: 1, requested: mediaReference(url), ...sourceError.sourceCheck } : operation.source,
-      downloader: sourceError?.downloader || operation.downloader,
+      downloader: sourceError?.downloader || error.downloader || operation.downloader,
       errorMessageId: notice?.message_id || null }).catch(error => logError("media_journal_failed", error, messageLogMeta(message)));
   } finally {
     clearInterval(progress);
@@ -3587,7 +3587,7 @@ async function performMessageAction(message, question, decision, context) {
     const operation = await mediaOperations.find(reference, false, {chatId:message.chat.id,topicId:judgeThreadId(message)});
     const url = operation?.url || target.sourceUrl || extractSocialVideoUrl(target.text);
     if (!url || !socialVideoProviderForUrl(url)) return "У цьому повідомленні не знайшов підтримуваного посилання для завантаження.";
-    if (operation?.failure && !operation.failure.retryable) return failureMessage(operation.failure, operation.id, behavior().locale) + "\n" + say(behavior().locale, "Repeating without changing this condition will not help.", "Повтор без изменения этого условия не поможет.", "Повтор без зміни цієї умови не допоможе.");
+    if (operation?.failure && !canRetryMediaOperation(operation)) return failureMessage(operation.failure, operation.id, behavior().locale) + "\n" + say(behavior().locale, "Repeating without changing this condition will not help.", "Повтор без изменения этого условия не поможет.", "Повтор без зміни цієї умови не допоможе.");
     if(!canDownloadMedia(message))return "Завантаження медіа зараз вимкнено в налаштуваннях бота.";
     if(!await isBotAdminInChat(message.chat.id))return "Для завантаження медіа боту потрібні права адміністратора цієї групи.";
     const handled=await maybeHandleSocialVideo(message, operation || {url,sourceMessageId:target.messageId});
