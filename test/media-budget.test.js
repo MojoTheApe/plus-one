@@ -61,3 +61,10 @@ test("abandoned reservations expire safely and cannot be completed twice", () =>
   budget.reserve(2, "three");
   assert.equal(budget.chats.has("1"), false);
 });
+test("tracking parameters and post/reel aliases cannot bypass publication backoff", () => {
+  const budget = new MediaBudget({ now: () => 100000 });
+  const reserved = budget.reserve(-1, "https://www.instagram.com/p/BA/?igsh=first");
+  budget.complete(reserved.reservation, { success: false });
+  assert.equal(budget.reserve(-1, "https://www.instagram.com/reel/BA/?igsh=second").reason, "URL_BACKOFF");
+  assert.equal(budget.reserve(-1, "https://www.instagram.com/p/OTHER/").allowed, true);
+});

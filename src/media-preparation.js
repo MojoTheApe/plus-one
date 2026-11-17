@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 const run = promisify(execFile);
 export const telegramUploadBudget = 48 * 1024 * 1024;
+export const telegramPhotoBudget = 9 * 1024 * 1024;
 const videoTargetBytes = 18 * 1024 * 1024;
 
 export async function prepareMediaForTelegram(files, { maxDurationSeconds = 300, maxUploadBytes = telegramUploadBudget, ffmpeg = "ffmpeg", ffprobe = "ffprobe", execute = run, deadline = Infinity } = {}) {
@@ -16,8 +17,33 @@ export async function prepareMediaForTelegram(files, { maxDurationSeconds = 300,
   for (const media of files) {
     boundedOptions(15000);
     let item = { ...media };
+    // Only the cache supplies bot-scoped, acknowledged Telegram references.
+    if (item.telegramFileId) { prepared.push(item); continue; }
     const stat = await fs.stat(item.filePath);
-    if (item.mediaKind === "video") {
+    if (item.mediaKind === "image") {
+      const probe = async file => JSON.parse((await execute(ffprobe,
+        ["-v", "error", "-protocol_whitelist", "file,pipe", "-err_detect", "explode", "-count_frames", "-show_entries", "stream=codec_name,width,height,nb_read_frames", "-of", "json", file],
+        boundedOptions(15000))).stdout).streams?.[0];
+      const image = await probe(item.filePath);
+      if (!image || !["mjpeg", "png", "webp", "gif", "av1", "hevc"].includes(image.codec_name) ||
+          !(image.width > 0 && image.height > 0) || Number(image.nb_read_frames) !== 1) {
+        throw Object.assign(new Error("Invalid image media"), { code: "MEDIA_IMAGE_INVALID" });
+      }
+      const geometryAllowed = image.width + image.height <= 10000 && Math.max(image.width / image.height, image.height / image.width) <= 20;
+      if (stat.size > telegramPhotoBudget || !geometryAllowed || !["mjpeg", "png"].includes(image.codec_name)) {
+        const output = path.join(path.dirname(item.filePath), "telegram-photo-" + path.basename(item.filePath, path.extname(item.filePath)) + ".jpg");
+        // Pad extreme aspect ratios rather than cropping away source content.
+        await execute(ffmpeg, ["-v", "error", "-y", "-threads", "1", "-protocol_whitelist", "file,pipe", "-i", item.filePath,
+          "-frames:v", "1", "-vf", "scale=w='min(2560,iw)':h='min(2560,ih)':force_original_aspect_ratio=decrease,pad=w='max(iw,ceil(ih/20))':h='max(ih,ceil(iw/20))':x=(ow-iw)/2:y=(oh-ih)/2:color=white",
+          "-q:v", "3", "-threads", "1", output], boundedOptions(30000));
+        const checked = await probe(output), size = (await fs.stat(output)).size;
+        if (!checked || checked.codec_name !== "mjpeg" || Number(checked.nb_read_frames) !== 1 || !(checked.width > 0 && checked.height > 0) ||
+            checked.width + checked.height > 10000 || Math.max(checked.width / checked.height, checked.height / checked.width) > 20 || size > telegramPhotoBudget) {
+          throw Object.assign(new Error("Image exceeds Telegram photo limits after conversion"), { code: "MEDIA_UPLOAD_SIZE", actualBytes: size });
+        }
+        item = { ...item, filePath: output, mimeType: "image/jpeg", width: checked.width, height: checked.height, converted: true };
+      } else { item.width = image.width; item.height = image.height; item.mimeType = image.codec_name === "png" ? "image/png" : "image/jpeg"; }
+    } else if (item.mediaKind === "video") {
       const options = boundedOptions(15000);
       const probeArgs = ["-v", "error", "-protocol_whitelist", "file,pipe", "-show_entries", "format=duration,format_name:stream=codec_type,codec_name,pix_fmt,width,height", "-of", "json"];
       const { stdout } = await execute(ffprobe, [...probeArgs, item.filePath], options);

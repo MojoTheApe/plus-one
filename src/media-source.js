@@ -1,6 +1,6 @@
 // Requested URLs and verified object identity are deliberately separate. A URL
 // copied from the caller is not evidence about files returned by a provider.
-const providers = new Set(["yt-dlp", "threads-page", "tiktok-api"]);
+const providers = new Set(["yt-dlp", "instaloader", "threads-page", "tiktok-api"]);
 const instagramAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 export function instagramMediaCode(value) {
@@ -40,6 +40,14 @@ export function mediaReference(value) {
   const canonicalHost = platform === "threads" ? "www.threads.com" : platform === "instagram" ? "www.instagram.com" : url.hostname;
   return { platform, kind, id, key: platform === "instagram" && kind === "story" ? instagramMediaCode(id) : id,
     owner, url: `https://${canonicalHost}/${parts.join("/")}/` };
+}
+
+// Request URLs may have different tracking parameters or post/reel aliases.
+// Keep the original URL for retrieval; use native identity for reuse/backoff.
+export function mediaPublicationKey(value) {
+  const reference = mediaReference(value);
+  if (!reference?.id) return reference?.url || String(value);
+  return `${reference.platform}:${reference.kind === "story" ? "story" : "post"}:${reference.key}`;
 }
 
 function sameObject(expected, actual) {

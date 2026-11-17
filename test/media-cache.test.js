@@ -75,6 +75,37 @@ test("cache removes missing files and reports partial cached albums", async t =>
   assert.equal(await cache.get({ chatId: 1, messageId: 1 }), null);
 });
 
+test("acknowledged Telegram files survive disk eviction but remain isolated by bot, chat and topic", async t => {
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, "photo.jpg");
+  await fs.writeFile(filePath, "media");
+  const root = path.join(directory, "cache"), cache = new MediaCache(root);
+  const entry = await cache.put({ chatId: -1, topicId: 9, sourceMessageId: 10, sourceUrl: "https://www.instagram.com/p/BA/?igsh=first",
+    files: [{ filePath, mediaKind: "image", mimeType: "image/jpeg" }] });
+  await cache.bind(entry.id, [11], { botId: 77, items: [{ photo: [{ file_id: "acknowledged-photo" }] }] });
+  await fs.rm(entry.files[0].filePath);
+  const restored = new MediaCache(root), scope = { chatId: -1, topicId: 9, botId: 77, sourceUrl: "https://www.instagram.com/reel/BA/?igsh=second" };
+  const reused = await restored.forDelivery(scope);
+  assert.equal(reused.complete, true); assert.equal(reused.files[0].telegramFileId, "acknowledged-photo");
+  assert.equal((await restored.forDelivery({ ...scope, botId: 78 })).complete, false);
+  assert.equal(await restored.forDelivery({ ...scope, chatId: -2 }), null);
+  assert.equal(await restored.forDelivery({ ...scope, topicId: 10 }), null);
+  await restored.invalidateReceipts(entry.id, [0]);
+  assert.equal(await restored.forDelivery(scope), null);
+});
+
+test("unfinished albums reserve disk space rather than losing their remaining files to a new job", async t => {
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, "photo.jpg");
+  await fs.writeFile(filePath, Buffer.alloc(6));
+  const cache = new MediaCache(path.join(directory, "cache"), { maxTotalBytes: 10 });
+  const pending = await cache.put({ chatId: 1, sourceMessageId: 1, files: [{ filePath }], pending: true });
+  await assert.rejects(cache.put({ chatId: 2, sourceMessageId: 2, files: [{ filePath }], pending: true }), { code: "MEDIA_CACHE_CAPACITY" });
+  assert.equal((await cache.get({ chatId: 1, messageId: 1 })).complete, true);
+  await cache.release(pending.id);
+  const next = await cache.put({ chatId: 2, sourceMessageId: 2, files: [{ filePath }], pending: true });
+  assert.equal(next.complete, true);
+  assert.equal(await cache.get({ chatId: 1, messageId: 1 }), null);
+});
+
 test("corrupt paths and symlinks cannot read or remove files outside the cache", async t => {
   const directory = await temporaryDirectory(t), outside = path.join(directory, "outside");
   await fs.mkdir(outside);

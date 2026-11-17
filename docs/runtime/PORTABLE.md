@@ -185,6 +185,25 @@ another bot may be introduced.
 
 ## Updates, backup and another bot
 
+Instagram photos/mixed posts use the pinned Instaloader dependency from
+`requirements.txt`; the supported image includes it. Native installations must
+install that requirements file in the Python environment selected by
+`SOCIAL_MEDIA_PYTHON` (or `WHISPER_PYTHON`). The media preflight verifies the import.
+Public access depends on Instagram; no personal browser session is imported.
+
+If the operator deliberately supplies an existing service-account session,
+`INSTAGRAM_SESSION_FILE` points to a private JSON file with `username` and a
+`cookies` object whose values are strings. Keep it outside Git under private state,
+mode0600, readable by the bot UID. The adapter reads it without pickle or automatic
+login. Its access/challenges remain the operator's responsibility; missing login
+does not authorize an unbound third-party downloader or a different Stories item.
+
+Preserve the media journal/cache through updates. The journal also holds source
+backoff and aggregate outcomes. The cache protects unfinished albums; confirmed
+file IDs are bot/chat/topic-scoped and expire with the existing48-hour entries.
+The next job waits/fails before upload if protected files exhaust its256MiB budget.
+Captions retain title/source/link only; requester and operation data stay private.
+
 Use a distinct instance directory, project name and token for another bot.
 Always use its matching `BOT_INSTANCE_DIR`, project name and selected overlay.
 Stop with `docker compose -p nightbot -f deploy/compose.portable.yaml stop` (plus

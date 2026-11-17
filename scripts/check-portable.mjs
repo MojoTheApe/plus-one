@@ -47,7 +47,8 @@ export async function checkTelegram({ env = process.env, fetchImpl = fetch } = {
 export async function checkMedia({ env = process.env, run = execute } = {}) {
   if (env.SOCIAL_VIDEO_ENABLED !== 'false') {
     for (const [command, args] of [[env.SOCIAL_VIDEO_DOWNLOADER || 'yt-dlp', ['--version']],
-      [env.SOCIAL_VIDEO_FFMPEG || 'ffmpeg', ['-version']], [env.SOCIAL_VIDEO_FFPROBE || 'ffprobe', ['-version']]]) {
+      [env.SOCIAL_VIDEO_FFMPEG || 'ffmpeg', ['-version']], [env.SOCIAL_VIDEO_FFPROBE || 'ffprobe', ['-version']],
+      [env.SOCIAL_MEDIA_PYTHON || env.WHISPER_PYTHON || 'python3', ['-c', 'import instaloader; print(instaloader.__version__)']]]) {
       try { await run(command, args, { timeout: 15000, maxBuffer: 1024 * 1024 }); }
       catch { throw new Error('The media downloader or FFmpeg tools are unavailable. Rebuild the supported image or install the native dependencies.'); }
     }
