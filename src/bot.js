@@ -2425,7 +2425,6 @@ async function maybeHandleSocialVideo(message, retry = null) {
       sourceMessageId: operation?.sourceMessageId || message.message_id, sourceUrl: url, source, title: result.title, files: mediaFiles, pending: true });
     if (recoverRejectedReference && cached) {
       if (operation.deliveredFileCount) await mediaCache.copyAcknowledged(cached.id, preparedCache.id, { count: operation.deliveredFileCount, botId: botInfo.id });
-      await mediaCache.release(cached.id);
     }
     if (cached?.complete) await mediaCache.hold(cached.id);
     logInfo("media_stage_completed", messageLogMeta(message, { diagnosticId: operation?.id, stage, elapsedMs: Date.now() - prepareStarted,
@@ -2433,6 +2432,7 @@ async function maybeHandleSocialVideo(message, retry = null) {
     const caption = formatSocialVideoCaption(source.resolved.url, result.title || mediaFiles[0]?.title)
       .slice(0, Math.max(0, 999 - source.resolved.url.length)) + "\n" + source.resolved.url;
     if (operation) operation = await mediaOperations.record({ ...operation, status: "prepared", stage: "upload", failure: null, cacheId: preparedCache?.id });
+    if (recoverRejectedReference && cached) await mediaCache.release(cached.id);
     const recordSent = async (items, fileCount) => {
       if (!operation) return;
       const startIndex = operation.deliveredFileCount || 0;
@@ -2481,8 +2481,8 @@ async function maybeHandleSocialVideo(message, retry = null) {
             sourceUrl: url, source, title: result.title, files: replacement, pending: true });
           if (delivered) await mediaCache.copyAcknowledged(previousCache.id, preparedCache.id, { count: delivered, botId: botInfo.id });
           mediaFiles = replacement.map((file, index) => ({ ...file, filePath: preparedCache.files.find(item => item.index === index).filePath }));
-          await mediaCache.release(previousCache.id);
           operation = await mediaOperations.record({ ...operation, cacheId: preparedCache.id, deliveryRoute: "source" });
+          await mediaCache.release(previousCache.id);
         } finally { if (fresh.tempDir) await fs.promises.rm(fresh.tempDir, { recursive: true, force: true }); }
       } else {
         mediaFiles = mediaFiles.map(file => { const { telegramFileId, ...local } = file; return local; });

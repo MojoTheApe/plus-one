@@ -102,3 +102,68 @@ print('session verified')
   const result = spawnSync('python3', ['-B', '-c', program, path.resolve('scripts/instagram-media.py')], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), 'session verified');
 });
+
+test('authenticated alternate URLs must prove the same parent, ordered children and types before selection', () => {
+  const program = `
+import importlib.util,sys,copy
+from types import SimpleNamespace
+spec=importlib.util.spec_from_file_location('adapter',sys.argv[1]);adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
+class Post:
+ mediaid=64;shortcode='BA';mediacount=2;typename='GraphSidecar';owner_username='fixture';caption=''
+ mediaid_to_shortcode=staticmethod(lambda value:'BA')
+ def __init__(self):
+  self._context=SimpleNamespace(iphone_support=True,is_logged_in=True)
+  self._iphone_struct={'pk':'64','media_type':8,'carousel_media':[{'pk':str(i),'media_type':1,'image_versions2':{'candidates':[{'url':'https://one.cdninstagram.com/child-'+str(i)+'.jpg'}]}} for i in [100,101]]}
+ def _field(self,*keys):return [{'node':{'id':str(i),'is_video':False}} for i in [100,101]]
+ def get_sidecar_nodes(self,start,end):
+  return [SimpleNamespace(is_video=False,display_url=item['image_versions2']['candidates'][0]['url'],video_url=None) for item in self._iphone_struct['carousel_media'][start:end+1]]
+post=Post();result=adapter.publication_manifest(post,20)
+assert [item['mediaId'] for item in result['items']]==['100','101']
+assert [item['url'].rsplit('/',1)[-1] for item in result['items']]==['child-100.jpg','child-101.jpg']
+for change in ['order','parent','missing','duplicate','type','unproven']:
+ post=Post()
+ if change=='order':post._iphone_struct['carousel_media'].reverse()
+ if change=='parent':post._iphone_struct['pk']='65'
+ if change=='missing':post._iphone_struct['carousel_media'].pop()
+ if change=='duplicate':post._iphone_struct['carousel_media'][1]['pk']='100'
+ if change=='type':post._iphone_struct['carousel_media'][1]['media_type']=2
+ if change=='unproven':del post._iphone_struct['carousel_media'][1]['pk']
+ try:adapter.publication_manifest(post,20);raise AssertionError('unbound alternate accepted: '+change)
+ except ValueError as error:assert str(error) in {'MEDIA_SOURCE_MISMATCH','MEDIA_SOURCE_UNVERIFIED'}
+# Single photo/video properties also select from the alternate native response.
+for video in [False,True]:
+ post=Post();post.typename='GraphVideo' if video else 'GraphImage';post.mediacount=1;post.is_video=video
+ post._iphone_struct={'pk':'65','media_type':2 if video else 1}
+ post.url='https://one.cdninstagram.com/wrong.jpg';post.video_url='https://one.cdninstagram.com/wrong.mp4'
+ try:adapter.publication_manifest(post,20);raise AssertionError('wrong single parent accepted')
+ except ValueError as error:assert str(error)=='MEDIA_SOURCE_MISMATCH'
+print('alternate identities verified')
+`;
+  const result = spawnSync('python3', ['-B', '-c', program, path.resolve('scripts/instagram-media.py')], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), 'alternate identities verified');
+});
+
+test('unavailable authenticated high-quality endpoint retains only verified GraphQL URLs and restores context', () => {
+  const program = `
+import importlib.util,sys
+from types import SimpleNamespace
+spec=importlib.util.spec_from_file_location('adapter',sys.argv[1]);adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
+ConnectionException=type('ConnectionException',(Exception,),{})
+class Post:
+ mediaid=64;shortcode='BA';mediacount=1;typename='GraphImage';owner_username='fixture';caption='';is_video=False
+ mediaid_to_shortcode=staticmethod(lambda value:'BA')
+ _context=SimpleNamespace(iphone_support=True,is_logged_in=True)
+ @property
+ def _iphone_struct(self):raise ConnectionException('alternate unavailable')
+ @property
+ def url(self):
+  assert not self._context.iphone_support
+  return 'https://one.cdninstagram.com/verified-graphql.jpg'
+post=Post();result=adapter.publication_manifest(post,20)
+assert result['items'][0]['url'].endswith('/verified-graphql.jpg')
+assert post._context.iphone_support
+print('verified fallback preserved')
+`;
+  const result = spawnSync('python3', ['-B', '-c', program, path.resolve('scripts/instagram-media.py')], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), 'verified fallback preserved');
+});

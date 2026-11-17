@@ -204,7 +204,8 @@ Preserve the media journal/cache through updates. The journal also holds source
 backoff and aggregate outcomes. The cache protects unfinished albums. Prepared
 bytes expire after48 hours;
 complete verified item manifests with all acknowledged bot/chat/topic-scoped file
-IDs may be reused for30 days within the existing300-entry cap. Partial/unknown
+IDs may be reused for30 days within the existing300-entry/4MiB-index caps.
+Protected pending recovery is never evicted to fit metadata. Partial/unknown
 and legacy records keep48-hour bounds. Fresh recovery requires the original
 ordered item identities; no legacy album replacement is guessed by position.
 `SOCIAL_VIDEO_PER_CHAT_PER_HOUR` limits successful new source retrievals, not

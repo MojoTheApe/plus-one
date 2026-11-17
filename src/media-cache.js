@@ -6,6 +6,7 @@ import { assertSameMediaItems, hasMediaItemIdentity } from "./media-items.js";
 
 const safeId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const safeName = /^\d{1,2}\.[a-z0-9]{1,6}$/;
+const maxIndexBytes = 4 * 1024 * 1024;
 
 export class MediaCache {
   constructor(directory, { ttlMs = 48 * 3600000, receiptTtlMs = 30 * 86400000, maxTotalBytes = 256 * 1024 * 1024,
@@ -185,7 +186,7 @@ export class MediaCache {
     await fs.chmod(this.directory, 0o700);
     try {
       const indexStat = await fs.lstat(this.index);
-      if (!indexStat.isFile() || indexStat.isSymbolicLink() || indexStat.size > 4 * 1024 * 1024) throw new Error("Invalid media cache index file");
+      if (!indexStat.isFile() || indexStat.isSymbolicLink() || indexStat.size > maxIndexBytes) throw new Error("Invalid media cache index file");
       const state = JSON.parse(await fs.readFile(this.index, "utf8"));
       if (state.version !== 1 || !Array.isArray(state.entries)) throw new Error("Invalid media cache index");
       return { version: 1, entries: state.entries.filter(entry => entry && safeId.test(entry.id)
@@ -249,8 +250,18 @@ export class MediaCache {
   }
 
   async write(state) {
+    let serialized = JSON.stringify(state);
+    // Retained metadata has a byte bound too. Every mutation must produce an
+    // index the reader accepts; pending recovery may never be evicted to fit it.
+    while (Buffer.byteLength(serialized) > maxIndexBytes) {
+      const oldest = state.entries.filter(entry => !entry.pending).sort((a, b) => a.createdAt - b.createdAt)[0];
+      if (!oldest) throw capacityError();
+      await this.removeEntry(oldest.id);
+      state.entries = state.entries.filter(entry => entry.id !== oldest.id);
+      serialized = JSON.stringify(state);
+    }
     const temporary = path.join(this.directory, `index-${randomUUID()}.tmp`);
-    try { await fs.writeFile(temporary, JSON.stringify(state), { mode: 0o600, flag: "wx" }); await fs.rename(temporary, this.index); }
+    try { await fs.writeFile(temporary, serialized, { mode: 0o600, flag: "wx" }); await fs.rename(temporary, this.index); }
     finally { await fs.rm(temporary, { force: true }); }
   }
 

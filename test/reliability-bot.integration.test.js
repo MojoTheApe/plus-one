@@ -1887,3 +1887,49 @@ test('a partial stale-reference recovery paused by source quota resumes only its
   const retained = JSON.parse(await fs.readFile(root + '/index.json')).entries.find(item => item.id === done.cacheId);
   assert.equal(retained.receipts.length, 11);
 });
+
+for (const recovery of ['in-attempt', 'after-quota-pause']) {
+  test(`a replacement journal failure keeps a 49-hour-old partial recovery resumable after restart: ${recovery}`, async t => {
+    const f = await fixture(t, 'legacy', undefined, async () => { process.env.SOCIAL_VIDEO_PER_CHAT_PER_HOUR = recovery === 'after-quota-pause' ? '1' : '6'; });
+    const url = 'https://www.tiktok.com/@fixture/photo/123/', source = verifiedMediaSource(url, { provider: 'tiktok-api', id: '123', owner: 'fixture' });
+    let pass = 0, oldId, injected = false; const uploads = [];
+    const download = async () => {
+      const tempDir = await fs.mkdtemp(path.join(f.root, 'journal-album-')), files = [];
+      for (let i = 0; i < 11; i++) { const filePath = path.join(tempDir, `${i}.png`); await fs.writeFile(filePath, await photoBytes(i)); files.push({ filePath, sourceItemId: `native:${i}`, mediaKind: 'image', mimeType: 'image/png' }); }
+      return { tempDir, files, source };
+    };
+    f.setDownloader(download);
+    f.setUpload(async (method, form) => {
+      uploads.push({ pass, method });
+      if (pass === 1 && method === 'sendPhoto' && typeof form.get('photo') === 'string') return Response.json({ ok: false, error_code: 400, description: 'wrong file identifier' }, { status: 400 });
+      const items = Array.from({ length: method === 'sendMediaGroup' ? 10 : 1 }, (_, i) => ({ message_id: 2000 + uploads.length * 100 + i, photo: [{ file_id: `known-${method === 'sendPhoto' ? 10 : i}` }] }));
+      return Response.json({ ok: true, result: method === 'sendMediaGroup' ? items : items[0] });
+    });
+    await f.handle({ message_id: 500, text: url });
+    const indexFile = f.root + '/runtime/media-cache/index.json', cache = JSON.parse(await fs.readFile(indexFile));
+    oldId = cache.entries[0].id; cache.entries[0].createdAt = Date.now() - 49 * 3600000;
+    await fs.writeFile(indexFile, JSON.stringify(cache));
+    const originalRecord = MediaOperations.prototype.record;
+    MediaOperations.prototype.record = async function (op) {
+      if (pass === 1 && !injected && op.cacheId && op.cacheId !== oldId) { injected = true; throw new Error('Injected replacement pointer failure'); }
+      return originalRecord.call(this, op);
+    };
+    t.after(() => { MediaOperations.prototype.record = originalRecord; });
+    pass = 1; await f.handle({ message_id: 501, text: url });
+    if (recovery === 'after-quota-pause') {
+      const paused = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+      assert.equal(paused.failure.code, 'GROUP_RATE_LIMIT'); f.setMediaNow(() => Date.now() + 3600001);
+      await f.handle({ message_id: 502, text: 'Repeat', reply_to_message: { message_id: paused.errorMessageId, from: { id: 77, is_bot: true }, text: 'Paused' } });
+    }
+    const failed = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+    assert.equal(injected, true); assert.equal(failed.cacheId, oldId); assert.equal(failed.deliveredFileCount, 10);
+    const held = JSON.parse(await fs.readFile(indexFile)).entries.find(item => item.id === oldId);
+    assert.equal(held.pending, true, 'old hold remains until the new pointer is durable');
+    await f.restart(); f.setDownloader(download); pass = 2;
+    await f.handle({ message_id: 1500, text: 'Repeat', reply_to_message: { message_id: failed.errorMessageId, from: { id: 77, is_bot: true }, text: 'Failed' } });
+    const done = JSON.parse(await fs.readFile(f.root + '/runtime/media.json')).operations[0];
+    assert.equal(done.status, 'done'); assert.equal(done.deliveredFileCount, 11);
+    assert.deepEqual(uploads.filter(item => item.pass === 2).map(item => item.method), ['sendPhoto']);
+    assert.equal(done.sentMessageIds.length, 11); assert.notEqual(done.cacheId, oldId);
+  });
+}

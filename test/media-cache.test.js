@@ -177,3 +177,35 @@ test('complete metadata expires at 30 days and entry bounds still apply', async 
   now += 30 * 86400000;
   assert.equal(await cache.forDelivery({ chatId: -1, entryId: second.id, botId: 77 }), null);
 });
+
+test('long-lived metadata cannot exceed the readable index bound or evict pending recovery', async t => {
+  const { verifiedMediaSource } = await import('../src/media-source.js');
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, 'tiny.png'); await fs.writeFile(filePath, 'tiny');
+  const cache = new MediaCache(path.join(directory, 'cache')), limit = 4 * 1024 * 1024;
+  const url = 'https://www.instagram.com/p/BA/', source = verifiedMediaSource(url, { provider: 'instaloader', id: 'BA', owner: 'fixture' });
+  const files = Array.from({ length: 20 }, (_, i) => ({ filePath, sourceItemId: `native:${i}`, mediaKind: 'image', mimeType: 'image/png', title: 'x'.repeat(1000) }));
+  const pinned = await cache.put({ chatId: 1, sourceMessageId: 500, sourceUrl: url, source, title: 'x'.repeat(1000), files, pending: true });
+  await cache.bind(pinned.id, Array.from({ length: 20 }, (_, i) => 600 + i), { botId: 77, items: files.map((_, i) => ({ photo: [{ file_id: `known-${i}` + 'x'.repeat(100) }] })) });
+  const original = (await cache.read()).entries[0], state = { version: 1, entries: [original] };
+  while (true) {
+    state.entries.push({ ...structuredClone(original), id: randomUUID(), chatId: state.entries.length + 2, files: [], pending: false, createdAt: Date.now() - 49 * 3600000 });
+    if (Buffer.byteLength(JSON.stringify(state)) >= limit) { state.entries.pop(); break; }
+  }
+  assert.ok(state.entries.length < 300);
+  await fs.writeFile(cache.index, JSON.stringify(state));
+  const next = await cache.put({ chatId: -1, sourceMessageId: 501, sourceUrl: url, source, title: 'x'.repeat(1000), files, pending: true });
+  assert.ok((await fs.stat(cache.index)).size <= limit);
+  const restored = await new MediaCache(cache.directory).read();
+  assert.ok(restored.entries.some(item => item.id === pinned.id && item.pending));
+  assert.ok(restored.entries.some(item => item.id === next.id));
+  assert.ok(restored.entries.length <= state.entries.length, 'completed metadata was evicted to fit');
+  await cache.compact();
+  // When every near-limit entry protects a pending attempt, fail before writing.
+  for (const item of state.entries) { item.pending = true; item.pendingSince = Date.now(); }
+  while (Buffer.byteLength(JSON.stringify(state)) > limit) state.entries.pop();
+  const protectedIndex = JSON.stringify(state); await fs.writeFile(cache.index, protectedIndex);
+  await assert.rejects(cache.put({ chatId: -2, sourceMessageId: 502, sourceUrl: url, source, title: 'x'.repeat(1000), files, pending: true }), { code: 'MEDIA_CACHE_CAPACITY' });
+  assert.equal(await fs.readFile(cache.index, 'utf8'), protectedIndex);
+  assert.equal((await cache.read()).entries.length, state.entries.length);
+  assert.equal(await fs.readFile(pinned.files[0].filePath, 'utf8'), 'tiny');
+});

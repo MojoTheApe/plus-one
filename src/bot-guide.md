@@ -69,10 +69,16 @@ Automatic public-link downloads are enabled for new configured groups: supported
 Instagram, Threads and TikTok URLs, bot administrator rights and installed tools
 are required. Private posts, login requirements, site blocks, quotas and file
 limits can prevent downloading. Previously saved disabled settings stay disabled.
-Instagram photos/mixed posts have a native-identity library adapter; Reels use
-the existing video route. Do not equate an empty/blocked source response with an
+Instagram post/Reel aliases share one native-identity manifest adapter and the
+explicit optional session, also used by native single-video compatibility.
+Authenticated high-quality URLs must match the same native parent/child IDs.
+Do not equate an empty/blocked source response with an
 unsupported file format. Source backoff can apply across groups and survives a
 restart. Known verified files may be resent from Telegram without downloading.
+Prepared/Telegram repeats bypass the fresh-source quota and source-failure wait;
+a stale reference needing a new source fetch must reserve source allowance.
+Completed local files last48 hours; complete verified Telegram reuse metadata may
+last30 days within bounded storage. Partial/unknown recovery remains48 hours.
 Captions show title/source/link, without the requester or service message ID.
 Recorded deliveryRoute distinguishes a source fetch, prepared cache and Telegram
 file-ID reuse. The source-verification provider alone does not prove a fresh fetch.
