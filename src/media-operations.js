@@ -1,10 +1,16 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { mediaReference } from "./media-source.js";
+import { assertVerifiedMediaSource, mediaReference } from "./media-source.js";
+import { conversationThreadId } from "./conversation-store.js";
 import { say } from "./helpers.js";
 
 const durationText = n => { const seconds = Math.ceil(n); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; };
+function limitedInstagramFallback(causes) {
+  if (causes?.length === 2 && causes[0].provider === "instaloader" && causes[0].code === "AUTH_REQUIRED" &&
+      causes[1].provider === "yt-dlp" && causes[1].code === "RATE_LIMIT" && causes[1].retryable && !causes[1].fallbackDisabled) return causes[1];
+}
+
 export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes = 48 * 1024 * 1024, stage = "download" } = {}) {
   if (error?.code === "MEDIA_SOURCE_QUOTA") return { code: error.budgetReason === "SUCCESS_QUOTA" ? "GROUP_RATE_LIMIT" : error.budgetReason,
     retryable: true, stage: "download", status: null, retryAfterSeconds: error.retryAfterSeconds,
@@ -35,10 +41,11 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
       ...mediaFailure(attempt.error, { maxDurationSeconds, maxUploadBytes, stage }) }));
     // Prefer the first useful cause, rather than the last, often empty, fallback.
     const available = causes.filter(cause => !cause.fallbackDisabled);
-    const selected = available.find(cause => ["SOURCE_MISMATCH", "SOURCE_UNVERIFIED"].includes(cause.code)) ||
+    const selected = limitedInstagramFallback(available) || available.find(cause => ["SOURCE_MISMATCH", "SOURCE_UNVERIFIED"].includes(cause.code)) ||
       available.find(cause => !["UNKNOWN", "NO_MEDIA"].includes(cause.code)) || available[0] || causes[0];
     const { provider, ...failure } = selected;
-    return { ...failure, causes, ...(Number.isFinite(error.elapsedSeconds) ? { elapsedSeconds: error.elapsedSeconds } : {}) };
+    return { ...failure, causes, ...(Number.isFinite(error.retryAfterSeconds) ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
+      ...(Number.isFinite(error.elapsedSeconds) ? { elapsedSeconds: error.elapsedSeconds } : {}) };
   }
   // execFile's message includes the entire command. Options such as
   // --socket-timeout are not evidence that a timeout actually happened.
@@ -95,6 +102,13 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
 }
 
 export function failureMessage(failure, id, locale = "uk") {
+  if (failure.code === "RATE_LIMIT" && limitedInstagramFallback(failure.causes)) {
+    const wait = Math.ceil(failure.retryAfterSeconds || 60);
+    return say(locale,
+      `Instagram required sign-in for one download method and temporarily limited the other. Ask me to retry in ${wait} s.`,
+      `Для одного способа загрузки Instagram запросил вход, а второй временно ограничил. Попроси повторить через ${wait} с.`,
+      `Для одного способу завантаження Instagram попросив увійти, а другий тимчасово обмежив. Попроси повторити через ${wait} с.`) + (id ? ` (RATE_LIMIT · ${id})` : "");
+  }
   if (["SOURCE_UNVERIFIED", "SOURCE_MISMATCH"].includes(failure.code)) {
     const reason = failure.code === "SOURCE_MISMATCH" ? say(locale,
       "The retrieved material does not match the exact linked publication. I have not sent it.",
@@ -116,6 +130,8 @@ export function failureMessage(failure, id, locale = "uk") {
 
 export function canRetryMediaOperation(operation) {
   if (operation.failure?.retryable) return true;
+  if (operation.status === "failed" && operation.failure?.code === "AUTH_REQUIRED" &&
+      operation.failure.stage === "download" && limitedInstagramFallback(operation.failure.causes)) return true;
   // TG-64 stored the disabled adapter's rejection over the native transient
   // failure. Permit a fresh verified retrieval, never reuse its unverified files.
   const causes = operation.failure?.causes;
@@ -125,6 +141,15 @@ export function canRetryMediaOperation(operation) {
     causes[0].provider === "yt-dlp" && causes[0].retryable === true &&
     ["RATE_LIMIT", "TIMEOUT", "SERVICE_ERROR", "NO_MEDIA"].includes(causes[0].code) &&
     causes[1].provider === "instagram" && causes[1].code === "SOURCE_UNVERIFIED");
+}
+
+export function instagramRetryWait(operation, now = Date.now()) {
+  const failure = operation?.failure;
+  const limited = limitedInstagramFallback(failure?.causes);
+  if (operation?.status !== "failed" || !["AUTH_REQUIRED", "RATE_LIMIT"].includes(failure?.code) ||
+      !limited) return 0;
+  const seconds = failure.retryAfterSeconds || limited.retryAfterSeconds || 60;
+  return Math.max(0, Math.ceil((operation.updatedAt + seconds * 1000 - now) / 1000));
 }
 
 export function isMediaRetryText(text, username = "") {
@@ -170,6 +195,7 @@ export class MediaOperations {
         const seconds = Math.max(Number(failure.retryAfterSeconds) || 0,
           Math.min(900, (failure.code === "RATE_LIMIT" ? 60 : 5) * 2 ** (failures - 1)));
         state.providers[provider] = { failures, notBefore: this.now() + seconds * 1000 };
+        return seconds;
       }
     });
   }
@@ -190,6 +216,35 @@ export class MediaOperations {
         counter[outcome] = (counter[outcome] || 0) + 1;
       }
       return entry;
+    });
+  }
+  async observeVideoReply(message, botId) {
+    const video = message.reply_to_message;
+    const topicId = conversationThreadId(message);
+    if (!video?.video?.file_id || !Number.isSafeInteger(botId) || video.from?.id !== botId || !video.from.is_bot ||
+        !["supergroup", "group"].includes(message.chat.type) || video.chat?.id !== message.chat.id ||
+        conversationThreadId(video) !== topicId ||
+        video.forward_origin || video.forward_date || video.forward_from || video.forward_from_chat || video.via_bot ||
+        video.sender_chat || video.edit_date || video.media_group_id || !Number.isSafeInteger(video.message_id) ||
+        video.message_id <= 0 || video.message_id >= message.message_id) return;
+    const permalink = video.caption?.trim().split("\n").at(-1);
+    if (!mediaReference(permalink)?.id) return;
+    const eligible = rows => {
+      const found = rows.filter(op => op.chatId === message.chat.id && (op.topicId ?? op.threadId ?? null) === topicId &&
+        op.sourceMessageId < video.message_id && op.source?.resolved?.url === permalink);
+      if (found.length !== 1) return null;
+      const op = found[0];
+      if (!["unknown", "uploading"].includes(op.status) || op.observedMessageId || op.deliveredFileCount ||
+          op.sentMessageIds?.length || op.mediaItems?.length !== 1 || op.mediaItems[0].mediaKind !== "video") return null;
+      try { assertVerifiedMediaSource(op.source, op.url); } catch { return null; }
+      return op;
+    };
+    if (!eligible(await this.read())) return;
+    await this.change(state => {
+      const op = eligible(state.operations);
+      // The bot-authored video is visible. It is not a receipt for a specific upload
+      // and does not authorize binding a Telegram file_id to the prepared bytes.
+      if (op) op.observedMessageId = video.message_id;
     });
   }
   async find(message, allowLatest = false, scope = {}) {
@@ -216,13 +271,13 @@ export class MediaOperations {
         trigger: operation.trigger || null, lastRequest: operation.lastRequest || null, requestedUrl: mediaReference(operation.url)?.url || null,
         sourceVerification: operation.source?.status || "unverified-legacy", verifiedSource: operation.source?.status === "verified" ? operation.source.resolved : null,
         downloader: operation.downloader || operation.source?.provider || "not-recorded", deliveryRoute: operation.deliveryRoute || "not-recorded", attempts: operation.attempts || [],
-        status: operation.status, sentMessageIds: operation.sentMessageIds || [], deliveredFileCount: operation.deliveredFileCount || 0,
+        status: operation.status, observedMessageId: operation.observedMessageId, sentMessageIds: operation.sentMessageIds || [], deliveredFileCount: operation.deliveredFileCount || 0,
         failure: operation.failure ? { code: operation.failure.code, stage: operation.failure.stage, reason: operation.failure.reason, causes: operation.failure.causes || [] } : null }));
   }
 }
 
 function operationReferences(operation) {
   if (!operation) return [];
-  return [operation.sourceMessageId, operation.lastRequest?.messageId, operation.trigger?.messageId, operation.errorMessageId, operation.sentMessageId,
+  return [operation.sourceMessageId, operation.lastRequest?.messageId, operation.trigger?.messageId, operation.errorMessageId, operation.sentMessageId, operation.observedMessageId,
     ...(operation.sentMessageIds || []), ...(operation.referenceMessageIds || [])].filter(Number.isSafeInteger);
 }

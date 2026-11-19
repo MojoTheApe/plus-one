@@ -200,6 +200,11 @@ temporary cookie file, removed with the attempt. The adapter reads the JSON with
 pickle or automatic login. Access/challenges remain the operator's responsibility; missing login
 does not authorize an unbound third-party downloader or a different Stories item.
 
+If one Instagram method requires sign-in and another is temporarily limited,
+the group can request a retry after the displayed wait. If an upload timed out
+but its video appeared, a reply to the bot's video lets it recognize that
+publication in the same group and topic and point subsequent retries to it.
+
 Preserve the media journal/cache through updates. The journal also holds source
 backoff and aggregate outcomes. The cache protects unfinished albums. Prepared
 bytes expire after48 hours;

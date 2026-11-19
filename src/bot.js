@@ -31,7 +31,7 @@ import { assertVerifiedMediaSource, verifiedMediaSource, mediaReference, sourceI
 import { observeTelegramUpload } from "./telegram-upload-observer.js";
 import { historyIntent, selectContext, historyPage, localTime, dialoguePolicy, responseDecision, researchForReply } from "./conversation-context.js";
 import { UpdateInbox, ChatQueue, isPermanentUpdateError } from "./update-inbox.js";
-import { MediaOperations, mediaFailure, failureMessage, isMediaRetryText, canRetryMediaOperation } from "./media-operations.js";
+import { MediaOperations, mediaFailure, failureMessage, isMediaRetryText, canRetryMediaOperation, instagramRetryWait } from "./media-operations.js";
 import { prepareMediaForTelegram, telegramUploadBudget } from "./media-preparation.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -705,6 +705,7 @@ async function handleScopedUpdate(update) {
   const message = update.message;
   if (!message || !message.chat || !message.from) return;
   if (message.from.is_bot) return;
+  if (message.reply_to_message?.video) await mediaOperations.observeVideoReply(message, botInfo.id);
   const plainStart = message.chat.type === "private" && parseBotCommandText(message.text, botInfo.username);
   if (!setup && plainStart?.name === "start" && !plainStart.args && !message.forward_origin && !message.forward_date && !message.forward_from && !message.via_bot) {
     await telegram("sendMessage", { chat_id: message.chat.id, text: say(behavior().locale,
@@ -2322,6 +2323,21 @@ async function maybeHandleSocialVideo(message, retry = null) {
   if (retry?.id) retry = (await mediaOperations.read()).find(operation => operation.id === retry.id) || retry;
   const recovered = !retry && await mediaOperations.find({ ...message, reply_to_message: { message_id: message.message_id } }, false,
     { chatId: message.chat.id, topicId: judgeThreadId(message) });
+  const existing = retry || recovered;
+  if (existing?.observedMessageId && ["uploading", "unknown"].includes(existing.status)) {
+    const id = existing.observedMessageId;
+    await telegram("sendMessage", { ...assembleReplyTarget(message), text: say(behavior().locale,
+      `This video already appeared in message #${id}.`, `Это видео уже появилось в сообщении №${id}.`,
+      `Це відео вже з’явилося в повідомленні №${id}.`) });
+    return true;
+  }
+  const wait = instagramRetryWait(retry);
+  if (wait > 0) {
+    await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage({
+      ...retry.failure, code: "RATE_LIMIT", retryAfterSeconds: wait,
+    }, retry.id, behavior().locale) });
+    return true;
+  }
   if (recovered?.status === "done" || retry?.status === "done") return true;
   if (recovered && ["uploading", "unknown"].includes(recovered.status)) {
     const failure = mediaFailure(Object.assign(new Error("Upload confirmation was interrupted"), { deliveryUnknown: true }), { stage: "upload" });

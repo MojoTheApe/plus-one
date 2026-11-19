@@ -85,3 +85,19 @@ test("download diagnosis retains both real failures without inventing throttling
   assert.equal(mediaFailure(new Error("cookies may help improve results")).code, "UNKNOWN");
   assert.equal(mediaFailure(Object.assign(new Error("upstream busy"), { status: 429 })).code, "RATE_LIMIT");
 });
+
+test('mixed Instagram sign-in and rate limit follows the recoverable path and preserves the source wait', async t => {
+  const error = socialDownloadFailure(Object.assign(new Error('login required'), { downloader: 'instaloader' }),
+    Object.assign(new Error('HTTP Error 429: Too Many Requests'), { retryAfterSeconds: 125 }), 'yt-dlp');
+  const failure = mediaFailure(error);
+  assert.equal(failure.code, 'RATE_LIMIT');
+  assert.equal(failure.retryAfterSeconds, 125);
+  assert.deepEqual(failure.causes.map(cause => cause.code), ['AUTH_REQUIRED', 'RATE_LIMIT']);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'media-mixed-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'operations.json');
+  const journal = new MediaOperations(file, () => 5000);
+  await journal.sourceResult('instagram', failure);
+  assert.equal((await new MediaOperations(file).sourceState('instagram')).notBefore, 130000);
+  assert.equal(canRetryMediaOperation({ status: 'failed', failure: mediaFailure(new Error('login required')) }), false);
+});
