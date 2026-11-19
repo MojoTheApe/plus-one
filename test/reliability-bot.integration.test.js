@@ -1,5 +1,6 @@
 import '../test-support/isolated-env.mjs';
 import test from "node:test";
+import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -1948,15 +1949,27 @@ for (const semantic of [false, true]) test(`mixed Instagram limits permit one ${
   await f.handle({ message_id: 500, text: 'звичайна репліка' });
   await f.restart();
   let downloads = 0;
-  f.setDownloader(async () => { downloads++; return { source: nativeExtractorSource(url, {extractor_key:'Instagram',id:'recovery'}),
-    files:[{ filePath, mediaKind:'image', mimeType:'image/jpeg' }] }; });
-  f.setAnswer(async () => ({ text: JSON.stringify({ action:'download', language:'uk', targetMessageId:500 }), searchStatus:{ succeeded:false } }));
+  const download = async () => {
+    downloads++;
+    return { source: nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'recovery' }),
+      files: [{ filePath, mediaKind: 'image', mimeType: 'image/jpeg' }] };
+  };
+  f.setDownloader(download);
+  let targetMessageId = 500;
+  f.setAnswer(async () => ({ text: JSON.stringify({ action:'download', language:'uk', targetMessageId }), searchStatus:{ succeeded:false } }));
   const request = { text: semantic ? '@ReliabilityTestBot спробуй отримати цей ролик знову' : 'повтори', reply_to_message:{ message_id:500, from:{id:88}, text:url } };
   await f.handle({ ...request, message_id:1500 });
   assert.equal(downloads,0); assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/RATE_LIMIT/);
   assert.equal((await journal.read())[0].updatedAt, op.updatedAt);
-  await new MediaOperations(file, () => Date.now()-65000).record(op);
-  await f.handle({ ...request, message_id:1501 });
+  const saved = (await journal.read())[0];
+  const noticeId = saved.referenceMessageIds.at(-1);
+  assert.ok(Number.isSafeInteger(noticeId) && noticeId !== op.errorMessageId);
+  assert.ok(saved.referenceMessageIds.includes(1500));
+  await new MediaOperations(file, () => Date.now()-65000).record(saved);
+  await f.restart();
+  f.setDownloader(download);
+  targetMessageId = noticeId;
+  await f.handle({ ...request, message_id:1501, reply_to_message: {message_id:noticeId,from:{id:77,is_bot:true},text:'RATE_LIMIT'} });
   assert.equal(downloads,1); assert.equal(f.calls.filter(c=>c.method==='sendPhoto').length,1);
 });
 
@@ -1980,4 +1993,33 @@ test('a reply to a late bot video prevents an explicit duplicate across restart 
   assert.equal(saved.observedMessageId,520); assert.equal(saved.sentMessageIds,undefined);
   assert.equal(downloads,0); assert.equal(f.calls.filter(c=>c.method==='sendVideo').length,0);
   assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/520/);
+});
+
+test('a video seen while a retry is preparing prevents its Telegram submission', async t => {
+  const f = await fixture(t);
+  const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  const url = 'https://www.instagram.com/reel/race/';
+  const source = nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'race' });
+  const item = { mediaKind: 'video', sourceItemId: 'publication:race' };
+  await journal.record({ chatId:-123, topicId:9, sourceMessageId:500, errorMessageId:510, status:'unknown',
+    url, source, mediaItems:[item], failure:{code:'UPLOAD_UNKNOWN',stage:'upload',retryable:true,status:504} });
+  const filePath = path.join(f.root, 'sample.mp4');
+  execFileSync('ffmpeg', ['-v','error','-f','lavfi','-i','color=s=32x32:r=5','-t','0.4','-c:v','libx264','-threads','1',filePath]);
+  const started = Promise.withResolvers(), resume = Promise.withResolvers();
+  f.setDownloader(async () => {
+    started.resolve(); await resume.promise;
+    return { source, files:[{...item, filePath, mimeType:'video/mp4'}] };
+  });
+  const retry = f.handle({ message_id:515, text:'повтори', reply_to_message:{ message_id:510, from:{id:77,is_bot:true}, text:'UPLOAD_UNKNOWN' } });
+  await started.promise;
+  try {
+    await f.handle({message_id:530, text:'ок', reply_to_message:{ message_id:520,
+      chat:{id:-123,type:'supergroup',is_forum:true}, message_thread_id:9, is_topic_message:true,
+      from:{id:77,is_bot:true}, video:{file_id:'seen'}, caption:'Video from instagram.com\n'+url }});
+  } finally { resume.resolve(); }
+  await retry;
+  assert.equal(f.calls.filter(call => call.method === 'sendVideo').length, 0);
+  const [op] = await journal.read();
+  assert.equal(op.observedMessageId, 520); assert.equal(op.status, 'unknown'); assert.equal(op.failure.status,504);
+  assert.match(f.calls.filter(call => call.method === 'sendMessage').at(-1).payload.text,/520/);
 });

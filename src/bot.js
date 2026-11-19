@@ -2324,18 +2324,16 @@ async function maybeHandleSocialVideo(message, retry = null) {
   const recovered = !retry && await mediaOperations.find({ ...message, reply_to_message: { message_id: message.message_id } }, false,
     { chatId: message.chat.id, topicId: judgeThreadId(message) });
   const existing = retry || recovered;
-  if (existing?.observedMessageId && ["uploading", "unknown"].includes(existing.status)) {
-    const id = existing.observedMessageId;
-    await telegram("sendMessage", { ...assembleReplyTarget(message), text: say(behavior().locale,
-      `This video already appeared in message #${id}.`, `Это видео уже появилось в сообщении №${id}.`,
-      `Це відео вже з’явилося в повідомленні №${id}.`) });
+  if (existing?.observedMessageId) {
+    await reportVisibleVideo(message, existing.observedMessageId);
     return true;
   }
   const wait = instagramRetryWait(retry);
   if (wait > 0) {
-    await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage({
+    const notice = await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage({
       ...retry.failure, code: "RATE_LIMIT", retryAfterSeconds: wait,
     }, retry.id, behavior().locale) });
+    await mediaOperations.linkRetryNotice(retry.id, message.message_id, notice.message_id);
     return true;
   }
   if (recovered?.status === "done" || retry?.status === "done") return true;
@@ -2465,10 +2463,11 @@ async function maybeHandleSocialVideo(message, retry = null) {
         is_topic_message: Boolean(message.chat.is_forum || message.is_topic_message) })
         .catch(error => logError("outgoing_history_failed", error, messageLogMeta(message)));
     };
-    if (operation) operation = await mediaOperations.record({ ...operation, status: "uploading" });
     stage = "upload";
     const uploadStarted = Date.now();
-    const deliverRemaining = () => {
+    const deliverRemaining = async () => {
+      operation = await mediaOperations.record({ ...operation, status: "uploading" }, { beginUpload: true });
+      if (operation.observedMessageId) return null;
       const delivered = operation.deliveredFileCount || 0;
       const remaining = mediaFiles.slice(delivered);
       return remaining.length ? sendTelegramSocialMedia(message, remaining, delivered ? "" : caption, recordSent) : [];
@@ -2506,8 +2505,12 @@ async function maybeHandleSocialVideo(message, retry = null) {
       }
       // A rejected file_id is a definite rejection; one fresh upload is safe.
       stage = "upload";
-      operation = await mediaOperations.record({ ...operation, status: "uploading" });
       sent = await deliverRemaining();
+    }
+    if (sent === null) {
+      socialVideoBudget.complete(budget.reservation, { success: false });
+      await reportVisibleVideo(message, operation.observedMessageId);
+      return true;
     }
     logInfo("media_stage_completed", messageLogMeta(message, { diagnosticId: operation?.id, stage, elapsedMs: Date.now() - uploadStarted, files: sent.length }));
     socialVideoBudget.complete(budget.reservation, { success: true });
@@ -2556,6 +2559,13 @@ async function maybeHandleSocialVideo(message, retry = null) {
 
 function extractSocialVideoUrl(text) {
   return extractSocialVideoUrlFromText(text);
+}
+
+async function reportVisibleVideo(message, id) {
+  await telegram("sendMessage", { ...assembleReplyTarget(message), text: say(behavior().locale,
+    `This video already appeared in message #${id}.`, `Это видео уже появилось в сообщении №${id}.`,
+    `Це відео вже з’явилося в повідомленні №${id}.`) })
+    .catch(error => logError("media_notice_failed", error, messageLogMeta(message)));
 }
 
 function isSocialVideoHost(hostname) {

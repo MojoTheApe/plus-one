@@ -173,6 +173,7 @@ export class MediaOperations {
   async change(update) {
     const work = this.queue.then(async () => {
       const state = await this.readState(), result = update(state);
+      if (result === false) return false;
       await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
       const temp = `${this.file}.${randomUUID()}.tmp`;
       try { await fs.writeFile(temp, JSON.stringify(state), { mode: 0o600 }); await fs.rename(temp, this.file); }
@@ -199,11 +200,19 @@ export class MediaOperations {
       }
     });
   }
-  async record(operation) {
+  async record(operation, { beginUpload = false } = {}) {
     return this.change(state => {
       const all = state.operations;
       const previous = all.find(op => op.id === operation.id);
       const entry = { ...previous, ...operation, id: operation.id || randomUUID().slice(0, 8), updatedAt: this.now() };
+      if (entry.status === "running" && ["unknown", "uploading"].includes(previous?.status)) {
+        entry.priorUploadFailure = previous.failure || mediaFailure({ deliveryUnknown: true }, { stage: "upload" });
+      }
+      if (beginUpload && previous?.observedMessageId) {
+        entry.status = "unknown";
+        entry.failure = entry.priorUploadFailure || mediaFailure({ deliveryUnknown: true }, { stage: "upload" });
+      }
+      if (entry.status === "done" || entry.status === "unknown") delete entry.priorUploadFailure;
       entry.topicId = operation.topicId !== undefined ? operation.topicId : entry.topicId ?? entry.threadId ?? null;
       entry.threadId = entry.topicId;
       entry.referenceMessageIds = [...new Set([...operationReferences(previous), ...operationReferences(entry)])].slice(-50);
@@ -218,6 +227,13 @@ export class MediaOperations {
       return entry;
     });
   }
+  async linkRetryNotice(id, requestId, noticeId) {
+    return this.change(state => {
+      const op = state.operations.find(item => item.id === id);
+      if (op) op.referenceMessageIds = [...new Set([...operationReferences(op), requestId, noticeId]
+        .filter(Number.isSafeInteger))].slice(-50);
+    });
+  }
   async observeVideoReply(message, botId) {
     const video = message.reply_to_message;
     const topicId = conversationThreadId(message);
@@ -227,24 +243,24 @@ export class MediaOperations {
         video.forward_origin || video.forward_date || video.forward_from || video.forward_from_chat || video.via_bot ||
         video.sender_chat || video.edit_date || video.media_group_id || !Number.isSafeInteger(video.message_id) ||
         video.message_id <= 0 || video.message_id >= message.message_id) return;
-    const permalink = video.caption?.trim().split("\n").at(-1);
-    if (!mediaReference(permalink)?.id) return;
-    const eligible = rows => {
-      const found = rows.filter(op => op.chatId === message.chat.id && (op.topicId ?? op.threadId ?? null) === topicId &&
-        op.sourceMessageId < video.message_id && op.source?.resolved?.url === permalink);
-      if (found.length !== 1) return null;
-      const op = found[0];
-      if (!["unknown", "uploading"].includes(op.status) || op.observedMessageId || op.deliveredFileCount ||
-          op.sentMessageIds?.length || op.mediaItems?.length !== 1 || op.mediaItems[0].mediaKind !== "video") return null;
-      try { assertVerifiedMediaSource(op.source, op.url); } catch { return null; }
-      return op;
-    };
-    if (!eligible(await this.read())) return;
+    const permalink = mediaReference(video.caption?.trim().split("\n").at(-1));
+    if (!permalink?.id) return;
     await this.change(state => {
-      const op = eligible(state.operations);
+      const found = state.operations.filter(op => {
+        if (op.chatId !== message.chat.id || (op.topicId ?? op.threadId ?? null) !== topicId ||
+            !Number.isSafeInteger(op.sourceMessageId) || op.sourceMessageId >= video.message_id || !op.source) return false;
+        try {
+          const checked = assertVerifiedMediaSource(op.source, op.url);
+          return checked.resolved.url === permalink.url && op.source.resolved.url === checked.resolved.url;
+        } catch { return false; }
+      });
+      if (found.length !== 1) return false;
+      const op = found[0];
+      if (!(op.priorUploadFailure || ["unknown", "uploading"].includes(op.status)) || op.observedMessageId || op.deliveredFileCount ||
+          op.sentMessageIds?.length || op.mediaItems?.length !== 1 || op.mediaItems[0]?.mediaKind !== "video") return false;
       // The bot-authored video is visible. It is not a receipt for a specific upload
       // and does not authorize binding a Telegram file_id to the prepared bytes.
-      if (op) op.observedMessageId = video.message_id;
+      op.observedMessageId = video.message_id;
     });
   }
   async find(message, allowLatest = false, scope = {}) {
