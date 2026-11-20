@@ -52,7 +52,7 @@ test('persistent native throttling stays retryable and the disabled fallback nev
     const failure = mediaFailure(error);
     assert.equal(failure.code, 'RATE_LIMIT'); assert.equal(failure.retryable, true);
     assert.equal(failure.causes, undefined);
-    assert.doesNotMatch(failureMessage(failure, 'fixture'), /SOURCE_UNVERIFIED|неперевірен/);
+    assert.doesNotMatch(failureMessage(failure), /SOURCE_UNVERIFIED|неперевірен/);
     return true;
   });
   assert.equal(inspections, 1); assert.equal(fetches, 0);

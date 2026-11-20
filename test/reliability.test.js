@@ -52,7 +52,7 @@ test("failure reasons distinguish duration, upload, auth, temporary and unknown 
   assert.equal(mediaFailure(new Error("login required")).retryable, false);
   assert.equal(mediaFailure(new Error("unexplained")).code, "UNKNOWN");
   assert.equal(mediaFailure(Object.assign(new Error("duration unavailable"), { code: "MEDIA_DURATION_UNKNOWN" })).code, "METADATA");
-  assert.match(failureMessage(duration, "case-id"), /case-id/);
+  assert.equal(failureMessage(duration), "Відео триває 5:24. Надішли до 5:00.");
 });
 test("media retries are exact commands, and persisted operations are chat/topic scoped", async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "media-ops-")); t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -78,4 +78,18 @@ test("all downloaded videos, including fallback files, are rejected above five m
   await assert.rejects(prepareMediaForTelegram([{ filePath: file, mediaKind: "video" }], {
     execute: async () => ({ stdout: JSON.stringify({ format: {}, streams: [{ codec_type: "video" }] }) }),
   }), error => error.code === "MEDIA_DURATION_UNKNOWN");
+});
+
+test("localized group failures fit a short message and keep diagnostics private", () => {
+  const failure = {code:"RATE_LIMIT", retryAfterSeconds:16, causes:[{provider:"internal-downloader",reason:"technical detail"}]};
+  assert.equal(failureMessage(failure,"en"),"Try again in 16 s.");
+  assert.equal(failureMessage(failure,"ru"),"Повтори через 16 с.");
+  assert.equal(failureMessage(failure,"uk"),"Повтори через 16 с.");
+  for (const code of ["SOURCE_UNVERIFIED","SOURCE_MISMATCH","UPLOAD_UNKNOWN","AUTH_REQUIRED","DURATION_LIMIT","FORMAT","SERVICE_ERROR"]) {
+    for (const locale of ["en","ru","uk"]) {
+      const notice = failureMessage({...failure,code},locale);
+      assert.ok(notice.length <= 85);
+      assert.doesNotMatch(notice,/internal-downloader|technical detail|[A-Z]+_[A-Z]+/);
+    }
+  }
 });

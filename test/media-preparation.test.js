@@ -62,3 +62,15 @@ test("extreme photograph geometry is padded into Telegram limits without croppin
   assert.equal(prepared.converted, true); assert.ok(prepared.width / prepared.height <= 20);
   assert.ok(prepared.width + prepared.height <= 10000);
 });
+
+test("odd-sized source image keeps every edge when converted to a Telegram photo", {skip:!available}, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'odd-photo-'));
+  t.after(() => fs.rm(root,{recursive:true,force:true}));
+  const filePath = path.join(root,'odd.webp');
+  execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','testsrc=size=321x241',
+    '-frames:v','1','-c:v','libwebp','-lossless','1','-threads','1',filePath]);
+  const [file] = await prepareMediaForTelegram([{filePath,mediaKind:'image',mimeType:'image/webp'}]);
+  assert.equal(file.mimeType,'image/jpeg');
+  assert.equal(file.width,322);
+  assert.equal(file.height,242);
+});

@@ -97,35 +97,49 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
   }
   return { code, retryable, reason, stage, status: status || null,
     ...(Number.isFinite(error?.retryAfterSeconds) ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
+    ...(code === "DURATION_LIMIT" ? { maxDurationSeconds } : {}),
     ...(Number.isFinite(error.actualDurationSeconds) ? { actualDurationSeconds: error.actualDurationSeconds } : {}),
     ...(Number.isFinite(error.actualBytes) ? { actualBytes: error.actualBytes } : {}) };
 }
 
-export function failureMessage(failure, id, locale = "uk") {
-  if (failure.code === "RATE_LIMIT" && limitedInstagramFallback(failure.causes)) {
-    const wait = Math.ceil(failure.retryAfterSeconds || 60);
-    return say(locale,
-      `Instagram required sign-in for one download method and temporarily limited the other. Ask me to retry in ${wait} s.`,
-      `Для одного способа загрузки Instagram запросил вход, а второй временно ограничил. Попроси повторить через ${wait} с.`,
-      `Для одного способу завантаження Instagram попросив увійти, а другий тимчасово обмежив. Попроси повторити через ${wait} с.`) + (id ? ` (RATE_LIMIT · ${id})` : "");
+// Detailed stages, causes and case IDs stay in the operation journal.
+export function failureMessage(failure, locale = "uk") {
+  const text = (...messages) => say(locale, ...messages);
+  const wait = Math.ceil(failure.retryAfterSeconds || 0);
+  switch (failure.code) {
+    case "GROUP_RATE_LIMIT": case "URL_BACKOFF": case "RATE_LIMIT": case "IN_PROGRESS": case "CAPACITY": case "FAILURE_COOLDOWN":
+      return wait > 0
+        ? text(`Try again in ${wait} s.`, `Повтори через ${wait} с.`, `Повтори через ${wait} с.`)
+        : text("Too many requests. Try again later.", "Много запросов. Повтори позже.", "Забагато запитів. Повтори пізніше.");
+    case "UPLOAD_UNKNOWN":
+      return text("Telegram hasn’t confirmed delivery. If the file is missing, reply “retry”.", "Telegram не подтвердил отправку. Если файла нет, ответь «повтори».", "Telegram не підтвердив надсилання. Якщо файлу немає, відповідай «повтори».");
+    case "AUTH_REQUIRED":
+      return text("This post requires sign-in. Attach the file.", "Для этой публикации нужен вход. Пришли файл.", "Для цієї публікації потрібен вхід. Надішли файл.");
+    case "SOURCE_MISMATCH":
+      return text("The file is from another post. Attach the original.", "Это файл из другой публикации. Пришли оригинал.", "Це файл з іншої публікації. Надішли оригінал.");
+    case "SOURCE_UNVERIFIED":
+      return text("Couldn’t verify the file’s source. Attach the original.", "Не удалось проверить источник файла. Пришли оригинал.", "Не вдалося перевірити джерело файлу. Надішли оригінал.");
+    case "DURATION_LIMIT":
+      if (Number.isFinite(failure.maxDurationSeconds) && Number.isFinite(failure.actualDurationSeconds)) {
+        const duration = durationText(failure.actualDurationSeconds), limit = durationText(failure.maxDurationSeconds);
+        return text(`Video is ${duration}. Send up to ${limit}.`, `Видео длится ${duration}. Пришли до ${limit}.`, `Відео триває ${duration}. Надішли до ${limit}.`);
+      }
+      return text("Video too long. Send a shorter clip.", "Видео слишком длинное. Пришли короче.", "Відео задовге. Надішли коротше.");
+    case "SIZE_LIMIT":
+      return text("File too large. Send a smaller one.", "Файл слишком большой. Пришли поменьше.", "Файл завеликий. Надішли менший.");
+    case "TIMEOUT":
+      return text("Timed out. Try again later.", "Время ожидания истекло. Повтори позже.", "Час очікування минув. Повтори пізніше.");
+    case "CACHE_BUSY": case "SERVICE_ERROR": case "INTERRUPTED":
+      return text("Temporary error. Try again later.", "Временный сбой. Повтори позже.", "Тимчасовий збій. Повтори пізніше.");
+    case "RETRY_CACHE_MISSING":
+      return text("The remaining files expired. Attach them separately.", "Копия оставшихся файлов истекла. Пришли их отдельно.", "Копія решти файлів застаріла. Надішли їх окремо.");
+    case "FORMAT": case "METADATA":
+      return text("Couldn’t prepare this file. Attach the original.", "Не удалось подготовить файл. Пришли оригинал.", "Не вдалося підготувати файл. Надішли оригінал.");
+    case "NO_MEDIA": case "UNAVAILABLE": case "UNSUPPORTED": case "SOURCE_CONTENT_UNAVAILABLE":
+      return text("Couldn’t get the file from this link. Attach it here.", "Не удалось получить файл по ссылке. Пришли его сюда.", "Не вдалося отримати файл за посиланням. Надішли його сюди.");
+    default:
+      return text("Couldn’t send the file. Try again later.", "Не удалось отправить файл. Повтори позже.", "Не вдалося надіслати файл. Повтори пізніше.");
   }
-  if (["SOURCE_UNVERIFIED", "SOURCE_MISMATCH"].includes(failure.code)) {
-    const reason = failure.code === "SOURCE_MISMATCH" ? say(locale,
-      "The retrieved material does not match the exact linked publication. I have not sent it.",
-      "Полученный материал не соответствует конкретной публикации по ссылке. Я его не отправил.",
-      "Отриманий матеріал не збігається з конкретною публікацією за посиланням. Я його не надіслав.") : say(locale,
-      "The downloader could not confirm that the files belong to this exact publication. I have not sent the unverified files. You can attach the original file.",
-      "Загрузчик не подтвердил, что файлы относятся именно к этой публикации. Непроверенные файлы не отправлены. Можно прикрепить исходный файл.",
-      "Завантажувач не підтвердив, що файли належать саме цій публікації. Неперевірені файли не надіслано. Можна прикріпити оригінальний файл.");
-    const nativeLogin = failure.causes?.some(cause => cause.provider === "yt-dlp" && cause.code === "AUTH_REQUIRED")
-      ? " " + say(locale, "The native extractor also reported that login is required.", "Основной загрузчик также сообщил, что требуется вход в аккаунт.", "Основний завантажувач також повідомив, що потрібен вхід в акаунт.") : "";
-    return `${reason}${nativeLogin}\n${failure.code}${id ? ` · ${id}` : ""}`;
-  }
-  const stages = { download: "отримання медіа", prepare: "перевірка й підготовка", upload: "надсилання до Telegram" };
-  const title = failure.code === "UPLOAD_UNKNOWN" ? "Не вдалося підтвердити надсилання медіа" : "Не вдалося надіслати медіа";
-  const availableCauses = failure.causes?.filter(cause => !cause.fallbackDisabled) || [];
-  const causes = availableCauses.length > 1 ? "\n" + availableCauses.map(cause => `${cause.provider}: ${cause.reason}`).join("\n") : "";
-  return `${title}: ${failure.reason}${causes}\nЕтап: ${stages[failure.stage] || failure.stage}. Код: ${failure.code}${id ? ` · ${id}` : ""}.`;
 }
 
 export function canRetryMediaOperation(operation) {
@@ -241,7 +255,7 @@ export class MediaOperations {
         !["supergroup", "group"].includes(message.chat.type) || video.chat?.id !== message.chat.id ||
         conversationThreadId(video) !== topicId ||
         video.forward_origin || video.forward_date || video.forward_from || video.forward_from_chat || video.via_bot ||
-        video.sender_chat || video.edit_date || video.media_group_id || !Number.isSafeInteger(video.message_id) ||
+        video.sender_chat || video.media_group_id || !Number.isSafeInteger(video.message_id) ||
         video.message_id <= 0 || video.message_id >= message.message_id) return;
     const permalink = mediaReference(video.caption?.trim().split("\n").at(-1));
     if (!permalink?.id) return;
@@ -256,6 +270,7 @@ export class MediaOperations {
       });
       if (found.length !== 1) return false;
       const op = found[0];
+      if (video.edit_date && video.message_id !== op.videoReplyId) return false;
       if (!(op.priorUploadFailure || ["unknown", "uploading"].includes(op.status)) || op.observedMessageId || op.deliveredFileCount ||
           op.sentMessageIds?.length || op.mediaItems?.length !== 1 || op.mediaItems[0]?.mediaKind !== "video") return false;
       // The bot-authored video is visible. It is not a receipt for a specific upload
@@ -294,6 +309,6 @@ export class MediaOperations {
 
 function operationReferences(operation) {
   if (!operation) return [];
-  return [operation.sourceMessageId, operation.lastRequest?.messageId, operation.trigger?.messageId, operation.errorMessageId, operation.sentMessageId, operation.observedMessageId,
+  return [operation.sourceMessageId, operation.lastRequest?.messageId, operation.trigger?.messageId, operation.errorMessageId, operation.videoReplyId, operation.sentMessageId, operation.observedMessageId,
     ...(operation.sentMessageIds || []), ...(operation.referenceMessageIds || [])].filter(Number.isSafeInteger);
 }

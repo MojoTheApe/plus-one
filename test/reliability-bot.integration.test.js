@@ -242,7 +242,7 @@ test('an unconfirmed upload is not retried automatically; an explicit retry uses
   assert.equal(journal.operations[0].status,'unknown');assert.equal(journal.operations[0].failure.code,'UPLOAD_UNKNOWN');
   assert.equal(uploads,1);assert.equal(downloads,1);
   const notice=f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text;
-  assert.match(notice,/автоматично його не дублюю/);
+  assert.match(notice,/Якщо файлу немає/);
   await f.restart();f.setMediaNow(()=>Date.now()+31000);
   f.setUpload(async()=>{uploads++;return new Response(JSON.stringify({ok:true,result:{message_id:1900}}));});
   await f.handle({message_id:1500,text:'Repeat',reply_to_message:{message_id:journal.operations[0].errorMessageId,from:{id:77,is_bot:true},text:notice}});
@@ -335,8 +335,8 @@ test('one story cannot send three unverified images or cache them as its verifie
   }
   f.setDownloader(async()=>({files,title:'Unbound provider images'}));
   await f.handle({message_id:500,text:'https://www.instagram.com/stories/fixture/64/'});
-  assert.equal(f.calls.filter(call=>['sendPhoto','sendVideo','sendMediaGroup','sendDocument'].includes(call.method)).length,0);
-  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/SOURCE_UNVERIFIED/);
+  assert.equal(f.calls.filter(call=>['sendPhoto','sendVideo','editMessageMedia','sendMediaGroup','sendDocument'].includes(call.method)).length,0);
+  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/джерело файлу/);
   assert.deepEqual(JSON.parse(await fs.readFile(f.root+'/runtime/media-cache/index.json')).entries, []);
   const operation=JSON.parse(await fs.readFile(f.root+'/runtime/media.json')).operations[0];
   assert.equal(operation.status,'failed');assert.equal(operation.source.status,'unverified');
@@ -378,7 +378,7 @@ test('a forged verified flag cannot hide mismatched native identity',async t=>{
   f.setDownloader(async()=>({source,files:[{filePath,mediaKind:'image',mimeType:'image/jpeg'}]}));
   await f.handle({text:'https://www.instagram.com/stories/fixture/64/'});
   assert.equal(f.calls.filter(call=>call.method==='sendPhoto').length,0);
-  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/SOURCE_MISMATCH/);
+  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/іншої публікації/);
 });
 
 test('a verified carousel binds each Telegram photo to its own file, including after restart',async t=>{
@@ -420,7 +420,7 @@ test('legacy unverified prepared files cannot authorize a redelivery',async t=>{
   let downloads=0;f.setDownloader(async()=>{downloads++;return {files:[{filePath,mediaKind:'image',mimeType:'image/jpeg'}]};});
   await f.handle({message_id:1500,text:'Repeat',reply_to_message:{message_id:600,from:{id:77,is_bot:true},text:'Previous upload outcome unknown'}});
   assert.equal(downloads,1);assert.equal(f.calls.filter(call=>call.method==='sendPhoto').length,0);
-  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/SOURCE_UNVERIFIED/);
+  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/джерело файлу/);
 });
 
 test('legacy album selection reads only its exact Telegram file and never substitutes an unavailable historical file',async t=>{
@@ -500,7 +500,7 @@ test('action explanations receive scoped recorded facts and actual automatic set
   });
   await f.handle({message_id:700,text:'Чому ти це надіслав?',reply_to_message:{message_id:600,from:{id:77,is_bot:true},text:'Old album'}});
   assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/Походження старих файлів/);
-  assert.equal(f.calls.filter(call=>['sendPhoto','sendVideo','sendMediaGroup'].includes(call.method)).length,0);
+  assert.equal(f.calls.filter(call=>['sendPhoto','sendVideo','editMessageMedia','sendMediaGroup'].includes(call.method)).length,0);
 });
 
 test('voice transcription leaves independent questions responsive and a reply waits for its referenced transcript',async t=>{
@@ -554,14 +554,14 @@ test("link-dependent answers cannot be presented as verified without completed r
 test("AI failure produces a reasoned Telegram reply instead of silence", async t => {
   const f = await fixture(t); f.setError(Object.assign(new Error("timeout"), { code: "AI_TIMEOUT" }));
   await f.handle({ text: "@ReliabilityTestBot поясни поняття" });
-  assert.match(f.calls.at(-1).payload.text, /за відведений час/); assert.match(f.calls.at(-1).payload.text, /AI_TIMEOUT/);
+  assert.equal(f.calls.at(-1).payload.text, "Не встиг відповісти. Спробуй ще раз.");
 });
 test("repeat re-executes the saved original media URL and never calls conversational AI", async t => {
   const f = await fixture(t), urls = [];
   f.setDownloader(async url => { urls.push(url); throw new Error("request timeout"); });
   await f.handle({ text: "https://www.instagram.com/reel/fixture/" });
   const error = f.calls.filter(c => c.method === "sendMessage").at(-1);
-  assert.match(error.payload.text, /TIMEOUT/);
+  assert.match(error.payload.text, /Час очікування минув/);
   const journal = JSON.parse(await fs.readFile(f.root + "/runtime/media.json"));
   f.setMediaNow(()=>Date.now()+31000);
   await f.handle({ text: "Repeat", reply_to_message: { message_id: journal.operations[0].errorMessageId, from: { id: 77 }, text: error.payload.text } });
@@ -604,7 +604,7 @@ test("explicit requests recover an empty AI reply once and distinguish repeated 
   assert.equal(n,2);assert.match(f.calls.at(-1).payload.text,/після повтору/);
   f.setAnswer(async()=>({text:"",searchStatus:{succeeded:false}}));
   await f.handle({text:"@ReliabilityTestBot поясни інше"});
-  assert.match(f.calls.at(-1).payload.text,/AI_EMPTY_ANSWER/);assert.match(f.calls.at(-1).payload.text,/двічі/);
+  assert.equal(f.calls.at(-1).payload.text,"Двічі надійшла порожня відповідь. Спробуй ще раз.");
 });
 test("human-addressed chatter can explicitly opt out without an error announcement", async t => {
   const f=await fixture(t);
@@ -675,7 +675,7 @@ test("a natural retry resolves an ordinary reply thread and executes the origina
     reply_to_message:{message_id:operation.errorMessageId,from:{id:77},text:'Не вдалося завантажити'}});
   assert.deepEqual(urls,['https://www.instagram.com/reel/natural/','https://www.instagram.com/reel/natural/']);
   assert.equal(f.prompts.length,1);
-  assert.match(f.calls.at(-1).payload.text,/TIMEOUT/);
+  assert.match(f.calls.at(-1).payload.text,/Час очікування минув/);
 });
 
 test("a false Ukrainian refusal is checked and repaired while genuine Russian is refused",async t=>{
@@ -766,7 +766,7 @@ test('a file request uses the URL in the current message without an explicit tar
   f.setAnswer(async()=>({text:JSON.stringify({action:'download',language:'uk'}),searchStatus:{succeeded:false}}));
   await f.handle({text:'@ReliabilityTestBot надішли файлом https://www.instagram.com/reel/current/'});
   assert.deepEqual(urls,['https://www.instagram.com/reel/current/']);
-  assert.match(f.calls.at(-1).payload.text,/TIMEOUT/);
+  assert.match(f.calls.at(-1).payload.text,/Час очікування минув/);
 });
 
 test('media analysis retains scoped discussion and a live history ticket across the action handoff',async t=>{
@@ -1819,12 +1819,12 @@ test('source quota allows cached repeats, but blocks both new URLs and stale-ref
   await f.handle({ message_id: 501, text: url });
   assert.equal(downloads, 1); assert.equal(f.calls.filter(item => item.method === 'sendPhoto').length, 2);
   await f.handle({ message_id: 502, text: 'https://www.instagram.com/reel/new-quota/' });
-  assert.match(f.calls.filter(item => item.method === 'sendMessage').at(-1).payload.text, /GROUP_RATE_LIMIT/);
+  assert.match(f.calls.filter(item => item.method === 'sendMessage').at(-1).payload.text, /Повтори через [0-9]+ с/);
   const cache = JSON.parse(await fs.readFile(f.root + '/runtime/media-cache/index.json'));
   for (const entry of cache.entries) for (const file of entry.files) await fs.rm(path.join(f.root, 'runtime/media-cache', entry.id, file.name), { force: true });
   stale = true; await f.handle({ message_id: 503, text: url });
   assert.equal(downloads, 1);
-  assert.match(f.calls.filter(item => item.method === 'sendMessage').at(-1).payload.text, /GROUP_RATE_LIMIT/);
+  assert.match(f.calls.filter(item => item.method === 'sendMessage').at(-1).payload.text, /Повтори через [0-9]+ с/);
 });
 
 test('source-failure cooldown still permits a complete prepared resend', async t => {
@@ -1959,7 +1959,7 @@ for (const semantic of [false, true]) test(`mixed Instagram limits permit one ${
   f.setAnswer(async () => ({ text: JSON.stringify({ action:'download', language:'uk', targetMessageId }), searchStatus:{ succeeded:false } }));
   const request = { text: semantic ? '@ReliabilityTestBot спробуй отримати цей ролик знову' : 'повтори', reply_to_message:{ message_id:500, from:{id:88}, text:url } };
   await f.handle({ ...request, message_id:1500 });
-  assert.equal(downloads,0); assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/RATE_LIMIT/);
+  assert.equal(downloads,0); assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/Повтори через [0-9]+ с/);
   assert.equal((await journal.read())[0].updatedAt, op.updatedAt);
   const saved = (await journal.read())[0];
   const noticeId = saved.referenceMessageIds.at(-1);
@@ -2023,3 +2023,84 @@ test('a video seen while a retry is preparing prevents its Telegram submission',
   assert.equal(op.observedMessageId, 520); assert.equal(op.status, 'unknown'); assert.equal(op.failure.status,504);
   assert.match(f.calls.filter(call => call.method === 'sendMessage').at(-1).payload.text,/520/);
 });
+
+for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'interrupted', 'deadline', 'wrong-receipts']) {
+  test(`one linked video edits only its own persisted reply: ${outcome}`, async t => {
+    const f = await fixture(t);
+    const url = 'https://www.instagram.com/reel/anchored/';
+    const filePath = path.join(f.root, 'original.mp4');
+    execFileSync('ffmpeg', ['-v','error','-f','lavfi','-i','color=s=48x32:r=5','-t','0.4','-c:v','libx264','-threads','1',filePath]);
+    const bytes = await fs.readFile(filePath);
+    let downloads = 0;
+    f.setDownloader(async () => {
+      downloads++;
+      return {source: nativeExtractorSource(url, {extractor_key:'Instagram',id:'anchored'}),
+        files: [{mediaKind:'video',filePath,mimeType:'video/mp4'}]};
+    });
+    const journal = new MediaOperations(path.join(f.root,'runtime/media.json'));
+    const targets = [];
+    f.setUpload(async (method, form) => {
+      assert.equal(method, 'editMessageMedia');
+      const target = Number(form.get('message_id'));
+      targets.push(target);
+      const [op] = await journal.read();
+      assert.equal(op.videoReplyId, target);
+      assert.equal(op.videoEditAttempts, targets.length);
+      assert.deepEqual(Buffer.from(await form.get('video').arrayBuffer()), bytes);
+      assert.equal(JSON.parse(form.get('media')).media, 'attach://video');
+      if (outcome === 'deadline') {
+        const now = Date.now;
+        Date.now = () => now() + 240001;
+        t.after(() => { Date.now = now; });
+        return new Response('',{status:504});
+      }
+      if (outcome === 'unchanged' && targets.length === 2) return Response.json({ok:false,description:'Bad Request: message is not modified'},{status:400});
+      if (['lost-first-receipt','unchanged'].includes(outcome) && targets.length === 1) return new Response('', {status:504});
+      return Response.json({ok:true,result:{message_id:['wrong-receipts','interrupted'].includes(outcome)?target+1:target,
+        chat:{id:-123}, video:{file_id:'known-video'}}});
+    });
+    await f.handle({message_id:500,text:url});
+    const [op] = await journal.read();
+    assert.equal(downloads,1);
+    assert.equal(targets.length,['acknowledged','deadline'].includes(outcome)?1:2);
+    assert.equal(new Set(targets).size,1);
+    assert.equal(f.calls.filter(call=>call.payload.text==='Надсилаю…').length,1);
+    const unknown = ['wrong-receipts','interrupted','unchanged','deadline'].includes(outcome);
+    assert.equal(op.status, unknown ? 'unknown' : 'done');
+    assert.deepEqual(op.sentMessageIds || [], unknown ? [] : [targets[0]]);
+    if (outcome==='unchanged') {
+      assert.equal(op.observedMessageId,targets[0]);
+      const cache = JSON.parse(await fs.readFile(path.join(f.root,'runtime/media-cache/index.json')));
+      const entry = cache.entries.find(entry => entry.id === op.cacheId);
+      assert.equal(entry.pending,false);
+      assert.deepEqual(entry.receipts,[]);
+      assert.equal(f.calls.filter(c=>c.method==='sendMessage').length,1);
+    }
+    if (outcome==='interrupted') {
+      // Snapshot at the durable first-edit boundary, then replay the original update.
+      await journal.record({...op,status:'uploading',videoEditAttempts:1,failure:null});
+      await f.restart();
+      f.setUpload(async (method,form) => {
+        assert.equal(method,'editMessageMedia');
+        assert.equal(Number(form.get('message_id')),targets[0]);
+        return Response.json({ok:true,result:{message_id:targets[0],chat:{id:-123},video:{file_id:'restart'}}});
+      });
+      await f.handle({message_id:500,text:url});
+      const [resumed] = await journal.read();
+      assert.equal(resumed.status,'done');
+      assert.equal(resumed.videoEditAttempts,2);
+      assert.equal(f.calls.filter(call=>call.payload.text==='Надсилаю…').length,1);
+    }
+    if (outcome==='wrong-receipts') {
+      await f.restart();
+      f.setUpload(async (method,form) => {
+        assert.equal(method,'editMessageMedia');
+        assert.equal(Number(form.get('message_id')),targets[0]);
+        return Response.json({ok:true,result:{message_id:targets[0],chat:{id:-123},video:{file_id:'recovered'}}});
+      });
+      await f.handle({message_id:1500,text:'повтори',reply_to_message:{message_id:op.errorMessageId,from:{id:77,is_bot:true},text:'Telegram'}});
+      assert.equal((await journal.read())[0].status,'done');
+      assert.equal(f.calls.filter(call=>call.payload.text==='Надсилаю…').length,1);
+    }
+  });
+}
