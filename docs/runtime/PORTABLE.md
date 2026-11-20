@@ -228,3 +228,8 @@ group state, history, memory, auth and game data. Restore to a stopped instance
 with matching identity and ownership. For source updates, pin the revision, back
 up private state, rebuild, run the non-polling full check, then recreate only that
 instance. Source merge is not an installed runtime upgrade.
+
+A single linked video updates one acknowledged bot reply. If Telegram loses the
+edit receipt, the bot can retry the same file on that same message once. Albums
+keep their existing batch receipts. Group failure messages are short; stages,
+provider errors and operation identifiers remain in the private journal.

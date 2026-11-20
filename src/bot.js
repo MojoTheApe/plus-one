@@ -847,13 +847,17 @@ async function handleScopedUpdate(update) {
   try {
     answer = await answerQuestion(message, trigger.question);
   } catch (error) {
-    const reason = error.code === "AI_TIMEOUT" ? "сервіс ШІ не завершив відповідь за відведений час" :
-      error.code === "AI_CAPACITY" ? "вичерпано доступну квоту або сервіс тимчасово обмежив запити" :
-      error.code === "AI_EMPTY_ANSWER" ? "сервіс ШІ двічі повернув порожню відповідь навіть після повторної спроби" :
-      "запит до сервісу ШІ не завершився коректно; технічну причину збережено для перевірки";
+    const locale = behavior().locale;
+    const reason = error.code === "AI_TIMEOUT"
+      ? say(locale, "The reply timed out. Try again.", "Не успел ответить. Попробуй ещё раз.", "Не встиг відповісти. Спробуй ще раз.")
+      : error.code === "AI_CAPACITY"
+      ? say(locale, "The service is busy. Try later.", "Сервис занят. Попробуй позже.", "Сервіс зайнятий. Спробуй пізніше.")
+      : error.code === "AI_EMPTY_ANSWER"
+      ? say(locale, "Two empty replies. Try again.", "Дважды пришёл пустой ответ. Попробуй ещё раз.", "Двічі надійшла порожня відповідь. Спробуй ще раз.")
+      : say(locale, "Couldn’t get a reply. Try again.", "Не удалось получить ответ. Попробуй ещё раз.", "Не вдалося отримати відповідь. Спробуй ще раз.");
     const id = crypto.randomUUID().slice(0, 8);
     logError("ai_answer_failed", error, messageLogMeta(message, { diagnosticId: id, ...error.diagnostics }));
-    await telegram("sendMessage", { chat_id: message.chat.id, text: `Не вдалося відповісти: ${reason}. Спробуй ще раз. Код: ${error.code || "AI_ERROR"} · ${id}.`,
+    await telegram("sendMessage", { chat_id: message.chat.id, text: reason,
       reply_to_message_id: message.message_id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}) });
     return;
   }
@@ -1200,7 +1204,7 @@ async function answerJudge(message, request, slice) {
         ? await callConversationJudge(message, scopePrompt, { phase: "scope", contextTicket: ticket?.file })
         : await callOpenAIJudge(scopePrompt, { researchEnabled: false });
       if (request.allDisputes && candidateExcerpt.omittedCount > 0 && !result.historyStatus?.succeeded) {
-        return "Увесь період не помістився в початковий контекст, а додаткове читання історії не завершилось. Не буду видавати частковий розбір за повний. Код: JUDGE_INCOMPLETE_COVERAGE.";
+        return "Не вдалося прочитати всю історію. Обери коротший період.";
       }
       scopes = parseJudgeScopesText(result.text, slice.map((item) => item.messageId), request.allDisputes);
     } finally { if (ticket) await ticket.cleanup(); }
@@ -1208,7 +1212,7 @@ async function answerJudge(message, request, slice) {
     logError("judge_scope_failed", error, messageLogMeta(message, {
       candidateMessages: candidateExcerpt.includedItems.length,
     }));
-    if (request.allDisputes) return "Не вдалося надійно розділити суперечки на окремі теми. Спробуй повторити запит. Код: JUDGE_SCOPE_ERROR.";
+    if (request.allDisputes) return "Не вдалося розділити суперечки. Уточни тему.";
     return "Не вдалося надійно визначити саме цю суперечку. Відповідай на повідомлення з неї — я не підмінятиму її іншою темою.";
   }
   if (!scopes.length) return "У доступній історії за цей період не знайшов достатньо оформлених суперечок для розбору.";
@@ -2302,7 +2306,7 @@ async function maybeHandleMediaRetry(message) {
   }
   if (!operation.failure) operation.failure = { code: "INTERRUPTED", retryable: true, stage: "download", reason: "Попередню спробу було перервано до завершення." };
   if (!canRetryMediaOperation(operation) && !(operation.failure.code === "DURATION_LIMIT" && operation.failure.actualDurationSeconds <= socialVideoMaxDurationSeconds)) {
-    await telegram("sendMessage", { chat_id: message.chat.id, text: failureMessage(operation.failure, operation.id, behavior().locale) + "\n" + say(behavior().locale, "Repeating without changing this condition will not help.", "Повтор без изменения этого условия не поможет.", "Повтор без зміни цієї умови не допоможе."), reply_to_message_id: message.message_id,
+    await telegram("sendMessage", { chat_id: message.chat.id, text: failureMessage(operation.failure, behavior().locale), reply_to_message_id: message.message_id,
       ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}) });
     return true;
   }
@@ -2332,14 +2336,15 @@ async function maybeHandleSocialVideo(message, retry = null) {
   if (wait > 0) {
     const notice = await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage({
       ...retry.failure, code: "RATE_LIMIT", retryAfterSeconds: wait,
-    }, retry.id, behavior().locale) });
+    }, behavior().locale) });
     await mediaOperations.linkRetryNotice(retry.id, message.message_id, notice.message_id);
     return true;
   }
   if (recovered?.status === "done" || retry?.status === "done") return true;
-  if (recovered && ["uploading", "unknown"].includes(recovered.status)) {
+  if (recovered && ["uploading", "unknown"].includes(recovered.status) &&
+      !(recovered.videoReplyId && (recovered.videoEditAttempts < 2 || recovered.deliveredFileCount === 1))) {
     const failure = mediaFailure(Object.assign(new Error("Upload confirmation was interrupted"), { deliveryUnknown: true }), { stage: "upload" });
-    const notice = await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage(failure, recovered.id, behavior().locale) });
+    const notice = await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage(failure, behavior().locale) });
     await mediaOperations.record({ ...recovered, status: "unknown", failure, errorMessageId: notice?.message_id || null });
     return true;
   }
@@ -2355,10 +2360,9 @@ async function maybeHandleSocialVideo(message, retry = null) {
 
   const budget = socialVideoBudget.reserve(message.chat.id, url, { source: false });
   if (!budget.allowed) {
-    const limit = budget.reason === "SUCCESS_QUOTA" ? "Вичерпано погодинний ліміт успішних завантажень." : "Після невдалих або незавершених спроб потрібна коротка пауза.";
     await telegram("sendMessage", {
       chat_id: message.chat.id,
-      text: `${limit} Наступна спроба можлива приблизно через ${budget.retryAfterSeconds} с. Код: ${budget.reason === "SUCCESS_QUOTA" ? "GROUP_RATE_LIMIT" : budget.reason}.`,
+      text: failureMessage({code:"RATE_LIMIT", retryAfterSeconds:budget.retryAfterSeconds}, behavior().locale),
       reply_to_message_id: message.message_id,
       disable_web_page_preview: true,
     }).catch(() => {});
@@ -2394,7 +2398,7 @@ async function maybeHandleSocialVideo(message, retry = null) {
     logError("media_journal_failed", error, messageLogMeta(message));
     clearInterval(progress);
     socialVideoBudget.complete(budget.reservation, { success: false });
-    await telegram("sendMessage", { ...assembleReplyTarget(message), text: "Не вдалося зберегти стан медіаоперації. Надсилання не розпочато, щоб уникнути повторів. Спробуй пізніше. Код: MEDIA_JOURNAL." });
+    await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage({code:"SERVICE_ERROR"}, behavior().locale) });
     return true;
   }
   try {
@@ -2407,6 +2411,10 @@ async function maybeHandleSocialVideo(message, retry = null) {
           id: cached.source.resolved.id, owner: cached.source.resolved.owner, kind: cached.source.resolved.kind });
       }
       catch { cached = null; }
+    }
+    if (retry?.videoEditPending && !cached?.complete) {
+      // A pending edit can be retried only with the already verified copy.
+      throw unconfirmedUpload(new Error("Saved video for the pending edit is unavailable"), "editMessageMedia");
     }
     const recoverRejectedReference = retry?.staleRejected === true && !cached?.complete;
     if (recoverRejectedReference && !hasMediaItemIdentity(retry.mediaItems)) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", cached?.source?.provider);
@@ -2454,22 +2462,68 @@ async function maybeHandleSocialVideo(message, retry = null) {
         deliveredFileCount: (operation.deliveredFileCount || 0) + fileCount };
       try { operation = await mediaOperations.record(operation); }
       catch (error) { throw Object.assign(error, { deliveryUnknown: true }); }
-      if (preparedCache) await mediaCache.bind(preparedCache.id, items.map(item => item.message_id), { startIndex, items, botId: botInfo.id, sourceMessageId: message.message_id })
+      if (preparedCache) await mediaCache.bind(preparedCache.id, items.map(item => item.message_id), { startIndex, items, botId: botInfo.id, sourceMessageId: operation.videoReplyId ? operation.sourceMessageId : message.message_id })
         .catch(error => logError("media_cache_failed", error, messageLogMeta(message)));
       for (const [index, item] of items.entries()) await rememberMessage({ ...item, chat: item.chat || message.chat,
         from: { ...(item.from || botInfo), is_bot: true }, _sourceUrl: url, _mediaSource: source,
         _mediaSelection: { index: startIndex + index, total: mediaFiles.length },
-        reply_to_message: { message_id: message.message_id }, message_thread_id: judgeThreadId(message),
+        reply_to_message: { message_id: operation.videoReplyId ? operation.sourceMessageId : message.message_id }, message_thread_id: judgeThreadId(message),
         is_topic_message: Boolean(message.chat.is_forum || message.is_topic_message) })
         .catch(error => logError("outgoing_history_failed", error, messageLogMeta(message)));
     };
     stage = "upload";
     const uploadStarted = Date.now();
+    const deliverVideoReply = async () => {
+      if (!operation.videoReplyId) {
+        // Without an acknowledged target no video edit is submitted.
+        const anchor = await telegram("sendMessage", {
+          ...assembleReplyTarget(message), reply_to_message_id: operation.sourceMessageId,
+          text: say(behavior().locale, "Sending…", "Отправляю…", "Надсилаю…"),
+        }, { retry: false });
+        if (!Number.isSafeInteger(anchor?.message_id) || anchor.message_id <= 0 ||
+            (anchor.chat && anchor.chat.id !== message.chat.id)) throw new Error("Missing video reply target");
+        operation = await mediaOperations.record({ ...operation, videoReplyId: anchor.message_id, videoEditAttempts: 0, videoEditPending: false });
+      }
+      // A new explicit request gets a fresh budget on the SAME message.
+      let attempts = operation.videoEditRequestId === message.message_id ? operation.videoEditAttempts || 0 : 0;
+      let uncertain = operation.videoEditPending === true;
+      while (attempts < 2) {
+        attempts++;
+        operation = await mediaOperations.record({ ...operation, videoEditRequestId: message.message_id,
+          videoEditAttempts: attempts, videoEditPending: true }, { beginUpload: true });
+        if (operation.observedMessageId) return null;
+        let edited;
+        try {
+          edited = await editTelegramVideo(message, operation.videoReplyId, mediaFiles[0], caption);
+        } catch (error) {
+          if (!error.deliveryUnknown) {
+            // Telegram can report an identical edit without returning a file_id.
+            if (uncertain && error.status === 400 && /message is not modified/i.test(error.message)) {
+              operation = await mediaOperations.record({ ...operation, status: "unknown",
+                failure: mediaFailure({deliveryUnknown:true}, {stage:"upload"}), observedMessageId: operation.videoReplyId });
+              return null;
+            }
+            if (uncertain) throw unconfirmedUpload(error, "editMessageMedia");
+            operation = await mediaOperations.record({ ...operation, videoEditPending: false, videoEditAttempts: 0 });
+            throw error;
+          }
+          if (attempts === 2) throw error;
+          uncertain = true;
+          await sleep(1000);
+          continue;
+        }
+        operation.videoEditPending = false;
+        await recordSent([edited], 1);
+        return [edited];
+      }
+      throw unconfirmedUpload(new Error("Video edit receipt unavailable"), "editMessageMedia");
+    };
     const deliverRemaining = async () => {
       operation = await mediaOperations.record({ ...operation, status: "uploading" }, { beginUpload: true });
       if (operation.observedMessageId) return null;
       const delivered = operation.deliveredFileCount || 0;
       const remaining = mediaFiles.slice(delivered);
+      if (!delivered && mediaFiles.length === 1 && mediaFiles[0].mediaKind === "video") return deliverVideoReply();
       return remaining.length ? sendTelegramSocialMedia(message, remaining, delivered ? "" : caption, recordSent) : [];
     };
     let sent;
@@ -2509,7 +2563,7 @@ async function maybeHandleSocialVideo(message, retry = null) {
     }
     if (sent === null) {
       socialVideoBudget.complete(budget.reservation, { success: false });
-      await reportVisibleVideo(message, operation.observedMessageId);
+      if (!operation.videoReplyId || operation.videoReplyId !== operation.observedMessageId) await reportVisibleVideo(message, operation.observedMessageId);
       return true;
     }
     logInfo("media_stage_completed", messageLogMeta(message, { diagnosticId: operation?.id, stage, elapsedMs: Date.now() - uploadStarted, files: sent.length }));
@@ -2537,11 +2591,11 @@ async function maybeHandleSocialVideo(message, retry = null) {
     error.elapsedSeconds = (Date.now() - attemptStarted) / 1000;
     const failure = mediaFailure(error, { maxDurationSeconds: socialVideoMaxDurationSeconds, stage, maxUploadBytes: telegramUploadBudget });
     logError("social_video_failed", error, messageLogMeta(message, { provider, diagnosticId: operation?.id, ...failure }));
-    const notice = await telegram("sendMessage", {
-      ...assembleReplyTarget(message),
-      text: failureMessage(failure, operation?.id, behavior().locale),
-      disable_web_page_preview: true,
-    }).catch(() => {});
+    const description = failureMessage(failure, behavior().locale);
+    // Never turn a possibly delivered video back into an error message.
+    const notice = operation?.videoReplyId && !operation.videoEditPending && !error.deliveryUnknown
+      ? await telegram("editMessageText", { chat_id: message.chat.id, message_id: operation.videoReplyId, text: description }).catch(() => {})
+      : await telegram("sendMessage", { ...assembleReplyTarget(message), text: description }).catch(() => {});
     const sourceError = [error, ...(error.attempts || []).map(attempt => attempt.error)].find(error => error.sourceCheck && !error.fallbackDisabled);
     if (operation) await mediaOperations.record({ ...operation, status: error.deliveryUnknown ? "unknown" : "failed", failure,
       source: sourceError ? { version: 1, requested: mediaReference(url), ...sourceError.sourceCheck } : operation.source,
@@ -2849,6 +2903,21 @@ async function findDownloadedSocialVideo(tempDir) {
   }
   files.sort((a, b) => b.size - a.size);
   return files[0] || null;
+}
+
+async function editTelegramVideo(message, targetId, file, caption) {
+  const form = new FormData();
+  form.set("chat_id", String(message.chat.id));
+  form.set("message_id", String(targetId));
+  const media = { type: "video", media: file.telegramFileId || "attach://video", caption, supports_streaming: true };
+  for (const key of ["width", "height", "duration"]) {
+    if (Number.isFinite(file[key]) && file[key] > 0) media[key] = Math.round(file[key]);
+  }
+  form.set("media", JSON.stringify(media));
+  if (!file.telegramFileId) form.set("video", await fs.openAsBlob(file.filePath, { type: "video/mp4" }), path.basename(file.filePath));
+  return telegramMultipart("editMessageMedia", form, { diagnosticId: message._mediaOperationId,
+    // A gateway may consume 120 seconds after the complete body is written.
+    deadline: Date.now() + 130000, expectedVideoReply: targetId });
 }
 
 async function sendTelegramSocialMedia(message, mediaFiles, caption, onSent = async () => {}) {
@@ -3672,7 +3741,7 @@ async function performMessageAction(message, question, decision, context) {
     const operation = await mediaOperations.find(reference, false, {chatId:message.chat.id,topicId:judgeThreadId(message)});
     const url = operation?.url || target.sourceUrl || extractSocialVideoUrl(target.text);
     if (!url || !socialVideoProviderForUrl(url)) return "У цьому повідомленні не знайшов підтримуваного посилання для завантаження.";
-    if (operation?.failure && !canRetryMediaOperation(operation)) return failureMessage(operation.failure, operation.id, behavior().locale) + "\n" + say(behavior().locale, "Repeating without changing this condition will not help.", "Повтор без изменения этого условия не поможет.", "Повтор без зміни цієї умови не допоможе.");
+    if (operation?.failure && !canRetryMediaOperation(operation)) return failureMessage(operation.failure, behavior().locale);
     if(!canDownloadMedia(message))return "Завантаження медіа зараз вимкнено в налаштуваннях бота.";
     if(!await isBotAdminInChat(message.chat.id))return "Для завантаження медіа боту потрібні права адміністратора цієї групи.";
     const handled=await maybeHandleSocialVideo(message, operation || {url,sourceMessageId:target.messageId});
@@ -3719,7 +3788,7 @@ async function analyzeReferencedMedia(message, question, target, scopedContext, 
     if (!files.length && sourceUrl && socialVideoProviderForUrl(sourceUrl)) {
       if (target.isBot && !analysisSource) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED");
       const budget = socialVideoBudget.reserve(message.chat.id,sourceUrl);
-      if (!budget.allowed) return `Для отримання медіа потрібна пауза приблизно ${budget.retryAfterSeconds} с. Код: ${budget.reason}.`;
+      if (!budget.allowed) return failureMessage({code:"RATE_LIMIT", retryAfterSeconds:budget.retryAfterSeconds}, behavior().locale);
       try {
         const result = await downloadSocialVideo(sourceUrl); downloadedDirectory = result.tempDir;
         analysisSource = assertVerifiedMediaSource(result.source, sourceUrl);
@@ -3763,7 +3832,7 @@ async function analyzeReferencedMedia(message, question, target, scopedContext, 
   } catch(error) {
     logError("media_evidence_failed",error,messageLogMeta(message));
     if(error.code === "TELEGRAM_DOWNLOAD_LIMIT") return "Telegram не дозволив отримати цей файл для аналізу: межа завантаження — 20 МіБ, а локальної копії вже немає. Потрібен менший файл або доступне вихідне посилання.";
-    return failureMessage(mediaFailure(error,{stage:"prepare"}), undefined, behavior().locale);
+    return failureMessage(mediaFailure(error,{stage:"prepare"}), behavior().locale);
   } finally {
     if(ticket)await ticket.cleanup();
     await fs.promises.rm(directory,{recursive:true,force:true});
@@ -4176,6 +4245,13 @@ async function telegramMultipart(method, form, options = {}) {
     const results = Array.isArray(body.result) ? body.result : [body.result];
     if (method.startsWith("send") && (results.length !== (options.expectedCount || 1) || results.some(item => !Number.isSafeInteger(item?.message_id)))) {
       throw unconfirmedUpload(new Error("Telegram returned no delivery receipt"), method);
+    }
+    if (options.expectedVideoReply) {
+      const edited = body.result;
+      if (edited?.message_id !== options.expectedVideoReply || edited.chat?.id !== Number(form.get("chat_id")) || !edited.video?.file_id) {
+        throw unconfirmedUpload(new Error("Missing matching edited video receipt"), method);
+      }
+      return edited; // recordSent persists the original reply target and verified media identity.
     }
     for (const sent of Array.isArray(body.result) ? body.result : [body.result]) {
       if (!sent?.message_id) continue;
