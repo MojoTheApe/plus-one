@@ -2488,6 +2488,10 @@ async function maybeHandleSocialVideo(message, retry = null) {
       let attempts = operation.videoEditRequestId === message.message_id ? operation.videoEditAttempts || 0 : 0;
       let uncertain = operation.videoEditPending === true;
       while (attempts < 2) {
+        if (Date.now() >= message._mediaDeadline) {
+          const expired = Object.assign(new Error("Media attempt deadline exceeded"), {code:"SOCIAL_DOWNLOAD_TIMEOUT"});
+          throw uncertain ? unconfirmedUpload(expired, "editMessageMedia") : expired;
+        }
         attempts++;
         operation = await mediaOperations.record({ ...operation, videoEditRequestId: message.message_id,
           videoEditAttempts: attempts, videoEditPending: true }, { beginUpload: true });
@@ -2507,7 +2511,7 @@ async function maybeHandleSocialVideo(message, retry = null) {
             operation = await mediaOperations.record({ ...operation, videoEditPending: false, videoEditAttempts: 0 });
             throw error;
           }
-          if (attempts === 2) throw error;
+          if (attempts === 2 || Date.now() + 1000 >= message._mediaDeadline) throw error;
           uncertain = true;
           await sleep(1000);
           continue;
@@ -2562,6 +2566,8 @@ async function maybeHandleSocialVideo(message, retry = null) {
       sent = await deliverRemaining();
     }
     if (sent === null) {
+      if (preparedCache && operation.observedMessageId) await mediaCache.release(preparedCache.id)
+        .catch(error => logError("media_cache_failed", error, messageLogMeta(message)));
       socialVideoBudget.complete(budget.reservation, { success: false });
       if (!operation.videoReplyId || operation.videoReplyId !== operation.observedMessageId) await reportVisibleVideo(message, operation.observedMessageId);
       return true;
@@ -2917,7 +2923,7 @@ async function editTelegramVideo(message, targetId, file, caption) {
   if (!file.telegramFileId) form.set("video", await fs.openAsBlob(file.filePath, { type: "video/mp4" }), path.basename(file.filePath));
   return telegramMultipart("editMessageMedia", form, { diagnosticId: message._mediaOperationId,
     // A gateway may consume 120 seconds after the complete body is written.
-    deadline: Date.now() + 130000, expectedVideoReply: targetId });
+    deadline: Math.min(message._mediaDeadline, Date.now() + 130000), expectedVideoReply: targetId });
 }
 
 async function sendTelegramSocialMedia(message, mediaFiles, caption, onSent = async () => {}) {

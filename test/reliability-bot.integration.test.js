@@ -2024,7 +2024,7 @@ test('a video seen while a retry is preparing prevents its Telegram submission',
   assert.match(f.calls.filter(call => call.method === 'sendMessage').at(-1).payload.text,/520/);
 });
 
-for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'interrupted', 'wrong-receipts']) {
+for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'interrupted', 'deadline', 'wrong-receipts']) {
   test(`one linked video edits only its own persisted reply: ${outcome}`, async t => {
     const f = await fixture(t);
     const url = 'https://www.instagram.com/reel/anchored/';
@@ -2048,6 +2048,12 @@ for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'inter
       assert.equal(op.videoEditAttempts, targets.length);
       assert.deepEqual(Buffer.from(await form.get('video').arrayBuffer()), bytes);
       assert.equal(JSON.parse(form.get('media')).media, 'attach://video');
+      if (outcome === 'deadline') {
+        const now = Date.now;
+        Date.now = () => now() + 240001;
+        t.after(() => { Date.now = now; });
+        return new Response('',{status:504});
+      }
       if (outcome === 'unchanged' && targets.length === 2) return Response.json({ok:false,description:'Bad Request: message is not modified'},{status:400});
       if (['lost-first-receipt','unchanged'].includes(outcome) && targets.length === 1) return new Response('', {status:504});
       return Response.json({ok:true,result:{message_id:['wrong-receipts','interrupted'].includes(outcome)?target+1:target,
@@ -2056,14 +2062,18 @@ for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'inter
     await f.handle({message_id:500,text:url});
     const [op] = await journal.read();
     assert.equal(downloads,1);
-    assert.equal(targets.length,outcome==='acknowledged'?1:2);
+    assert.equal(targets.length,['acknowledged','deadline'].includes(outcome)?1:2);
     assert.equal(new Set(targets).size,1);
     assert.equal(f.calls.filter(call=>call.payload.text==='Надсилаю…').length,1);
-    const unknown = ['wrong-receipts','interrupted','unchanged'].includes(outcome);
+    const unknown = ['wrong-receipts','interrupted','unchanged','deadline'].includes(outcome);
     assert.equal(op.status, unknown ? 'unknown' : 'done');
     assert.deepEqual(op.sentMessageIds || [], unknown ? [] : [targets[0]]);
     if (outcome==='unchanged') {
       assert.equal(op.observedMessageId,targets[0]);
+      const cache = JSON.parse(await fs.readFile(path.join(f.root,'runtime/media-cache/index.json')));
+      const entry = cache.entries.find(entry => entry.id === op.cacheId);
+      assert.equal(entry.pending,false);
+      assert.deepEqual(entry.receipts,[]);
       assert.equal(f.calls.filter(c=>c.method==='sendMessage').length,1);
     }
     if (outcome==='interrupted') {
