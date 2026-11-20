@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { MediaOperations, mediaFailure, isMediaRetryText, canRetryMediaOperation } from "../src/media-operations.js";
+import { nativeExtractorSource } from "../src/media-source.js";
 import { socialDownloadFailure } from "../src/social-downloader.js";
 
 test("canonical retry fast path leaves clearly Russian requests to the language gate", () => {
@@ -84,4 +85,51 @@ test("download diagnosis retains both real failures without inventing throttling
   assert.equal(mediaFailure(new Error("Log in to view this private content")).code, "AUTH_REQUIRED");
   assert.equal(mediaFailure(new Error("cookies may help improve results")).code, "UNKNOWN");
   assert.equal(mediaFailure(Object.assign(new Error("upstream busy"), { status: 429 })).code, "RATE_LIMIT");
+});
+
+test('mixed Instagram sign-in and rate limit follows the recoverable path and preserves the source wait', async t => {
+  const error = socialDownloadFailure(Object.assign(new Error('login required'), { downloader: 'instaloader' }),
+    Object.assign(new Error('HTTP Error 429: Too Many Requests'), { retryAfterSeconds: 125 }), 'yt-dlp');
+  const failure = mediaFailure(error);
+  assert.equal(failure.code, 'RATE_LIMIT');
+  assert.equal(failure.retryAfterSeconds, 125);
+  assert.deepEqual(failure.causes.map(cause => cause.code), ['AUTH_REQUIRED', 'RATE_LIMIT']);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'media-mixed-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'operations.json');
+  const journal = new MediaOperations(file, () => 5000);
+  await journal.sourceResult('instagram', failure);
+  assert.equal((await new MediaOperations(file).sourceState('instagram')).notBefore, 130000);
+  assert.equal(canRetryMediaOperation({ status: 'failed', failure: mediaFailure(new Error('login required')) }), false);
+});
+
+test('late video observation stays scoped to a unique revalidated source throughout retry preparation', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'media-observed-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const journal = new MediaOperations(path.join(dir, 'journal.json'));
+  const url = 'https://www.instagram.com/reel/first/';
+  const other = 'https://www.instagram.com/reel/second/';
+  const source = nativeExtractorSource(url, {extractor_key:'Instagram', id:'first'});
+  const chat = {id:-123, type:'supergroup'};
+  const video = {chat, message_id:520, from:{id:77,is_bot:true}, video:{file_id:'seen'}, caption:other};
+  const quote = {chat, message_id:530, reply_to_message:video};
+  const failure = {code:'UPLOAD_UNKNOWN', status:504, stage:'upload', retryable:true};
+  const base = {chatId:chat.id, sourceMessageId:500, status:'unknown', url, failure,
+    mediaItems:[{mediaKind:'video',sourceItemId:'publication:first'}]};
+  const damaged = await journal.record({...base, source:{...source,resolved:{...source.resolved,url:other}}});
+  await journal.observeVideoReply(quote,77);
+  assert.equal((await journal.read())[0].observedMessageId,undefined);
+  const original = await journal.record({...damaged,source});
+  const running = await journal.record({...original,status:'running'});
+  await journal.record({...running,status:'prepared',failure:null});
+  video.caption = url;
+  await journal.observeVideoReply(quote,77);
+  const submission = await journal.record({...running,status:'uploading',failure:null}, {beginUpload:true});
+  assert.equal(submission.observedMessageId,520);
+  assert.equal(submission.status,'unknown');
+  assert.deepEqual(submission.failure,failure);
+  const second = await journal.record({...base,source,sourceMessageId:501});
+  video.message_id = 525;
+  await journal.observeVideoReply(quote,77);
+  assert.equal((await journal.read()).find(op=>op.id===second.id).observedMessageId,undefined);
 });

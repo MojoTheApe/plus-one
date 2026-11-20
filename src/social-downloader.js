@@ -82,7 +82,9 @@ async function downloadWithinDeadline(url, deps, options = {}) {
   }
   catch (error) {
     if (controller.signal.aborted) error.code = "SOCIAL_DOWNLOAD_TIMEOUT";
-    await deps.journal?.sourceResult(provider, mediaFailure(error));
+    const failure = mediaFailure(error);
+    const wait = await deps.journal?.sourceResult(provider, failure);
+    if (failure.code === "RATE_LIMIT" && Number.isFinite(wait)) error.retryAfterSeconds = wait;
     throw error;
   } finally {
     clearTimeout(timer);
