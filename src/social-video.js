@@ -308,12 +308,64 @@ export function extractTargetThreadsPost(html, sourceUrl) {
     if (!handle) return true;
     return String(post?.user?.username || "").toLowerCase() === handle.toLowerCase();
   });
-  return matchingPosts[0] || null;
+  if (matchingPosts.length < 2) return matchingPosts[0] || null;
+  // A hydrated page may repeat a top-level cover card alongside the native
+  // carousel. Select from all representations of this owner and publication.
+  const albums = matchingPosts.filter(isThreadsCarousel);
+  const post = albums.length ? albums.reduce((best, item) =>
+    (item.carousel_media?.length || 0) > (best.carousel_media?.length || 0) ? item : best)
+    : matchingPosts.find(item => threadsMediaItems(item).length) || matchingPosts[0];
+  const selected = threadsMediaItems(post);
+  for (const other of matchingPosts) {
+    if (other === post) continue;
+    const album = isThreadsCarousel(other);
+    const declared = other.carousel_media_count;
+    // A short native array is only a compatible prefix when either native
+    // record supplies a cardinality confirming the entire selected array.
+    if (["pk", "id"].some(field => post[field] != null && other[field] != null && String(post[field]) !== String(other[field])) ||
+        (album && declared != null && declared !== selected.length) ||
+        (album && other.media_type != null && other.media_type !== 8) ||
+        (album && other.carousel_media?.length !== selected.length && declared == null && post.carousel_media_count == null)) {
+      throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+    }
+    const children = album ? other.carousel_media : [other];
+    if (album && children == null) continue;
+    if (!Array.isArray(children)) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+    const observed = album && children.length === 0 ? [] :
+      threadsMediaItems(album ? { ...other, carousel_media_count: children.length } : other);
+    for (const [index, item] of observed.entries()) {
+      const chosen = selected[index], original = post.carousel_media?.[index] || post, alternative = children[index];
+      const projection = albums.length > 0 && !album;
+      // A cover card carries the parent ID. Compare child IDs only for two
+      // native album positions; a card must match a real first-slide asset.
+      const ids = projection ? [] : ["pk", "id"].filter(field => original[field] != null && alternative[field] != null);
+      if (!chosen || ids.some(field => String(original[field]) !== String(alternative[field]))) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+      if (chosen.kind === item.kind && (ids.length || chosen.url === item.url)) continue;
+      const cover = projection && item.kind === "image" && chosen.kind === "video";
+      if ((chosen.kind !== item.kind && !cover) || !matchingThreadsAsset(original, alternative, item.kind)) {
+        throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+      }
+    }
+  }
+  return post;
+}
+
+function isThreadsCarousel(post) {
+  return post.media_type === 8 || post.carousel_media?.length > 0 || post.carousel_media_count > 0;
+}
+
+function matchingThreadsAsset(original, alternative, kind) {
+  const assets = post => {
+    const versions = kind === "video" ? post.video_versions : post.image_versions2?.candidates;
+    return (Array.isArray(versions) ? versions : []).map(item => bestThreadsUrl([item], kind)).filter(Boolean);
+  };
+  const urls = new Set(assets(original));
+  return assets(alternative).some(url => urls.has(url));
 }
 
 export function collectThreadsPostsByCode(value, shortcode, posts, depth = 0) {
   if (!value || typeof value !== "object" || depth > 40) return;
-  if (!Array.isArray(value) && value.code === shortcode && (value.media_type || value.video_versions || value.image_versions2 || value.carousel_media)) {
+  if (!Array.isArray(value) && value.code === shortcode && (value.media_type || value.video_versions || value.image_versions2 || value.carousel_media || value.carousel_media_count)) {
     posts.push(value);
   }
 
@@ -325,7 +377,7 @@ export function collectThreadsPostsByCode(value, shortcode, posts, depth = 0) {
 }
 
 function threadsMediaItems(post) {
-  const carousel = post.media_type === 8 || post.carousel_media?.length > 0 || post.carousel_media_count > 0;
+  const carousel = isThreadsCarousel(post);
   const items = carousel ? post.carousel_media : [post];
   if (!Array.isArray(items) || !items.length || (carousel && post.media_type != null && post.media_type !== 8) ||
       (carousel && post.carousel_media_count != null && post.carousel_media_count !== items.length)) {

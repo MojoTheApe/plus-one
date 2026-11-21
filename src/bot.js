@@ -2708,13 +2708,20 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
     const recordSent = async (items, fileCount) => {
       if (!operation) return;
       const startIndex = operation.deliveredFileCount || 0;
-      operation = { ...operation, sentMessageIds: [...new Set([...(operation.sentMessageIds || []), ...items.map(item => item.message_id)])],
-        deliveredFileCount: (operation.deliveredFileCount || 0) + fileCount };
+      const previous = operation.sentMessageIds || [];
+      const ids = items.map(item => item.message_id);
+      const sentMessageIds = [...previous, ...ids];
+      if (previous.length !== startIndex || ids.length !== fileCount || startIndex + fileCount > mediaFiles.length ||
+          new Set(sentMessageIds).size !== sentMessageIds.length) {
+        throw unconfirmedUpload(new Error("Overlapping or inconsistent Telegram media receipts"), "recordSent");
+      }
+      operation = { ...operation, sentMessageIds, deliveredFileCount: startIndex + fileCount };
       try { operation = await mediaOperations.record(operation); }
       catch (error) { throw Object.assign(error, { deliveryUnknown: true }); }
-      if (preparedCache) await mediaCache.bind(preparedCache.id, items.map(item => item.message_id), { startIndex, items, botId: botInfo.id, sourceMessageId: operation.videoReplyId ? operation.sourceMessageId : message.message_id })
+      if (preparedCache) await mediaCache.bind(preparedCache.id, ids, { startIndex, items, botId: botInfo.id, sourceMessageId: operation.videoReplyId ? operation.sourceMessageId : message.message_id })
         .catch(error => logError("media_cache_failed", error, messageLogMeta(message)));
-      for (const [index, item] of items.entries()) await rememberMessage({ ...item, chat: item.chat || message.chat,
+      for (const [index, item] of items.entries()) await rememberMessage({ ...item, date: item.date || Math.floor(Date.now() / 1000), chat: item.chat || message.chat,
+        caption: item.caption || (startIndex + index === 0 ? caption : ""),
         from: { ...(item.from || botInfo), is_bot: true }, _sourceUrl: url, _mediaSource: source,
         _mediaSelection: { index: startIndex + index, total: mediaFiles.length },
         reply_to_message: { message_id: operation.videoReplyId ? operation.sourceMessageId : message.message_id }, message_thread_id: judgeThreadId(message),
@@ -2825,10 +2832,10 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
       if (!operation.videoReplyId || operation.videoReplyId !== operation.observedMessageId) await reportVisibleVideo(message, operation.observedMessageId);
       return true;
     }
+    if (!allMediaAcknowledged(operation)) throw unconfirmedUpload(new Error("Incomplete Telegram media receipts"), "recordSent");
     logInfo("media_stage_completed", messageLogMeta(message, { diagnosticId: operation?.id, stage, elapsedMs: Date.now() - uploadStarted, files: sent.length }));
     socialVideoBudget.complete(budget.reservation, { success: true });
-    const sentMessageIds = [...new Set([...(operation?.sentMessageIds || []), ...sent.map(item => item.message_id).filter(Number.isSafeInteger)])];
-    if (operation) await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "done", sentMessageIds }).catch(error => logError("media_journal_failed", error, messageLogMeta(message)));
+    await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "done" }).catch(error => logError("media_journal_failed", error, messageLogMeta(message)));
     if (preparedCache) await mediaCache.release(preparedCache.id).catch(error => logError("media_cache_failed", error, messageLogMeta(message)));
     await cacheRecentVisualMedia(message.chat.id, mediaFiles.filter(file => file.filePath), {
       sourceUrl: url,
@@ -3285,7 +3292,8 @@ async function sendTelegramMediaGroup(message, mediaFiles, caption) {
   }
 
   form.set("media", JSON.stringify(media));
-  return telegramMultipart("sendMediaGroup", form, {deadline:message._mediaDeadline, diagnosticId:message._mediaOperationId, expectedCount:media.length});
+  return telegramMultipart("sendMediaGroup", form, {deadline:message._mediaDeadline, diagnosticId:message._mediaOperationId,
+    expectedAttachments: media.map(item => item.type)});
 }
 
 async function sendTelegramMultipartMedia(method, message, fieldName, filePath, caption, mimeType, media = null, options = {}) {
@@ -3310,7 +3318,7 @@ async function sendTelegramMultipartMedia(method, message, fieldName, filePath, 
   else form.set(fieldName, await fs.openAsBlob(filePath, { type: mimeType }), path.basename(filePath));
 
   return telegramMultipart(method, form, {deadline:message._mediaDeadline, diagnosticId:message._mediaOperationId,
-    expectedAttachment: method === "sendPhoto" ? "photo" : undefined});
+    expectedAttachments: method === "sendPhoto" || method === "sendVideo" ? [fieldName] : undefined});
 }
 
 async function sendTelegramDocument(message, filePath, caption, mimeType = "application/octet-stream") {
@@ -3324,7 +3332,7 @@ async function sendTelegramDocument(message, filePath, caption, mimeType = "appl
   form.set("document", await fs.openAsBlob(filePath, { type: mimeType }), fileName);
 
   return telegramMultipart("sendDocument", form, {deadline:message._mediaDeadline, diagnosticId:message._mediaOperationId,
-    expectedAttachment: "document"});
+    expectedAttachments: ["document"]});
 }
 
 async function maybeHandleVisualQuestion(message, question) {
@@ -4561,19 +4569,20 @@ async function telegramMultipart(method, form, options = {}) {
       if (response.status >= 500 || (response.ok && (body?.ok !== false || !body.error_code))) throw unconfirmedUpload(error, method);
       throw error;
     }
-    const results = Array.isArray(body.result) ? body.result : [body.result];
-    if (method.startsWith("send") && (results.length !== (options.expectedCount || 1) || results.some(item => !Number.isSafeInteger(item?.message_id) || item.message_id <= 0))) {
+    const results = method === "sendMediaGroup" ? body.result : [body.result];
+    if (method.startsWith("send") && (!Array.isArray(results) || results.length !== (options.expectedAttachments?.length || 1) ||
+        results.some(item => !Number.isSafeInteger(item?.message_id) || item.message_id <= 0) ||
+        new Set(results.map(item => item.message_id)).size !== results.length)) {
       throw unconfirmedUpload(new Error("Telegram returned no delivery receipt"), method);
     }
-    if (options.expectedAttachment) {
-      const sent = body.result;
-      const attachment = options.expectedAttachment === "photo" ? sent?.photo?.at(-1) : sent?.document;
-      const expectedThread = form.get("message_thread_id");
-      const sameTopic = expectedThread === null ? !judgeThreadId(sent) : sent?.message_thread_id === Number(expectedThread);
-      if (typeof attachment?.file_id !== "string" || !attachment.file_id.trim() || !sameTopic ||
-          sent?.chat?.id !== Number(form.get("chat_id"))) {
+    if (options.expectedAttachments) {
+      const chatId = Number(form.get("chat_id")), topic = form.get("message_thread_id");
+      if (!results.every((item, index) => matchingTelegramAttachment(item, options.expectedAttachments[index], chatId, topic))) {
         throw unconfirmedUpload(new Error("Missing matching Telegram attachment receipt"), method);
       }
+      // Social-media history and bindings are written after recordSent also
+      // checks these message IDs against the operation's earlier chunks.
+      if (options.diagnosticId) return body.result;
     }
     if (options.expectedVideoReply) {
       const edited = body.result;
@@ -4598,6 +4607,12 @@ function unconfirmedUpload(error, method) {
     code: "TELEGRAM_UPLOAD_UNKNOWN", deliveryUnknown: true, method, status: error.status,
     transportCode: String(error.code || error.name || "unknown").slice(0, 64),
   });
+}
+
+function matchingTelegramAttachment(item, kind, chatId, topic) {
+  if (item.chat?.id !== chatId || (topic === null ? judgeThreadId(item) !== null : item.message_thread_id !== Number(topic))) return false;
+  const attachment = kind === "photo" ? (Array.isArray(item.photo) && item.photo.at(-1)) : item[kind];
+  return typeof attachment?.file_id === "string" && Boolean(attachment.file_id.trim());
 }
 
 async function withTelegramRetry(method, operation, {deadline = Infinity} = {}) {

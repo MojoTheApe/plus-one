@@ -243,6 +243,28 @@ test("legacy Threads previews and potentially truncated slides are readable by m
   }
 });
 
+test("unversioned Instaloader entries require proof that a fresh URL was a single-item publication", async t => {
+  const { verifiedMediaSource } = await import("../src/media-source.js");
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, "slide.jpg");
+  await fs.writeFile(filePath, "prepared historical bytes");
+  const cache = new MediaCache(path.join(directory, "cache"));
+  const cases = [[undefined, undefined], [undefined], ["sha256:original"], ["native:2488"],
+    ["publication:wrong"], ["publication:verified"]];
+  for (const [index, ids] of cases.entries()) {
+    const id = index === cases.length - 1 ? "verified" : "legacy" + index;
+    const url = "https://www.instagram.com/p/" + id + "/", source = verifiedMediaSource(url, { provider:"instaloader", id, owner:"fixture" });
+    const entry = await cache.put({ chatId:1, sourceMessageId:20 + index, sourceUrl:url, source,
+      files:ids.map(sourceItemId => ({filePath, mediaKind:"image", sourceItemId})) });
+    const old = await cache.read();
+    delete old.entries.find(item => item.id === entry.id).orderedMediaVersion;
+    await cache.write(old);
+    const fresh = await cache.forDelivery({chatId:1, sourceUrl:url});
+    assert.equal(Boolean(fresh?.complete), id === "verified", id);
+    assert.equal((await cache.get({chatId:1,messageId:20 + index})).files.length, ids.length);
+    assert.ok((await cache.forDelivery({chatId:1,entryId:entry.id})).complete);
+  }
+});
+
 test("TikTok video and photo aliases with the same ID cannot reuse a rendered clip as source slides", async t => {
   const { verifiedMediaSource } = await import("../src/media-source.js");
   const directory = await temporaryDirectory(t), filePath = path.join(directory, "rendered.mp4");

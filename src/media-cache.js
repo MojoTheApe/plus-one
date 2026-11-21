@@ -311,7 +311,15 @@ function reusablePublication(entry, sourceUrl) {
   // poster could look complete. Exact message/recovery lookups retain it.
   if (entry.source?.provider === "threads-page" || entry.source?.resolved?.kind === "photo") return false;
   if (entry.source?.provider === "tiktok-api") return entry.sourceFileCount === 1 && entry.manifest?.[0]?.mediaKind === "video";
-  return !(entry.source?.provider === "instaloader" && entry.manifest?.some(file => file.sourceItemId?.startsWith("native:")));
+  if (entry.source?.provider === "instaloader") {
+    // Old adapters could return a prefix of any length, including one slide.
+    // Only the native single-item marker proves that the publication itself
+    // was the sole original item. A hash or a missing child ID cannot do so.
+    const id = entry.source.resolved?.id;
+    return Boolean(id && entry.sourceFileCount === 1 && entry.manifest?.length === 1 &&
+      entry.manifest[0].sourceItemId === `publication:${id}`);
+  }
+  return true;
 }
 
 function hasReusableReceipts(entry) {

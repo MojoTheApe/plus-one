@@ -530,9 +530,9 @@ test('an interrupted album retry sends only files without acknowledged delivery'
   for(let i=0;i<11;i++){const file=path.join(f.root,`image-${i}.jpg`);await fs.writeFile(file,await photoBytes(i));files.push({filePath:file,mediaKind:'image',mimeType:'image/jpeg'});}
   const source=verifiedMediaSource('https://www.tiktok.com/@fixture/photo/123/',{provider:'tiktok-api',id:'123',owner:'fixture'});
   f.setDownloader(async()=>{downloads++;return {source,files};});
-  f.setUpload(async method=>{
+  f.setUpload(async (method,form)=>{
     uploads.push(method);
-    if(method==='sendMediaGroup')return new Response(JSON.stringify({ok:true,result:Array.from({length:10},(_,i)=>({message_id:2000+i}))}));
+    if(method==='sendMediaGroup')return Response.json({ok:true,result:Array.from({length:10},(_,i)=>photoReceipt(form,2000+i))});
     throw new Error('fetch failed');
   });
   await f.handle({message_id:500,text:'https://www.tiktok.com/@fixture/photo/123/'});
@@ -2516,3 +2516,53 @@ test('history-only media requests resolve hidden links and request the exact pub
   await f.handle({...request,message_id:703,text,entities:[{type:'text_link',offset:text.indexOf('другим'),length:6,url:urls[1]}]});
   assert.deepEqual(calls,[urls[1]]);
 });
+
+for (const invalid of ["duplicate", "missing", "document", "blank file_id", "wrong chat", "wrong topic", "wrong order", "previous chunk"]) {
+  test(`Telegram album rejects ${invalid} receipts without binding or resending the uncertain chunk`, async t => {
+    const f = await fixture(t), url = "https://www.tiktok.com/@fixture/photo/123/";
+    const source = verifiedMediaSource(url, { provider: "tiktok-api", id: "123", owner: "fixture" });
+    const photoPath = path.join(f.root, "photo.png");
+    await fs.writeFile(photoPath, await fixturePhoto);
+    const count = invalid === "previous chunk" ? 12 : 2;
+    const files = Array.from({ length: count }, () => ({ filePath: photoPath, mediaKind: "image", mimeType: "image/png" }));
+    if (invalid === "wrong order") {
+      const filePath = path.join(f.root, "clip.mp4");
+      execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=s=32x32:r=5", "-t", "0.4", "-c:v", "libx264", "-threads", "1", filePath]);
+      files[1] = { filePath, mediaKind: "video", mimeType: "video/mp4" };
+    }
+    f.setDownloader(async () => ({ source, files }));
+    let calls = 0;
+    f.setUpload(async (method, form) => {
+      assert.equal(method, "sendMediaGroup");
+      const offset = 2000 + 10 * calls++;
+      const items = JSON.parse(form.get("media")).map(({type}, i) => {
+        const item = photoReceipt(form, offset + i, `file-${i}`);
+        if (type === "video") { delete item.photo; item.video = { file_id: "video" }; }
+        return item;
+      });
+      if (invalid === "duplicate") items[1].message_id = items[0].message_id;
+      if (invalid === "missing") items.pop();
+      if (invalid === "document") { delete items[1].photo; items[1].document = { file_id: "document" }; }
+      if (invalid === "blank file_id") items[1].photo[0].file_id = " ";
+      if (invalid === "wrong chat") items[1].chat.id = -321;
+      if (invalid === "wrong topic") items[1].message_thread_id++;
+      if (invalid === "wrong order") items.reverse();
+      if (invalid === "previous chunk" && calls === 2) items[1].message_id = 2000;
+      return Response.json({ ok: true, result: items });
+    });
+    const update = { update_id: 411, message: { message_id: 51, date: Math.floor(Date.now() / 1000), chat: { id: -123, type: "supergroup", is_forum: true },
+      is_topic_message: true, message_thread_id: 9, from: { id: 88 }, text: url } };
+    await f.queue(update);
+    const [operation] = await new MediaOperations(path.join(f.root, "runtime/media.json")).read();
+    const confirmed = invalid === "previous chunk" ? 10 : 0;
+    assert.equal(operation.status, "unknown");
+    assert.equal(operation.deliveredFileCount || 0, confirmed);
+    assert.deepEqual(operation.sentMessageIds || [], Array.from({ length: confirmed }, (_, i) => 2000 + i));
+    const cache = new MediaCache(path.join(f.root, "runtime/media-cache"));
+    const saved = await cache.forDelivery({ chatId: -123, topicId: 9, entryId: operation.cacheId, botId: 77 });
+    assert.equal(saved.bindings.length, confirmed);
+    assert.equal(saved.receipts.length, confirmed);
+    assert.equal(calls, confirmed ? 2 : 1);
+    assert.deepEqual(await f.pending(), []);
+  });
+}
