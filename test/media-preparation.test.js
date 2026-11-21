@@ -68,6 +68,23 @@ test("a real oversized photograph is decoded and reduced before sending; a count
   await assert.rejects(prepareMediaForTelegram([{ filePath: counterfeit, mediaKind: "image", mimeType: "image/jpeg" }]));
 });
 
+test("a rejected JPEG is rebuilt without its embedded ICC profile", { skip: !available }, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "photo-profile-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, "original.jpg");
+  execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=96x64", "-frames:v", "1", "-threads", "1", filePath]);
+  const jpeg = await fs.readFile(filePath);
+  const profile = Buffer.concat([Buffer.from("ICC_PROFILE\0"), Buffer.from([1, 1]), Buffer.from("fixture profile payload")]);
+  const app2 = Buffer.from([0xff, 0xe2, 0, profile.length + 2]);
+  const input = Buffer.concat([jpeg.subarray(0, 2), app2, profile, jpeg.subarray(2)]);
+  await fs.writeFile(filePath, input);
+  const [file] = await prepareMediaForTelegram([{filePath, mediaKind:"image", mimeType:"image/jpeg"}], {photoOutputDir:root});
+  assert.equal(file.width, 96);
+  assert.equal(file.height, 64);
+  assert.ok(!(await fs.readFile(file.filePath)).includes(Buffer.from("ICC_PROFILE\0")));
+  assert.deepEqual(await fs.readFile(filePath), input);
+});
+
 test("extreme photograph geometry is padded into Telegram limits without cropping", { skip: !available }, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "photo-geometry-")); t.after(() => fs.rm(root, { recursive: true, force: true }));
   const filePath = path.join(root, "wide.png");

@@ -32,9 +32,11 @@ export async function prepareMediaForTelegram(files, { maxDurationSeconds = 300,
       const geometryAllowed = image.width + image.height <= 10000 && Math.max(image.width / image.height, image.height / image.width) <= 20;
       if (photoOutputDir || stat.size > telegramPhotoBudget || !geometryAllowed || !["mjpeg", "png"].includes(image.codec_name)) {
         const output = path.join(photoOutputDir || path.dirname(item.filePath), "telegram-photo-" + path.basename(item.filePath, path.extname(item.filePath)) + ".jpg");
+        // ICC profiles travel as frame side data even with map_metadata disabled.
+        const stripRejectedProfile = photoOutputDir ? ",sidedata=mode=delete:type=ICC_PROFILE" : "";
         // Pad extreme aspect ratios rather than cropping away source content.
         await execute(ffmpeg, ["-v", "error", "-y", "-threads", "1", "-protocol_whitelist", "file,pipe", "-i", item.filePath,
-          "-frames:v", "1", "-vf", "scale=w='min(2560,iw)':h='min(2560,ih)':force_original_aspect_ratio=decrease,pad=w='ceil(max(iw,ih/20)/2)*2':h='ceil(max(ih,iw/20)/2)*2':x=(ow-iw)/2:y=(oh-ih)/2:color=white",
+          "-frames:v", "1", "-vf", "scale=w='min(2560,iw)':h='min(2560,ih)':force_original_aspect_ratio=decrease,pad=w='ceil(max(iw,ih/20)/2)*2':h='ceil(max(ih,iw/20)/2)*2':x=(ow-iw)/2:y=(oh-ih)/2:color=white" + stripRejectedProfile,
           "-map_metadata", "-1", "-pix_fmt", "yuvj420p", "-flags:v", "+bitexact", "-q:v", "3", "-threads", "1", output], boundedOptions(30000));
         const checked = await probe(output), size = (await fs.stat(output)).size;
         if (!checked || checked.codec_name !== "mjpeg" || Number(checked.nb_read_frames) !== 1 || !(checked.width > 0 && checked.height > 0) ||
