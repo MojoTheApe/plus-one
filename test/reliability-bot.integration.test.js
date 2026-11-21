@@ -2240,6 +2240,94 @@ for (const phase of ['delete','edit','fallback']) {
   });
 }
 
+for (const [httpStatus, apiCode] of [[502,400], [504,429]]) {
+  for (const phase of ['opening','fallback']) {
+    test(`uncertain ${phase} sendMessage with HTTP ${httpStatus} and error_code ${apiCode} never creates another status`, async t => {
+      const f = await fixture(t), original = instagramUpdate(561);
+      let downloads = 0, snapshot;
+      f.setDownloader(async () => {
+        downloads++;
+        if (phase === 'opening') [snapshot] = await f.pending();
+        throw new Error('source timeout');
+      });
+      f.setStatus(async (method,payload) => {
+        assert.equal(method,'sendMessage');
+        if (phase === 'fallback' && payload.text === mediaPreparingText('uk')) {
+          return Response.json({ok:false,error_code:400},{status:400});
+        }
+        if (phase === 'fallback') [snapshot] = await f.pending();
+        return Response.json({ok:false,error_code:apiCode,parameters:{retry_after:60}},{status:httpStatus});
+      });
+      await f.queue(original);
+      assert.deepEqual(await f.pending(),[]);
+      assert.equal(downloads,1);
+      assert.ok(snapshot);
+      const sendsBeforeRestart = phase === 'opening' ? 1 : 2;
+      assert.equal(f.calls.filter(c => c.method === 'sendMessage').length,sendsBeforeRestart);
+      await fs.writeFile(path.join(f.root,'runtime/inbox.json'),JSON.stringify({version:1,offset:562,pending:[snapshot]}));
+      await f.restart();
+      await f.queue(original);
+      assert.deepEqual(await f.pending(),[]);
+      assert.equal(f.calls.filter(c => c.method === 'sendMessage').length,sendsBeforeRestart);
+      assert.equal(downloads,1);
+    });
+  }
+}
+
+test('confirmed opening 429 delays a fallback until its retry_after and an uncertain fallback stays claimed', async t => {
+  let now = Date.now();
+  t.mock.method(Date,'now',() => now);
+  const f = await fixture(t), original = instagramUpdate(562);
+  let sends = 0;
+  f.setDownloader(async () => { throw new Error('source timeout'); });
+  f.setStatus(async method => {
+    assert.equal(method,'sendMessage');
+    return ++sends === 1 ? telegramLimit(80) : Response.json({ok:false,error_code:429,parameters:{retry_after:125}},{status:504});
+  });
+  const [retained] = await f.queue(original);
+  assert.equal(sends,1);
+  assert.equal(retained.mediaRequest.finishRetryAt,now+80000);
+  await f.restart();
+  now += 79999; await f.queue(original); assert.equal(sends,1);
+  now++; await f.queue(original);
+  assert.equal(sends,2);
+  assert.deepEqual(await f.pending(),[]);
+});
+
+for (const method of ['deleteMessage','editMessageText']) {
+  test('conflicting Telegram error codes retry ' + method + ' only against the same known status', async t => {
+    let now = Date.now();
+    t.mock.method(Date,'now',() => now);
+    const f = await fixture(t), original = instagramUpdate(563);
+    const file = path.join(f.root,'ready.png'); await fs.writeFile(file,await photoBytes());
+    let downloads = 0;
+    f.setDownloader(async url => {
+      downloads++;
+      if (method === 'editMessageText') throw new Error('source timeout');
+      return {source:nativeExtractorSource(url,{extractor_key:'Instagram',id:'queuedpost'}),files:[{filePath:file,mediaKind:'image',mimeType:'image/png'}]};
+    });
+    const targets = [];
+    f.setStatus(async (actual,payload) => {
+      if (actual === 'sendMessage') return;
+      assert.equal(actual,method); targets.push(payload.message_id);
+      if (targets.length === 1) return Response.json({ok:false,error_code:400},{status:502});
+      if (targets.length === 2) return Response.json({ok:false,error_code:429},{status:400});
+    });
+    let [retained] = await f.queue(original);
+    const target = retained.mediaRequest.messageId;
+    await f.restart();
+    now = retained.mediaRequest.finishRetryAt;
+    [retained] = await f.queue(original);
+    now = retained.mediaRequest.finishRetryAt;
+    await f.queue(original);
+    assert.deepEqual(targets,[target,target,target]);
+    assert.deepEqual(await f.pending(),[]);
+    assert.equal(f.calls.filter(c => c.method === 'sendMessage').length,1);
+    assert.equal(f.calls.filter(c => c.method === 'sendPhoto').length,method === 'deleteMessage' ? 1 : 0);
+    assert.equal(downloads,1);
+  });
+}
+
 test('an unconfirmed status creation never suppresses media or creates another status on restart', async t => {
   const f = await fixture(t), original = instagramUpdate(565);
   f.setStatus(async method => { assert.equal(method,'sendMessage'); throw new Error('lost response'); });

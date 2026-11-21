@@ -2446,6 +2446,11 @@ async function saveRequestStatus(request) {
   if (Number.isSafeInteger(id)) await updateInbox.saveMediaRequest(id, request);
 }
 
+function telegramStatusRejection(error, method) {
+  return error.method === method && Number.isInteger(error.status) && error.status >= 400 && error.status < 500 &&
+    error.telegramErrorCode === error.status ? error.status : null;
+}
+
 async function openRequestStatus(message, urls, retry) {
   const context = behaviorContext.getStore();
   if (!context || context.mediaRequest || context.resumingMedia) return;
@@ -2481,8 +2486,8 @@ async function openRequestStatus(message, urls, retry) {
         sent.chat?.id === request.chatId && judgeThreadId(sent) === request.topicId &&
         (!sent.reply_to_message || sent.reply_to_message.message_id === message.message_id)) request.messageId = sent.message_id;
   } catch (error) {
-    request.rejected = error.telegramErrorCode >= 400 && error.telegramErrorCode < 500;
-    if (error.telegramErrorCode === 429 && error.retryAfterSeconds > 0) request.finishRetryAt = Date.now() + error.retryAfterSeconds * 1000;
+    request.rejectionCode = telegramStatusRejection(error, "sendMessage");
+    if (request.rejectionCode === 429 && error.retryAfterSeconds > 0) request.finishRetryAt = Date.now() + error.retryAfterSeconds * 1000;
     logError("media_status_unavailable", error, messageLogMeta(message));
   }
   await saveRequestStatus(request);
@@ -2518,7 +2523,7 @@ async function finishRequestStatus(message, outcome) {
   if (request.keepMedia || request.finishUntil <= Date.now()) return true;
   const text = request.failures.length && mediaRequestFailureText(request.failures, request.locale, request.total);
   const fallback = !request.messageId;
-  if (fallback && (!text || !request.rejected || request.fallbackClaimed)) return true;
+  if (fallback && (!text || !request.rejectionCode || request.fallbackClaimed)) return true;
   if (request.finishRetryAt > Date.now()) return { statusPending: true };
   if (fallback) request.fallbackClaimed = true;
   request.finalAttempt = (request.finalAttempt || 0) + 1;
@@ -2547,11 +2552,15 @@ async function finishRequestStatus(message, outcome) {
         .catch(error => logError("outgoing_history_failed", error, messageLogMeta(message)));
     } else if (await telegram("deleteMessage", target, { retry: false }) !== true) throw new Error("Telegram status deletion was unconfirmed");
   } catch (error) {
-    const canRetry = fallback ? error.telegramErrorCode === 429 : !isPermanentUpdateError(error);
+    const rejected = telegramStatusRejection(error, fallback ? "sendMessage" : text ? "editMessageText" : "deleteMessage");
+    // Editing or deleting a known id is safe after an uncertain response.
+    // A second sendMessage is safe only after Telegram expressly declined it.
+    const canRetry = rejected === 429 || (!fallback && rejected === null);
     if (canRetry && Number.isSafeInteger(behaviorContext.getStore()?.durableUpdateId) && Date.now() < request.finishUntil) {
       if (fallback) request.fallbackClaimed = false;
       const backoff = Math.min(300000, 5000 * 2 ** Math.min(6, request.finalAttempt - 1));
-      request.finishRetryAt = Math.min(request.finishUntil, Date.now() + Math.max(backoff, (error.retryAfterSeconds || 0) * 1000));
+      const wait = rejected === 429 ? error.retryAfterSeconds || 0 : 0;
+      request.finishRetryAt = Math.min(request.finishUntil, Date.now() + Math.max(backoff, wait * 1000));
       await saveRequestStatus(request);
       return { statusPending: true };
     }
