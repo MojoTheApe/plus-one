@@ -39,7 +39,7 @@ export function mediaReference(value) {
   } else return null;
   const canonicalHost = platform === "threads" ? "www.threads.com" : platform === "instagram" ? "www.instagram.com" : url.hostname;
   return { platform, kind, id, key: platform === "instagram" && kind === "story" ? instagramMediaCode(id) : id,
-    owner, url: `https://${canonicalHost}/${parts.join("/")}/` };
+    owner, url: `https://${canonicalHost}/${parts.join("/")}/${id ? "" : url.search}` };
 }
 
 // Request URLs may have different tracking parameters or post/reel aliases.

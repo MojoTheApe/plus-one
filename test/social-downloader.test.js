@@ -928,3 +928,20 @@ test("a declared TikTok slideshow is never replaced by an API video or a shorter
     assert.equal(requests, 1);
   }
 });
+
+test("the normal short-link resolver stops before a duplicate native fetch and still honors provider cooldown", async () => {
+  const original = "https://vt.tiktok.com/short/", canonical = "https://www.tiktok.com/@fixture/photo/123/";
+  const calls = [], resolved = [];
+  let limited = false;
+  const downloader = createSocialDownloader({ ...baseDeps(mockFs()), fetch: async (url, options) => {
+    calls.push(String(url)); assert.equal(options.redirect, "manual");
+    return new Response(null, { status: 302, headers: { location: canonical } });
+  }, execFileAsync: async () => assert.fail("Duplicate must never reach the extractor"),
+  journal: { sourceState: async () => limited ? { notBefore: Date.now() + 60000 } : {}, sourceResult: async () => {} } });
+  const options = { onResolved: async url => { resolved.push(url); return { duplicateOf: "owner" }; } };
+  assert.deepEqual(await downloader.download(original, options), { duplicateOf: "owner" });
+  limited = true;
+  await assert.rejects(downloader.download(original, options), { code: "SOCIAL_VIDEO_PROVIDER_COOLDOWN" });
+  assert.deepEqual(calls, [original]);
+  assert.deepEqual(resolved, [canonical]);
+});
