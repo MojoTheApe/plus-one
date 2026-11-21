@@ -2104,3 +2104,182 @@ for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'inter
     }
   });
 }
+
+function instagramUpdate(id, url = 'https://www.instagram.com/p/queuedpost/', topic = 9) {
+  return {
+    update_id: id,
+    message: {
+      message_id: id, date: Math.floor(Date.now() / 1000), text: url,
+      chat: { id: -123, type: 'supergroup', is_forum: true },
+      message_thread_id: topic, is_topic_message: true, from: { id: 88 },
+    },
+  };
+}
+
+test('Instagram resumes the original group post after a real 429 and restart, with no repeat prompts or duplicate attachment', async t => {
+  let time = Date.now();
+  t.mock.method(Date, 'now', () => time);
+  const f = await fixture(t);
+  const original = instagramUpdate(501);
+  let downloads = 0;
+  f.setDownloader(async () => {
+    downloads++;
+    throw Object.assign(new Error('HTTP Error 429: Too Many Requests'), { retryAfterSeconds: 125 });
+  });
+  await f.queue(original);
+  const operations = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  const [waiting] = await operations.read();
+  assert.equal(waiting.status, 'waiting_source');
+  assert.ok(waiting.sourceRetry.retryAt >= time + 125000);
+  assert.deepEqual((await f.pending()).map(u => u.update_id), [501]);
+  await f.queue(instagramUpdate(502, original.message.text + '?igsh=again'));
+  assert.equal(downloads, 1);
+  assert.deepEqual((await f.pending()).map(u => u.update_id), [501]);
+  assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 0);
+
+  time += 1000;
+  await f.restart();
+  const filePath = path.join(f.root, 'available.png');
+  await fs.writeFile(filePath, await photoBytes());
+  f.setDownloader(async url => {
+    downloads++;
+    assert.equal(url, original.message.text);
+    return {
+      source: nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'queuedpost' }),
+      files: [{ mediaKind: 'image', filePath, mimeType: 'image/png' }],
+    };
+  });
+  f.setUpload(async (method, form) => {
+    assert.equal(method, 'sendPhoto');
+    assert.equal(form.get('chat_id'), '-123');
+    assert.equal(form.get('reply_to_message_id'), '501');
+    assert.ok(form.get('photo') instanceof Blob);
+    return Response.json({ ok: true, result: { message_id: 901, photo: [{ file_id: 'queued-photo' }] } });
+  });
+  const [pending] = await f.pending();
+  time = waiting.sourceRetry.retryAt - 1;
+  await f.queue(pending);
+  assert.equal(downloads, 1);
+  time += 2;
+  await f.queue((await f.pending())[0]);
+  assert.deepEqual(await f.pending(), []);
+  assert.equal(downloads, 2);
+  assert.equal(f.calls.filter(c => c.method === 'sendPhoto').length, 1);
+  assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 0);
+  const [done] = await operations.read();
+  assert.equal(done.id, waiting.id);
+  assert.equal(done.topicId, 9);
+  assert.equal(done.status, 'done');
+  assert.deepEqual(done.sentMessageIds, [901]);
+});
+
+test('a confirmed Instagram cooldown waits without spending a source attempt and ends once when the wait expires', async t => {
+  let time = Date.now();
+  t.mock.method(Date, 'now', () => time);
+  const f = await fixture(t);
+  f.setDownloader(async () => {
+    throw Object.assign(new Error('Source request cooldown'), {
+      code: 'SOCIAL_VIDEO_PROVIDER_COOLDOWN', confirmedRateLimit: true, retryAfterSeconds: 60,
+    });
+  });
+  const initial = instagramUpdate(510);
+  await f.queue(initial);
+  const operations = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  const [waiting] = await operations.read();
+  assert.equal(waiting.status, 'waiting_source');
+  assert.equal(waiting.sourceRetry.attempts, 0);
+  assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 0);
+  time = waiting.sourceRetry.expiresAt + 1;
+  let callsAfterExpiry = 0;
+  f.setDownloader(async () => { callsAfterExpiry++; throw new Error('unexpected source request'); });
+  await f.queue((await f.pending())[0]);
+  assert.equal(callsAfterExpiry, 0);
+  assert.deepEqual(await f.pending(), []);
+  assert.equal((await operations.read())[0].status, 'failed');
+  const notices = f.calls.filter(c => c.method === 'sendMessage');
+  assert.equal(notices.length, 1);
+  assert.doesNotMatch(notices[0].payload.text, /Повтори через|Try again in/i);
+});
+
+test('Instagram login walls and ambiguous extractor messages never schedule an autonomous retrieval', async t => {
+  const f = await fixture(t);
+  for (const [i, error] of [
+    Object.assign(new Error('Login required'), { code: 'AUTH_REQUIRED' }),
+    new Error('Requested content is not available, rate-limit reached or login required'),
+  ].entries()) {
+    f.setDownloader(async () => { throw error; });
+    await f.queue(instagramUpdate(520 + i, 'https://www.instagram.com/p/inaccessible' + i + '/'));
+    assert.deepEqual(await f.pending(), []);
+  }
+  const operations = await new MediaOperations(path.join(f.root, 'runtime/media.json')).read();
+  assert.equal(operations.length, 2);
+  assert.ok(operations.every(operation => operation.status === 'failed'));
+  assert.equal(f.calls.filter(c => c.method === 'sendPhoto' || c.method === 'editMessageMedia').length, 0);
+});
+
+test('Instagram stops after three actual 429 responses and sends one final notice in the original topic', async t => {
+  let time = Date.now();
+  t.mock.method(Date, 'now', () => time);
+  const f = await fixture(t);
+  let attempts = 0;
+  f.setDownloader(async () => {
+    attempts++;
+    throw Object.assign(new Error('Too Many Requests'), { status: 429, retryAfterSeconds: 150 });
+  });
+  const initial = instagramUpdate(535);
+  await f.queue(initial);
+  const operations = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  for (let expected = 1; expected <= 2; expected++) {
+    const [waiting] = await operations.read();
+    assert.equal(waiting.status, 'waiting_source');
+    assert.equal(waiting.sourceRetry.attempts, expected);
+    time = waiting.sourceRetry.retryAt + 1;
+    await f.queue((await f.pending())[0]);
+  }
+  assert.equal(attempts, 3);
+  assert.deepEqual(await f.pending(), []);
+  assert.equal((await operations.read())[0].status, 'failed');
+  const notices = f.calls.filter(c => c.method === 'sendMessage');
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].payload.reply_to_message_id, 535);
+  assert.equal(notices[0].payload.message_thread_id, 9);
+});
+
+for (const phase of ['saved anchor', 'saved receipt']) {
+  test('a deferred video survives a restart after its ' + phase, async t => {
+    const f = await fixture(t);
+    const url = 'https://www.instagram.com/reel/anchored/';
+    const filePath = path.join(f.root, 'source.mp4');
+    execFileSync('ffmpeg', ['-v','error','-f','lavfi','-i','color=s=32x32:r=5','-t','0.4','-c:v','libx264','-threads','1',filePath]);
+    const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+    f.setDownloader(async () => ({
+      source: nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'anchored' }),
+      files: [{ filePath, mediaKind: 'video', mimeType: 'video/mp4' }],
+    }));
+    const targets = [];
+    f.setUpload(async (method, form) => {
+      assert.equal(method, 'editMessageMedia');
+      const id = Number(form.get('message_id'));
+      targets.push(id);
+      return Response.json({ ok: true, result: { chat: { id: -123 }, message_id: id, video: { file_id: 'known' } } });
+    });
+    await f.handle({ message_id: 500, text: url });
+    const [done] = await journal.read();
+    assert.equal(done.status, 'done');
+    const sourceRetry = { updateId: 505, retryAt: Date.now() - 1000, expiresAt: Date.now() + 120000, attempts: 1 };
+    const interrupted = { ...done, status: 'uploading', sourceRetry, failure: null };
+    if (phase === 'saved anchor') Object.assign(interrupted, {
+      deliveredFileCount: 0, sentMessageIds: [], videoEditAttempts: 0, videoEditPending: false, videoEditRequestId: null,
+    });
+    await journal.record(interrupted);
+    const retained = { ...instagramUpdate(500, url), update_id: 505, deferredMedia: { operationId: done.id, retryAt: sourceRetry.retryAt } };
+    await fs.writeFile(path.join(f.root, 'runtime/inbox.json'), JSON.stringify({ version: 1, offset: 506, pending: [retained] }));
+    await f.restart();
+    f.setDownloader(async () => { throw new Error('No new source retrieval should occur'); });
+    await f.queue((await f.pending())[0]);
+    assert.deepEqual(await f.pending(), []);
+    assert.equal((await journal.read())[0].status, 'done');
+    assert.equal(f.calls.filter(call => call.payload.text === 'Надсилаю…').length, 1);
+    assert.deepEqual(targets, phase === 'saved anchor' ? [done.videoReplyId, done.videoReplyId] : [done.videoReplyId]);
+  });
+}

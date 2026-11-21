@@ -739,3 +739,79 @@ test('the native video compatibility extractor receives the same dedicated sessi
   await fs.promises.rm(result.tempDir, { recursive: true, force: true });
   await assert.rejects(fs.promises.stat(cookies[0]), { code: 'ENOENT' });
 });
+
+test('a post whose photo adapter failed recovers a native image from the same yt-dlp metadata, retaining its publication key', async () => {
+  const url = 'https://www.instagram.com/p/BA/';
+  const asset = 'https://asset.cdninstagram.com/only-photo.jpg?signature=fixture';
+  const calls = [], fetched = [];
+  const result = await downloadSocialVideo(url, {
+    ...baseDeps(mockFs()), instagramScript: '/adapter.py',
+    execFileAsync: async (_cmd, args) => {
+      calls.push(args);
+      if (args.includes('/adapter.py')) return { stdout: JSON.stringify({ error: { code: 'SERVICE_ERROR' } }) };
+      assert.ok(args.includes('--dump-single-json') && args.includes('--plugin-dirs'));
+      return { stdout: JSON.stringify({ _type: 'playlist', entries: [], extractor_key: 'Instagram', id: 'BA',
+        instagram_single_photo: { publication_id: '64', url: asset } }) };
+    },
+    fetch: async (target, options) => {
+      fetched.push(target);
+      assert.equal(options.redirect, 'manual');
+      return mockResponse({ headers: { 'content-type': 'image/jpeg' } });
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(fetched, [asset]);
+  assert.equal(result.source.provider, 'yt-dlp');
+  assert.equal(result.source.resolved.id, 'BA');
+  assert.equal(result.files[0].mediaKind, 'image');
+  assert.equal(result.files[0].sourceItemId, 'publication:BA');
+  assert.equal(result.files[0].mimeType, 'image/jpeg');
+});
+
+test('the native photo path rejects a foreign post, an ambiguous collection, an outside CDN, a redirect and a non-image response', async () => {
+  const asset = 'https://asset.cdninstagram.com/native';
+  const base = { _type: 'playlist', entries: [], extractor_key: 'Instagram', id: 'BA', instagram_single_photo: { publication_id: '64', url: asset } };
+  for (const [info, request, status, mime, expected, fetchCount] of [
+    [base, 'https://www.instagram.com/p/BB/', 200, 'image/jpeg', 'MEDIA_SOURCE_MISMATCH', 0],
+    [{ ...base, entries: [{}] }, 'https://www.instagram.com/p/BA/', 200, 'image/jpeg', 'MEDIA_SOURCE_UNVERIFIED', 0],
+    [{ ...base, instagram_single_photo: { publication_id: 64, url: asset } }, 'https://www.instagram.com/p/BA/', 200, 'image/jpeg', 'MEDIA_SOURCE_UNVERIFIED', 0],
+    [{ ...base, instagram_single_photo: { publication_id: '64', url: 'https://outside.example/preview.jpg' } }, 'https://www.instagram.com/p/BA/', 200, 'image/jpeg', 'MEDIA_SOURCE_UNVERIFIED', 0],
+    [base, 'https://www.instagram.com/p/BA/', 302, 'text/html', 'MEDIA_SOURCE_UNVERIFIED', 1],
+    [base, 'https://www.instagram.com/p/BA/', 200, 'video/mp4', 'MEDIA_IMAGE_INVALID', 1],
+    [base, 'https://www.instagram.com/reel/BA/', 200, 'image/jpeg', 'MEDIA_SOURCE_UNVERIFIED', 0],
+  ]) {
+    let requests = 0;
+    await assert.rejects(downloadSocialVideoWithYtDlp(request, '/tmp/social', {
+      ...baseDeps(mockFs()), execFileAsync: async () => ({ stdout: JSON.stringify(info) }),
+      fetch: async () => { requests++; return mockResponse({ status, ok: status === 200, headers: { 'content-type': mime } }); },
+    }), { code: expected });
+    assert.equal(requests, fetchCount);
+  }
+});
+
+test('a restricted post stops on evidenced access denial, while generic adapter failures retain the native video route', async () => {
+  for (const [error, expectedCalls, plugin] of [
+    [{ code: 'RATE_LIMIT', status: 429 }, 1, false],
+    [{ code: 'AUTH_REQUIRED', status: 401 }, 1, false],
+    [{ code: 'UNAVAILABLE', status: 403 }, 1, false],
+    [{ code: 'AUTH_REQUIRED', adapterErrorType: 'PrivateProfileNotFollowedException' }, 1, false],
+    [{ code: 'AUTH_REQUIRED' }, 3, false],
+    [{ code: 'SERVICE_ERROR' }, 3, true],
+  ]) {
+    let calls = 0;
+    const result = downloadSocialVideo('https://www.instagram.com/p/BA/', {
+      ...baseDeps(mockFs()), instagramScript: '/adapter.py',
+      execFileAsync: async (_cmd, args) => {
+        calls++;
+        if (args.includes('/adapter.py')) return { stdout: JSON.stringify({ error }) };
+        if (args.includes('--load-info-json')) return { stdout: '' };
+        assert.equal(args.includes('--plugin-dirs'), plugin);
+        return { stdout: JSON.stringify({ extractor_key: 'Instagram', id: 'BA', title: 'video', duration: 1 }) };
+      },
+      findDownloadedVideo: async () => ({ filePath: '/tmp/social/video.mp4', size: 1 }),
+    });
+    if (expectedCalls === 1) await assert.rejects(result);
+    else assert.equal((await result).mediaKind, 'video');
+    assert.equal(calls, expectedCalls);
+  }
+});

@@ -71,10 +71,15 @@ are required. Private posts, login requirements, site blocks, quotas and file
 limits can prevent downloading. Previously saved disabled settings stay disabled.
 Instagram post/Reel aliases share one native-identity manifest adapter and the
 explicit optional session, also used by native single-video compatibility.
-Authenticated high-quality URLs must match the same native parent/child IDs.
+The native fallback can also deliver a verified single photo from a public
+Instagram post. Authenticated high-quality URLs must match the same native
+parent and child IDs.
 Do not equate an empty/blocked source response with an
 unsupported file format. Source backoff can apply across groups and survives a
-restart. Known verified files may be resent from Telegram without downloading.
+restart. When Instagram explicitly rate-limits a group link, keep the request
+queued and retry automatically within the recovery window. Participants can
+leave the original link in the chat. Known verified files may be resent from
+Telegram without downloading.
 Prepared/Telegram repeats bypass the fresh-source quota and source-failure wait;
 a stale reference needing a new source fetch must reserve source allowance.
 Completed local files last48 hours; complete verified Telegram reuse metadata may

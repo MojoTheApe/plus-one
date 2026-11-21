@@ -133,3 +133,53 @@ test('late video observation stays scoped to a unique revalidated source through
   await journal.observeVideoReply(quote,77);
   assert.equal((await journal.read()).find(op=>op.id===second.id).observedMessageId,undefined);
 });
+
+test('only explicit Instagram rate-limit evidence can mark a persisted provider pause for unattended recovery', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'confirmed-source-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'operations.json');
+  let time = Date.now();
+  const operations = new MediaOperations(file, () => time);
+  const primary = Object.assign(new Error('Login required'), { downloader: 'instaloader', code: 'AUTH_REQUIRED' });
+  const fallback = Object.assign(new Error('extractor failed'), {
+    stderr: 'ERROR: [Instagram] sample: Unable to download webpage: HTTP Error 429: Too Many Requests',
+  });
+  const failure = mediaFailure(socialDownloadFailure(primary, fallback, 'yt-dlp'));
+  assert.equal(failure.code, 'RATE_LIMIT');
+  assert.equal(failure.confirmedRateLimit, true);
+  await operations.sourceResult('instagram', failure);
+  assert.equal((await new MediaOperations(file).sourceState('instagram')).confirmedRateLimit, true);
+  await operations.sourceResult('instagram');
+  const limited = await operations.sourceState('instagram');
+  assert.equal(limited.confirmedRateLimit, true, 'a concurrent success cannot shorten an active limit');
+  time = limited.notBefore + 1;
+  await operations.sourceResult('instagram');
+  assert.equal((await operations.sourceState('instagram')).confirmedRateLimit, false);
+  for (const message of [
+    'Requested content is not available, rate-limit reached or login required',
+    'You have exceeded the rate-limit for accessing posts anonymously',
+    'Could not read https://www.instagram.com/p/429/',
+  ]) {
+    assert.notEqual(mediaFailure(new Error(message)).confirmedRateLimit, true);
+  }
+});
+
+test('the journal retains accepted Instagram waits when new submissions exceed capacity', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'waiting-capacity-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'media.json');
+  const journal = new MediaOperations(file);
+  const now = Date.now();
+  const pending = Array.from({ length: 64 }, (_, index) => ({
+    id: 'wait-' + index, status: 'waiting_source', updatedAt: now,
+    sourceRetry: { updateId: index + 1, retryAt: now + 60000, expiresAt: now + 1800000, attempts: 1 },
+  }));
+  const history = Array.from({ length: 236 }, (_, i) => ({ id: 'done-' + i, updatedAt: now, status: 'done' }));
+  await fs.writeFile(file, JSON.stringify({ version: 1, operations: [...history, ...pending] }));
+  const overflow = await journal.record({ ...pending[0], id: 'new-wait', sourceRetry: { ...pending[0].sourceRetry, updateId: 992 } });
+  assert.equal(overflow.failure.code, 'SOURCE_RETRY_CAPACITY');
+  assert.equal(overflow.status, 'failed');
+  const saved = await journal.read();
+  assert.equal(saved.length, 300);
+  assert.deepEqual(saved.filter(op => op.status === 'waiting_source').map(op => op.id), pending.map(op => op.id));
+});

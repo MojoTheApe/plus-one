@@ -9,8 +9,9 @@ from urllib.parse import urlparse
 
 
 class SourceWait(Exception):
-    def __init__(self, seconds=60):
+    def __init__(self, seconds=60, status=None):
         self.seconds = max(1, int(seconds))
+        self.status = status
 
 
 def explicit_http_status(message):
@@ -116,7 +117,7 @@ def resolve(url, max_items, session_file=None):
                 raise SourceWait(seconds)
 
         def handle_429(self, query_type):
-            raise SourceWait()
+            raise SourceWait(status=429)
 
     loader = instaloader.Instaloader(quiet=True, max_connection_attempts=1, request_timeout=15,
                                     rate_controller=BoundedRateController)
@@ -145,7 +146,7 @@ def main():
         name, message = type(error).__name__, str(error)
         status, code = None, "UNKNOWN"
         if isinstance(error, SourceWait):
-            code = "RATE_LIMIT"
+            status, code = error.status, "RATE_LIMIT"
         elif name == "TooManyRequestsException":
             status, code = 429, "RATE_LIMIT"
         elif name == "QueryReturnedNotFoundException":
