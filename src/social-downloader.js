@@ -50,7 +50,8 @@ async function downloadWithinDeadline(url, deps, options = {}) {
   const provider = mediaReference(url)?.platform;
   const state = await deps.journal?.sourceState(provider);
   if (state?.notBefore > Date.now()) throw Object.assign(new Error("Source request cooldown"), {
-    code: "SOCIAL_VIDEO_PROVIDER_COOLDOWN", retryAfterSeconds: Math.ceil((state.notBefore - Date.now()) / 1000) });
+    code: "SOCIAL_VIDEO_PROVIDER_COOLDOWN", confirmedRateLimit: state.confirmedRateLimit,
+    retryAfterSeconds: Math.ceil((state.notBefore - Date.now()) / 1000) });
   const controller = new AbortController();
   const budgetMs = Math.max(1, Math.min(deps.totalTimeoutMs || 90000, (options.deadline || Infinity) - Date.now()));
   const deadline = Date.now() + budgetMs;

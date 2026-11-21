@@ -74,7 +74,10 @@ explicit optional session, also used by native single-video compatibility.
 Authenticated high-quality URLs must match the same native parent/child IDs.
 Do not equate an empty/blocked source response with an
 unsupported file format. Source backoff can apply across groups and survives a
-restart. Known verified files may be resent from Telegram without downloading.
+restart. When Instagram explicitly rate-limits a group link, keep the request
+queued and retry automatically within the recovery window. Participants can
+leave the original link in the chat. Known verified files may be resent from
+Telegram without downloading.
 Prepared/Telegram repeats bypass the fresh-source quota and source-failure wait;
 a stale reference needing a new source fetch must reserve source allowance.
 Completed local files last48 hours; complete verified Telegram reuse metadata may
