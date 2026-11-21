@@ -1,12 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
-import { assertVerifiedMediaSource, mediaPublicationKey, mediaReference } from "./media-source.js";
+import { createHash, randomUUID } from "node:crypto";
+import { assertVerifiedMediaSource, mediaPublicationKey, mediaReference, sourceIdentityError } from "./media-source.js";
 import { conversationThreadId } from "./conversation-store.js";
 import { say } from "./helpers.js";
 
 const durationText = n => { const seconds = Math.ceil(n); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; };
-const activeSourceRetry = op => op?.sourceRetry && ["waiting_source", "running", "prepared", "uploading"].includes(op.status);
+const activeSourceRetry = op => !op?.duplicateOf && op?.sourceRetry && ["waiting_source", "running", "prepared", "uploading"].includes(op.status);
 function limitedInstagramFallback(causes) {
   if (causes?.length === 2 && causes[0].provider === "instaloader" && causes[0].code === "AUTH_REQUIRED" &&
       causes[1].provider === "yt-dlp" && causes[1].code === "RATE_LIMIT" && causes[1].retryable && !causes[1].fallbackDisabled) return causes[1];
@@ -103,6 +103,9 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
     reason = "Точну причину поки не визначено. Діагностику збережено для перевірки; спробуй інше публічне посилання або надішли файл.";
   }
   return { code, retryable, reason, stage, status: status || null,
+    ...(stage === "upload" && ["sendPhoto", "sendVideo", "sendMediaGroup", "sendDocument", "editMessageMedia"].includes(error?.method) &&
+      Number.isInteger(status) && status >= 400 && status < 500 && status !== 429 && error.telegramErrorCode === status
+      ? { telegramRejected: true } : {}),
     ...(code === "RATE_LIMIT" && (rateLimited || error.confirmedRateLimit === true) ? { confirmedRateLimit: true } : {}),
     ...(Number.isFinite(error?.retryAfterSeconds) ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
     ...(code === "DURATION_LIMIT" ? { maxDurationSeconds } : {}),
@@ -235,16 +238,69 @@ export class MediaOperations {
   }
   async coalescedPublication(chatId, topicId, url, updateId) {
     const key = mediaPublicationKey(url);
-    return (await this.read()).find(op => op.sourceRetry && op.chatId === chatId &&
+    return (await this.read()).find(op => !op.duplicateOf && op.sourceRetry && op.chatId === chatId &&
       (op.topicId ?? op.threadId ?? null) === topicId && mediaPublicationKey(op.url) === key &&
       (activeSourceRetry(op) ||
         (updateId >= op.sourceRetry.updateId && updateId <= op.sourceRetry.throughUpdateId)));
   }
-  async record(operation, { beginUpload = false } = {}) {
+  async coalesceResolvedLink(id, resolvedUrl) {
+    return this.change(state => {
+      const current = state.operations.find(op => op.id === id);
+      const target = mediaReference(resolvedUrl);
+      if (!current || !target?.id || target.platform !== mediaReference(current.url)?.platform) return false;
+      if (current.source?.status === "verified" && !verifiedTargetMatches(current, target)) {
+        throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", current.source.provider);
+      }
+      // A first-party redirect identifies the link destination even if its
+      // media request later fails. It cannot certify bytes or a delivery.
+      current.resolvedLink = target.url;
+      return this.coalesceVerifiedTarget(state, current, target) || null;
+    });
+  }
+  coalesceVerifiedTarget(state, entry, target) {
+    if (!Number.isSafeInteger(entry.sourceMessageId)) return false;
+    const owner = state.operations.find(op => siblingOperation(op, entry) && verifiedTargetMatches(op, target));
+    if (!owner) return false;
+    rememberAlias(owner, entry);
+    owner.updatedAt = this.now();
+    const earlier = state.operations.find(op => op.id === entry.id);
+    if (earlier && (["uploading", "unknown"].includes(earlier.status) || earlier.cacheId || earlier.sentMessageId || earlier.sentMessageIds?.length || earlier.deliveredFileCount ||
+        earlier.observedMessageId || earlier.videoReplyId || earlier.priorUploadFailure)) {
+      // Keep any prior receipts or uncertainty from older deliveries. A
+      // sibling with those effects cannot be submitted a second time.
+      earlier.duplicateOf = owner.id;
+    } else {
+      state.operations = state.operations.filter(op => op.id !== entry.id);
+    }
+    return { duplicateOf: owner.id };
+  }
+  async record(operation, { beginUpload = false, claimPublication = false } = {}) {
     return this.change(state => {
       const all = state.operations;
       const previous = all.find(op => op.id === operation.id);
       const entry = { ...previous, ...operation, id: operation.id || randomUUID().slice(0, 8), updatedAt: this.now() };
+      if (previous?.duplicateOf) return { duplicateOf: previous.duplicateOf };
+      // Another sibling can attach a URL after this caller read the owner.
+      if (previous?.publicationAliases) entry.publicationAliases = previous.publicationAliases;
+      if (claimPublication) {
+        const source = assertVerifiedMediaSource(entry.source, entry.url);
+        if (previous?.source?.status === "verified" && !verifiedTargetMatches(previous, source.resolved)) {
+          throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", source.provider);
+        }
+        const duplicate = this.coalesceVerifiedTarget(state, entry, source.resolved);
+        if (duplicate) return duplicate;
+        for (const earlier of all) {
+          if (!siblingOperation(earlier, entry) || earlier.source?.status === "verified" ||
+              !["failed", "waiting_source", "running"].includes(earlier.status) || earlier.priorUploadFailure ||
+              earlier.sentMessageIds?.length || earlier.videoReplyId || earlier.deliveredFileCount || earlier.observedMessageId) continue;
+          const knownTarget = mediaReference(earlier.resolvedLink || earlier.url);
+          if (!samePublicationTarget(knownTarget, source.resolved)) continue;
+          // Preserve a real failed attempt in history. The verified owner now
+          // determines the result for this URL and any pending source retry.
+          earlier.duplicateOf = entry.id;
+          rememberAlias(entry, earlier);
+        }
+      }
       if (entry.status === "waiting_source" && !activeSourceRetry(previous) && all.filter(activeSourceRetry).length >= 64) {
         entry.status = "failed";
         entry.failure = { code: "SOURCE_RETRY_CAPACITY", stage: "download", retryable: true };
@@ -294,7 +350,7 @@ export class MediaOperations {
     if (!permalink?.id) return;
     await this.change(state => {
       const found = state.operations.filter(op => {
-        if (op.chatId !== message.chat.id || (op.topicId ?? op.threadId ?? null) !== topicId ||
+        if (op.duplicateOf || op.chatId !== message.chat.id || (op.topicId ?? op.threadId ?? null) !== topicId ||
             !Number.isSafeInteger(op.sourceMessageId) || op.sourceMessageId >= video.message_id || !op.source) return false;
         try {
           const checked = assertVerifiedMediaSource(op.source, op.url);
@@ -312,17 +368,15 @@ export class MediaOperations {
     });
   }
   async forSourceMessage(message, topicId, url) {
-    const key = mediaPublicationKey(url);
-    return (await this.read()).find(op => String(op.chatId) === String(message.chat.id) &&
+    return (await this.read()).find(op => !op.duplicateOf && String(op.chatId) === String(message.chat.id) &&
       (op.topicId ?? op.threadId ?? null) === topicId && op.sourceMessageId === message.message_id &&
-      mediaPublicationKey(op.url) === key);
+      operationMatchesUrl(op, url));
   }
   async candidates(message, allowLatest = false, scope = {}) {
     const chatId = scope.chatId ?? message.chat.id;
     const topicId = scope.topicId !== undefined ? scope.topicId : message.is_topic_message === true ? message.message_thread_id ?? null : null;
-    const key = scope.url && mediaPublicationKey(scope.url);
-    const all = (await this.read()).filter(op => String(op.chatId) === String(chatId) && (op.topicId ?? op.threadId ?? null) === topicId &&
-      (!key || mediaPublicationKey(op.url) === key));
+    const all = (await this.read()).filter(op => !op.duplicateOf && String(op.chatId) === String(chatId) && (op.topicId ?? op.threadId ?? null) === topicId &&
+      (!scope.url || operationMatchesUrl(op, scope.url)));
     if (scope.resumeRequest) {
       const previous = all.find(op => op.lastRequest?.messageId === message.message_id && op.sourceMessageId !== message.message_id);
       if (previous) return [previous];
@@ -353,7 +407,7 @@ export class MediaOperations {
       (operation.topicId ?? operation.threadId ?? null) === topicId && operationReferences(operation).every(id => id < message.message_id) &&
       operationReferences(operation).some(id => references.has(id)))
       .slice(0, 4).map(operation => ({ id: operation.id, sourceMessageId: operation.sourceMessageId,
-        trigger: operation.trigger || null, lastRequest: operation.lastRequest || null, requestedUrl: mediaReference(operation.url)?.url || null,
+        trigger: operation.trigger || null, lastRequest: operation.lastRequest || null, requestedUrl: mediaReference(operation.url)?.url.split("?")[0] || null,
         sourceVerification: operation.source?.status || "unverified-legacy", verifiedSource: operation.source?.status === "verified" ? operation.source.resolved : null,
         downloader: operation.downloader || operation.source?.provider || "not-recorded", deliveryRoute: operation.deliveryRoute || "not-recorded", attempts: operation.attempts || [],
         status: operation.status, observedMessageId: operation.observedMessageId, sentMessageIds: operation.sentMessageIds || [], deliveredFileCount: operation.deliveredFileCount || 0,
@@ -365,4 +419,40 @@ function operationReferences(operation) {
   if (!operation) return [];
   return [operation.sourceMessageId, operation.lastRequest?.messageId, operation.trigger?.messageId, operation.errorMessageId, operation.videoReplyId, operation.sentMessageId, operation.observedMessageId,
     ...(operation.sentMessageIds || []), ...(operation.referenceMessageIds || [])].filter(Number.isSafeInteger);
+}
+
+function verifiedTargetMatches(operation, target) {
+  if (!target?.id || operation.source?.status !== "verified") return false;
+  try {
+    const request = mediaReference(operation.url);
+    // Older wrappers stored the original URL in the operation, but omitted
+    // its query from the source record. Its certified native result can still
+    // be compared to an independently resolved/verified publication.
+    const legacyUrl = !request?.id && request?.url.includes("?") && request.url.split("?")[0] === operation.source.requested?.url;
+    const { resolved } = assertVerifiedMediaSource(operation.source, legacyUrl ? operation.source.requested.url : operation.url);
+    return samePublicationTarget(resolved, target);
+  } catch { return false; }
+}
+
+function samePublicationTarget(a, b) {
+  return Boolean(a?.id && b?.id && mediaPublicationKey(a.url) === mediaPublicationKey(b.url) &&
+    (!a.owner || !b.owner || a.owner === b.owner));
+}
+
+function siblingOperation(op, entry) {
+  return op.id !== entry.id && !op.duplicateOf && op.sourceMessageId === entry.sourceMessageId &&
+    Number.isSafeInteger(entry.sourceMessageId) && String(op.chatId) === String(entry.chatId) &&
+    (op.topicId ?? op.threadId ?? null) === (entry.topicId ?? entry.threadId ?? null);
+}
+
+function rememberAlias(owner, sibling) {
+  const alias = createHash("sha256").update(mediaPublicationKey(sibling.url)).digest("base64url");
+  owner.publicationAliases = [...new Set([...(owner.publicationAliases || []), alias])].slice(-300);
+}
+
+function operationMatchesUrl(operation, url) {
+  const key = mediaPublicationKey(url);
+  return mediaPublicationKey(operation.url) === key ||
+    (operation.publicationAliases?.length && operation.publicationAliases.includes(createHash("sha256").update(key).digest("base64url"))) ||
+    verifiedTargetMatches(operation, mediaReference(url));
 }

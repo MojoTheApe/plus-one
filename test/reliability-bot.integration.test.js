@@ -11,6 +11,7 @@ import { featureTurnFixture } from "../test-support/setup-model-fixture.mjs";
 import { nativeExtractorSource, verifiedMediaSource } from "../src/media-source.js";
 import { MediaCache } from "../src/media-cache.js";
 import { MediaOperations } from "../src/media-operations.js";
+import { mediaPreparingText } from "../src/media-request-text.js";
 import { ConversationStore } from "../src/conversation-store.js";
 const fixturePhoto = fs.readFile(path.resolve("test-support/media-photo.png"));
 async function photoBytes(marker = 0) { return Buffer.concat([await fixturePhoto, Buffer.from([marker])]); }
@@ -42,7 +43,7 @@ async function fixture(t, profile = "legacy", owner, configure = async () => {},
   let setupTurn = async input => ({ intent: input.kind === "menu" ? "setup" : "answer" });
   Backend.prototype.classify = async args => { classified.push(args); return JSON.stringify(args.schemaFile.endsWith("setup-turn.schema.json") ? {...featureTurnFixture(JSON.parse(args.prompt)),...await setupTurn(JSON.parse(args.prompt))} : languageDecision); };
   Backend.prototype.ask = async args => { prompts.push(args.prompt); if (answerError) throw answerError; if (answerFn) return answerFn(args); return { text: "Знайшов відповідь за назвою.", searchStatus: { executed: searchSucceeded, succeeded: searchSucceeded, failures: 0 } }; };
-  let nextMessage = 1000, memberStatus = "administrator", memberLookup = null, uploadFn = null;
+  let nextMessage = 1000, memberStatus = "administrator", memberLookup = null, uploadFn = null, statusFn = null;
   globalThis.fetch = async (input, options = {}) => {
     const url = new URL(String(input)); assert.equal(url.hostname, "api.telegram.org", "Only mocked Telegram calls");
     if(url.pathname.startsWith("/file/"))return new Response(new Uint8Array([1,2,3]));
@@ -50,6 +51,16 @@ async function fixture(t, profile = "legacy", owner, configure = async () => {},
     const payload = multipart ? Object.fromEntries(options.body.entries()) : JSON.parse(options.body || "{}");
     assert.notEqual(method, "getUpdates"); calls.push({ method, payload });
     if (multipart && uploadFn) return uploadFn(method, options.body);
+    if (statusFn && (payload.disable_notification || ["editMessageText","deleteMessage"].includes(method))) {
+      const response = await statusFn(method, payload);
+      if (response) return response;
+    }
+    if (method === "deleteMessage") return Response.json({ ok:true, result:true });
+    if (method === "editMessageText" && !payload.reply_markup) return Response.json({ ok:true, result:{
+      message_id:payload.message_id, chat:{id:payload.chat_id}, text:payload.text } });
+    if (method === "sendMessage" && payload.disable_notification) return Response.json({ ok:true, result:{
+      message_id:nextMessage++, chat:{id:payload.chat_id}, reply_to_message:{message_id:payload.reply_to_message_id},
+      ...(payload.message_thread_id ? {message_thread_id:payload.message_thread_id,is_topic_message:true} : {}) } });
     const result = method === "getStickerSet" ? { name: payload.name, sticker_type: "regular" } : method === "getChatMember" ? (memberLookup ? memberLookup(payload) : { status: memberStatus }) : method === "getFile" ? {file_path:"photos/fixture.jpg",file_size:3} : method === "sendPhoto" ? photoReceipt(options.body, nextMessage++) : { message_id: nextMessage++ };
     assert.ok(["getChatMember", "sendChatAction", "sendMessage", "getFile", "sendAnimation", "sendPhoto", "sendVideo", "sendMediaGroup", "getStickerSet", "getChatAdministrators", "answerCallbackQuery", "editMessageText", "banChatMember", "unbanChatMember"].includes(method), method);
     return new Response(JSON.stringify({ ok: true, result }));
@@ -74,7 +85,7 @@ async function fixture(t, profile = "legacy", owner, configure = async () => {},
   t.after(() => app.closeSetup());
   let id = 10;
   return { root, calls, prompts, classified, update: update => app.handleUpdate(update), queue: update => app.queued(update), enqueue:update=>app.enqueue(update), drainText:()=>app.drainText(), drainAll:()=>app.drainAll(), pending:()=>app.pending(), setUpload:fn=>{uploadFn=fn;}, setCallback: fn => app.setCallback(fn), setSourceVerifier:fn=>app.setSourceVerifier(fn), restart: async () => { app.closeSetup(); app = await import(root + "/src/bot.mjs?restart=" + Date.now()); await app.init(); }, setDownloader: fn => app.setDownloader(fn), setTranscriber: fn => app.setTranscriber(fn), setMediaNow: fn => app.setMediaNow(fn), setLanguage:value=>{languageDecision=value;},
-    setAnswer: fn => { answerFn = fn; }, setSetupTurn: fn => { setupTurn = fn; }, setMemberStatus: value => { memberStatus = value; }, setMemberLookup: fn => { memberLookup = fn; }, setError: error => { answerError = error; }, setSearch: value => { searchSucceeded = value; },
+    setStatus: fn => { statusFn = fn; }, setAnswer: fn => { answerFn = fn; }, setSetupTurn: fn => { setupTurn = fn; }, setMemberStatus: value => { memberStatus = value; }, setMemberLookup: fn => { memberLookup = fn; }, setError: error => { answerError = error; }, setSearch: value => { searchSucceeded = value; },
     handle: extra => app.handleUpdate({ update_id: id, message: { message_id: nextMessage++, date: Math.floor(Date.now()/1000), chat: { id: -123, type: "supergroup", is_forum:true }, is_topic_message:true, from: { id: 88, username: "Fixture" }, message_thread_id: 9, ...extra } }) };
 }
 
@@ -247,7 +258,7 @@ test('an unconfirmed upload is not retried automatically; an explicit retry uses
   let journal=JSON.parse(await fs.readFile(f.root+'/runtime/media.json'));
   assert.equal(journal.operations[0].status,'unknown');assert.equal(journal.operations[0].failure.code,'UPLOAD_UNKNOWN');
   assert.equal(uploads,1);assert.equal(downloads,1);
-  const notice=f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text;
+  const notice=f.calls.filter(call=>call.method==='editMessageText').at(-1).payload.text;
   assert.match(notice,/Якщо файлу немає/);
   await f.restart();f.setMediaNow(()=>Date.now()+31000);
   f.setUpload(async(_method, form)=>{uploads++;return Response.json({ok:true,result:photoReceipt(form,1900)});});
@@ -343,7 +354,7 @@ test('one story cannot send three unverified images or cache them as its verifie
   f.setDownloader(async()=>({files,title:'Unbound provider images'}));
   await f.handle({message_id:500,text:'https://www.instagram.com/stories/fixture/64/'});
   assert.equal(f.calls.filter(call=>['sendPhoto','sendVideo','editMessageMedia','sendMediaGroup','sendDocument'].includes(call.method)).length,0);
-  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/джерело файлу/);
+  assert.match(f.calls.filter(call=>call.method==='editMessageText').at(-1).payload.text,/джерело файлу/);
   assert.deepEqual(JSON.parse(await fs.readFile(f.root+'/runtime/media-cache/index.json')).entries, []);
   const operation=JSON.parse(await fs.readFile(f.root+'/runtime/media.json')).operations[0];
   assert.equal(operation.status,'failed');assert.equal(operation.source.status,'unverified');
@@ -385,7 +396,7 @@ test('a forged verified flag cannot hide mismatched native identity',async t=>{
   f.setDownloader(async()=>({source,files:[{filePath,mediaKind:'image',mimeType:'image/jpeg'}]}));
   await f.handle({text:'https://www.instagram.com/stories/fixture/64/'});
   assert.equal(f.calls.filter(call=>call.method==='sendPhoto').length,0);
-  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/іншої публікації/);
+  assert.match(f.calls.filter(call=>call.method==='editMessageText').at(-1).payload.text,/іншої публікації/);
 });
 
 test('a verified carousel binds each Telegram photo to its own file, including after restart',async t=>{
@@ -427,7 +438,7 @@ test('legacy unverified prepared files cannot authorize a redelivery',async t=>{
   let downloads=0;f.setDownloader(async()=>{downloads++;return {files:[{filePath,mediaKind:'image',mimeType:'image/jpeg'}]};});
   await f.handle({message_id:1500,text:'Repeat',reply_to_message:{message_id:600,from:{id:77,is_bot:true},text:'Previous upload outcome unknown'}});
   assert.equal(downloads,1);assert.equal(f.calls.filter(call=>call.method==='sendPhoto').length,0);
-  assert.match(f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text,/джерело файлу/);
+  assert.match(f.calls.filter(call=>call.method==='editMessageText').at(-1).payload.text,/джерело файлу/);
 });
 
 test('legacy album selection reads only its exact Telegram file and never substitutes an unavailable historical file',async t=>{
@@ -616,8 +627,8 @@ test("repeat re-executes the saved original media URL and never calls conversati
   const f = await fixture(t), urls = [];
   f.setDownloader(async url => { urls.push(url); throw new Error("request timeout"); });
   await f.handle({ text: "https://www.instagram.com/reel/fixture/" });
-  const error = f.calls.filter(c => c.method === "sendMessage").at(-1);
-  assert.match(error.payload.text, /Час очікування минув/);
+  const error = f.calls.filter(c => c.method === "editMessageText").at(-1);
+  assert.match(error.payload.text, /вчасно отримати файл із Instagram/);
   const journal = JSON.parse(await fs.readFile(f.root + "/runtime/media.json"));
   f.setMediaNow(()=>Date.now()+31000);
   await f.handle({ text: "Repeat", reply_to_message: { message_id: journal.operations[0].errorMessageId, from: { id: 77 }, text: error.payload.text } });
@@ -731,7 +742,7 @@ test("a natural retry resolves an ordinary reply thread and executes the origina
     reply_to_message:{message_id:operation.errorMessageId,from:{id:77},text:'Не вдалося завантажити'}});
   assert.deepEqual(urls,['https://www.instagram.com/reel/natural/','https://www.instagram.com/reel/natural/']);
   assert.equal(f.prompts.length,1);
-  assert.match(f.calls.at(-1).payload.text,/Час очікування минув/);
+  assert.match(f.calls.at(-1).payload.text,/вчасно отримати файл із Instagram/);
 });
 
 test("a false Ukrainian refusal is checked and repaired while genuine Russian is refused",async t=>{
@@ -822,7 +833,7 @@ test('a file request uses the URL in the current message without an explicit tar
   f.setAnswer(async()=>({text:JSON.stringify({action:'download',language:'uk'}),searchStatus:{succeeded:false}}));
   await f.handle({text:'@ReliabilityTestBot надішли файлом https://www.instagram.com/reel/current/'});
   assert.deepEqual(urls,['https://www.instagram.com/reel/current/']);
-  assert.match(f.calls.at(-1).payload.text,/Час очікування минув/);
+  assert.match(f.calls.at(-1).payload.text,/вчасно отримати файл із Instagram/);
 });
 
 test('media analysis retains scoped discussion and a live history ticket across the action handoff',async t=>{
@@ -1875,12 +1886,12 @@ test('source quota allows cached repeats, but blocks both new URLs and stale-ref
   await f.handle({ message_id: 501, text: url });
   assert.equal(downloads, 1); assert.equal(f.calls.filter(item => item.method === 'sendPhoto').length, 2);
   await f.handle({ message_id: 502, text: 'https://www.instagram.com/reel/new-quota/' });
-  assert.match(f.calls.filter(item => item.method === 'sendMessage').at(-1).payload.text, /Повтори через [0-9]+ с/);
+  assert.match(f.calls.filter(item => item.method === 'editMessageText').at(-1).payload.text, /(?:ліміт завантажень|тимчасово)/);
   const cache = JSON.parse(await fs.readFile(f.root + '/runtime/media-cache/index.json'));
   for (const entry of cache.entries) for (const file of entry.files) await fs.rm(path.join(f.root, 'runtime/media-cache', entry.id, file.name), { force: true });
   stale = true; await f.handle({ message_id: 503, text: url });
   assert.equal(downloads, 1);
-  assert.match(f.calls.filter(item => item.method === 'sendMessage').at(-1).payload.text, /Повтори через [0-9]+ с/);
+  assert.match(f.calls.filter(item => item.method === 'editMessageText').at(-1).payload.text, /(?:ліміт завантажень|тимчасово)/);
 });
 
 test('source-failure cooldown still permits a complete prepared resend', async t => {
@@ -2015,7 +2026,7 @@ for (const semantic of [false, true]) test(`mixed Instagram limits permit one ${
   f.setAnswer(async () => ({ text: JSON.stringify({ action:'download', language:'uk', targetMessageId }), searchStatus:{ succeeded:false } }));
   const request = { text: semantic ? '@ReliabilityTestBot спробуй отримати цей ролик знову' : 'повтори', reply_to_message:{ message_id:500, from:{id:88}, text:url } };
   await f.handle({ ...request, message_id:1500 });
-  assert.equal(downloads,0); assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/Повтори через [0-9]+ с/);
+  assert.equal(downloads,0); assert.match(f.calls.filter(c=>c.method==='editMessageText').at(-1).payload.text,/тимчасово/);
   assert.equal((await journal.read())[0].updatedAt, op.updatedAt);
   const saved = (await journal.read())[0];
   const noticeId = saved.referenceMessageIds.at(-1);
@@ -2048,7 +2059,7 @@ test('a reply to a late bot video prevents an explicit duplicate across restart 
   const [saved]=await journal.read(); assert.equal(saved.id,operation.id); assert.equal(saved.status,'unknown');
   assert.equal(saved.observedMessageId,520); assert.equal(saved.sentMessageIds,undefined);
   assert.equal(downloads,0); assert.equal(f.calls.filter(c=>c.method==='sendVideo').length,0);
-  assert.match(f.calls.filter(c=>c.method==='sendMessage').at(-1).payload.text,/520/);
+  assert.match(f.calls.filter(c=>c.method==='editMessageText').at(-1).payload.text,/520/);
 });
 
 test('a video seen while a retry is preparing prevents its Telegram submission', async t => {
@@ -2077,7 +2088,7 @@ test('a video seen while a retry is preparing prevents its Telegram submission',
   assert.equal(f.calls.filter(call => call.method === 'sendVideo').length, 0);
   const [op] = await journal.read();
   assert.equal(op.observedMessageId, 520); assert.equal(op.status, 'unknown'); assert.equal(op.failure.status,504);
-  assert.match(f.calls.filter(call => call.method === 'sendMessage').at(-1).payload.text,/520/);
+  assert.match(f.calls.filter(call => call.method === 'editMessageText').at(-1).payload.text,/520/);
 });
 
 for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'interrupted', 'deadline', 'wrong-receipts']) {
@@ -2120,7 +2131,7 @@ for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'inter
     assert.equal(downloads,1);
     assert.equal(targets.length,['acknowledged','deadline'].includes(outcome)?1:2);
     assert.equal(new Set(targets).size,1);
-    assert.equal(f.calls.filter(call=>call.payload.text==='Надсилаю…').length,1);
+    assert.equal(f.calls.filter(call=>call.payload.text===mediaPreparingText('uk')).length,1);
     const unknown = ['wrong-receipts','interrupted','unchanged','deadline'].includes(outcome);
     assert.equal(op.status, unknown ? 'unknown' : 'done');
     assert.deepEqual(op.sentMessageIds || [], unknown ? [] : [targets[0]]);
@@ -2145,7 +2156,7 @@ for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'inter
       const [resumed] = await journal.read();
       assert.equal(resumed.status,'done');
       assert.equal(resumed.videoEditAttempts,2);
-      assert.equal(f.calls.filter(call=>call.payload.text==='Надсилаю…').length,1);
+      assert.equal(f.calls.filter(call=>call.payload.text===mediaPreparingText('uk')).length,1);
     }
     if (outcome==='wrong-receipts') {
       await f.restart();
@@ -2156,10 +2167,116 @@ for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'inter
       });
       await f.handle({message_id:1500,text:'повтори',reply_to_message:{message_id:op.errorMessageId,from:{id:77,is_bot:true},text:'Telegram'}});
       assert.equal((await journal.read())[0].status,'done');
-      assert.equal(f.calls.filter(call=>call.payload.text==='Надсилаю…').length,1);
+      assert.equal(f.calls.filter(call=>call.payload.text===mediaPreparingText('uk')).length,2);
     }
   });
 }
+
+function telegramLimit(seconds) {
+  return Response.json({ok:false,error_code:429,parameters:{retry_after:seconds}}, {status:429});
+}
+
+test('each standalone link receives its quiet reply while the earlier download occupies the chat', async t => {
+  const f = await fixture(t);
+  const started = Promise.withResolvers(), release = Promise.withResolvers();
+  const first = instagramUpdate(551), second = instagramUpdate(552,'https://www.instagram.com/p/next/');
+  second.message.reply_to_message = first.message;
+  const urls = [], statusIds = [];
+  f.setDownloader(async url => {
+    urls.push(url);
+    if (url === first.message.text) { started.resolve(); await release.promise; }
+    throw new Error('source timeout');
+  });
+  await f.enqueue(first);
+  await started.promise;
+  try {
+    await f.enqueue(second); await f.enqueue(second); await f.drainText();
+    const notices = f.calls.filter(c => c.method === 'sendMessage');
+    assert.deepEqual(notices.map(c => c.payload.reply_to_message_id), [551,552]);
+    assert.ok(notices.every(c => c.payload.disable_notification === true && c.payload.text === mediaPreparingText('uk') && c.payload.message_thread_id === 9));
+    statusIds.push(...(await f.pending()).map(update => update.mediaRequest.messageId));
+    assert.deepEqual(urls, [first.message.text]);
+  } finally { release.resolve(); await f.drainAll(); }
+  assert.deepEqual(urls, [first.message.text,second.message.text]);
+  assert.deepEqual(f.calls.filter(c => c.method === 'editMessageText').map(c => c.payload.message_id), statusIds);
+  assert.deepEqual(await f.pending(), []);
+});
+
+for (const phase of ['delete','edit','fallback']) {
+  test('status ' + phase + ' respects Telegram retry_after across a restart without replaying the source or attachments', async t => {
+    let now = Date.now();
+    t.mock.method(Date, 'now', () => now);
+    const f = await fixture(t), original = instagramUpdate(560);
+    const file = path.join(f.root,'cleanup.png'); await fs.writeFile(file,await photoBytes());
+    let downloads = 0, finalized = 0;
+    f.setDownloader(async url => {
+      downloads++;
+      if (phase !== 'delete') throw new Error('source timeout');
+      return {source:nativeExtractorSource(url,{extractor_key:'Instagram',id:'queuedpost'}), files:[{filePath:file,mediaKind:'image',mimeType:'image/png'}]};
+    });
+    f.setStatus(async (method,payload) => {
+      if (method === 'sendMessage' && payload.text === mediaPreparingText('uk')) {
+        if (phase === 'fallback') return Response.json({ok:false,error_code:400},{status:400});
+        return;
+      }
+      const finalMethod = {delete:'deleteMessage',edit:'editMessageText',fallback:'sendMessage'}[phase];
+      assert.equal(method, finalMethod);
+      if (++finalized === 1) return telegramLimit(80);
+    });
+    await f.queue(original);
+    const [retained] = await f.pending();
+    assert.equal(retained.mediaRequest.finishing,true);
+    assert.ok(retained.mediaRequest.finishRetryAt >= now + 80000);
+    assert.equal(downloads,1);
+    await f.restart();
+    f.setDownloader(async () => assert.fail('terminal operation was replayed'));
+    now = retained.mediaRequest.finishRetryAt - 1;
+    await f.queue(original); assert.equal(finalized,1);
+    now++; await f.queue(original);
+    assert.equal(finalized,2);
+    assert.equal(f.calls.filter(c => c.method === 'sendPhoto').length, phase === 'delete' ? 1 : 0);
+    assert.equal(f.calls.filter(c => c.method === 'sendMessage' && c.payload.text === mediaPreparingText('uk')).length,1);
+    assert.deepEqual(await f.pending(),[]);
+  });
+}
+
+test('an unconfirmed status creation never suppresses media or creates another status on restart', async t => {
+  const f = await fixture(t), original = instagramUpdate(565);
+  f.setStatus(async method => { assert.equal(method,'sendMessage'); throw new Error('lost response'); });
+  const file = path.join(f.root,'available.png'); await fs.writeFile(file,await photoBytes());
+  let beforeUpload;
+  f.setDownloader(async url => {
+    [beforeUpload] = await f.pending();
+    return {source:nativeExtractorSource(url,{extractor_key:'Instagram',id:'queuedpost'}),files:[{filePath:file,mediaKind:'image',mimeType:'image/png'}]};
+  });
+  await f.queue(original);
+  assert.equal(beforeUpload.mediaRequest.messageId,null);
+  await fs.writeFile(path.join(f.root,'runtime/inbox.json'),JSON.stringify({version:1,offset:566,pending:[beforeUpload]}));
+  await f.restart();
+  await f.queue(original);
+  assert.equal(f.calls.filter(c => c.method === 'sendMessage').length,1);
+  assert.equal(f.calls.filter(c => c.method === 'sendPhoto').length,1);
+  assert.deepEqual(await f.pending(),[]);
+});
+
+test('videos from two publications share one silent text status and upload as separate verified attachments', async t => {
+  const f = await fixture(t), filePath = path.join(f.root,'sample.mp4');
+  execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','color=s=48x32:r=5','-t','0.4','-c:v','libx264','-threads','1',filePath]);
+  f.setDownloader(async url => ({source:nativeExtractorSource(url,{extractor_key:'Instagram',id:new URL(url).pathname.split('/')[2]}),
+    files:[{filePath,mediaKind:'video',mimeType:'video/mp4'}]}));
+  let sent = 0;
+  f.setUpload(async (method,form) => {
+    assert.equal(method,'sendVideo');
+    assert.equal(form.get('reply_to_message_id'),'567');
+    return Response.json({ok:true,result:{message_id:1800+(++sent),chat:{id:Number(form.get('chat_id'))},
+      message_thread_id:Number(form.get('message_thread_id')),video:{file_id:'v'+sent}}});
+  });
+  await f.queue(instagramUpdate(567,'https://www.instagram.com/reel/one/ https://www.instagram.com/reel/two/'));
+  assert.equal(sent,2);
+  assert.deepEqual(f.calls.filter(c => c.method === 'sendMessage').map(c => c.payload.text),[mediaPreparingText('uk')]);
+  assert.deepEqual(f.calls.filter(c => c.method === 'deleteMessage').map(c => c.payload.message_id),[1000]);
+  assert.deepEqual(await f.pending(),[]);
+});
 
 function instagramUpdate(id, url = 'https://www.instagram.com/p/queuedpost/', topic = 9) {
   return {
@@ -2191,7 +2308,8 @@ test('Instagram resumes the original group post after a real 429 and restart, wi
   await f.queue(instagramUpdate(502, original.message.text + '?igsh=again'));
   assert.equal(downloads, 1);
   assert.deepEqual((await f.pending()).map(u => u.update_id), [501]);
-  assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 0);
+  assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 1);
+  assert.equal(f.calls.filter(c => c.method === 'editMessageText').length, 0);
 
   time += 1000;
   await f.restart();
@@ -2221,7 +2339,8 @@ test('Instagram resumes the original group post after a real 429 and restart, wi
   assert.deepEqual(await f.pending(), []);
   assert.equal(downloads, 2);
   assert.equal(f.calls.filter(c => c.method === 'sendPhoto').length, 1);
-  assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 0);
+  assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 1);
+  assert.equal(f.calls.filter(c => c.method === 'editMessageText').length, 0);
   const [done] = await operations.read();
   assert.equal(done.id, waiting.id);
   assert.equal(done.topicId, 9);
@@ -2244,7 +2363,8 @@ test('a confirmed Instagram cooldown waits without spending a source attempt and
   const [waiting] = await operations.read();
   assert.equal(waiting.status, 'waiting_source');
   assert.equal(waiting.sourceRetry.attempts, 0);
-  assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 0);
+  assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 1);
+  assert.equal(f.calls.filter(c => c.method === 'editMessageText').length, 0);
   time = waiting.sourceRetry.expiresAt + 1;
   let callsAfterExpiry = 0;
   f.setDownloader(async () => { callsAfterExpiry++; throw new Error('unexpected source request'); });
@@ -2254,7 +2374,7 @@ test('a confirmed Instagram cooldown waits without spending a source attempt and
   assert.equal((await operations.read())[0].status, 'failed');
   const notices = f.calls.filter(c => c.method === 'sendMessage');
   assert.equal(notices.length, 1);
-  assert.doesNotMatch(notices[0].payload.text, /Повтори через|Try again in/i);
+  assert.match(f.calls.filter(c => c.method === 'editMessageText').at(-1).payload.text, /Instagram тимчасово обмежив завантаження/);
 });
 
 test('Instagram login walls and ambiguous extractor messages never schedule an autonomous retrieval', async t => {
@@ -2335,7 +2455,7 @@ for (const phase of ['saved anchor', 'saved receipt']) {
     await f.queue((await f.pending())[0]);
     assert.deepEqual(await f.pending(), []);
     assert.equal((await journal.read())[0].status, 'done');
-    assert.equal(f.calls.filter(call => call.payload.text === 'Надсилаю…').length, 1);
+    assert.equal(f.calls.filter(call => call.payload.text === mediaPreparingText('uk')).length, 1);
     assert.deepEqual(targets, phase === 'saved anchor' ? [done.videoReplyId, done.videoReplyId] : [done.videoReplyId]);
   });
 }
@@ -2390,7 +2510,8 @@ test('a caption batch keeps only pending links, restores a deferred source and n
   assert.equal(retained.mediaBatch[0].operationId, operations.find(op => op.url === instagram).id);
   const notices = () => f.calls.filter(call => call.method === 'sendMessage').map(call => call.payload.text);
   assert.equal(notices().length, 1);
-  assert.match(notices()[0], /3/);
+  assert.equal(notices()[0], mediaPreparingText('uk'));
+  assert.equal(f.calls.filter(c => c.method === 'editMessageText').length, 0);
 
   // Disk snapshot after the sibling's Telegram receipt, before its inbox checkpoint.
   const delivered = operations.find(op => op.url === tiktok);
@@ -2410,6 +2531,7 @@ test('a caption batch keeps only pending links, restores a deferred source and n
   assert.deepEqual(sent, [tiktok, instagram]);
   assert.deepEqual(sourceCalls, [instagram, tiktok, threads, instagram]);
   assert.equal(notices().length, 1);
+  assert.match(f.calls.filter(c => c.method === 'editMessageText').at(-1).payload.text, /Посилання 3/);
   assert.deepEqual(await f.pending(), []);
 });
 
@@ -2564,5 +2686,51 @@ for (const invalid of ["duplicate", "missing", "document", "blank file_id", "wro
     assert.equal(saved.receipts.length, confirmed);
     assert.equal(calls, confirmed ? 2 : 1);
     assert.deepEqual(await f.pending(), []);
+  });
+}
+
+for (const scenario of ["short then full", "full then short", "two opaque links", "first failure", "first unknown"]) {
+  test(`same-message aliases in the normal media queue deliver once: ${scenario}`, async t => {
+    const f = await fixture(t);
+    const native = "https://www.tiktok.com/@fixture/photo/123/";
+    const first = "https://vt.tiktok.com/first/", second = "https://vt.tiktok.com/second/";
+    const urls = scenario === "full then short" ? [native, first] : scenario === "two opaque links" ? [first, second] : [first, native];
+    const filePath = path.join(f.root, "original.png");
+    await fs.writeFile(filePath, await fixturePhoto);
+    let assets = 0, uploads = 0;
+    const retrieve = async (url, options) => {
+      if (url !== native && scenario !== "two opaque links") {
+        const duplicate = await options.onResolved(native);
+        if (duplicate) return duplicate;
+      }
+      if (scenario === "first failure" && url === first) throw Object.assign(new Error("No media"), { code: "NO_MEDIA" });
+      assets++;
+      return { source: verifiedMediaSource(url, { provider: "tiktok-api", resolvedUrl: native, id: "123", owner: "fixture" }),
+        files: [{ filePath, mediaKind: "image", mimeType: "image/png" }] };
+    };
+    const upload = async (method, form) => {
+      assert.equal(method, "sendPhoto"); uploads++;
+      return Response.json({ ok: true, result: photoReceipt(form, 8100 + uploads, scenario === "first unknown" ? "" : "photo") });
+    };
+    f.setDownloader(retrieve); f.setUpload(upload);
+    const message = { message_id: 501, date: Math.floor(Date.now()/1000), from: {id:88}, chat:{id:-123,type:"supergroup",is_forum:true},
+      is_topic_message:true, message_thread_id:9, text:urls.join(" ") };
+    await f.queue({ update_id: 800, message });
+    assert.equal(uploads, 1);
+    assert.equal(assets, scenario === "two opaque links" ? 2 : 1);
+    const journal = new MediaOperations(path.join(f.root, "runtime/media.json"));
+    const primary = await journal.forSourceMessage(message, 9, native);
+    for (const url of urls) assert.equal((await journal.forSourceMessage(message, 9, url)).id, primary.id);
+    assert.equal(primary.status, scenario === "first unknown" ? "unknown" : "done");
+    const edits = f.calls.filter(call => call.method === "editMessageText");
+    assert.equal(edits.length, scenario === "first unknown" ? 1 : 0);
+    if (scenario === "first unknown") assert.doesNotMatch(edits[0].payload.text, /(?:Link|Ссылка|Посилання) 2/iu);
+    if (scenario === "two opaque links") {
+      await f.restart(); f.setDownloader(retrieve); f.setUpload(upload);
+      await f.queue({ update_id: 801, message });
+      assert.equal(uploads, 1, "restarted processing never republishes the original message");
+      await f.queue({ update_id: 802, message: { ...message, message_id: 502 } });
+      assert.equal(uploads, 2, "a new Telegram message can request the verified cached publication");
+    }
   });
 }

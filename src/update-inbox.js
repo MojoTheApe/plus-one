@@ -13,6 +13,13 @@ export class UpdateInbox {
       return state;
     });
   }
+  saveMediaRequest(id, request) {
+    return this.mutate(state => {
+      const update = state.pending.find(item => item.update_id === id);
+      if (update) update.mediaRequest = structuredClone(request);
+      return state;
+    });
+  }
   saveMediaBatch(id, remaining) {
     return this.mutate(state => {
       const update = state.pending.find(item => item.update_id === id);

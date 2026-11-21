@@ -70,7 +70,11 @@ Instagram, Threads and TikTok URLs, bot administrator rights and installed tools
 are required. Private posts, login requirements, site blocks, quotas and file
 limits can prevent downloading. Previously saved disabled settings stay disabled.
 A message can contain several supported links, including links embedded in text.
-Each publication keeps its own delivery or queued retry in the original topic.
+When the bot accepts those links, it posts one quiet status in its configured
+language. A wait or automatic retry uses the same status. Successful posts
+remain as attachments, and any final problems are explained together in one
+reply. Different links to the same verified publication in that message share
+one delivery. Each publication keeps its own queued retry in the original topic.
 Albums retain their source order, including repeated slides in a TikTok photo
 post of up to 35 images. If Telegram explicitly rejects a single photo twice,
 the bot can attach the original prepared file as a document.
