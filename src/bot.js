@@ -27,7 +27,7 @@ import { prepareMediaEvidence } from "./media-evidence.js";
 import { MediaBudget } from "./media-budget.js";
 import { identifyMediaItems, mediaItemSnapshot, assertSameMediaItems, hasMediaItemIdentity } from "./media-items.js";
 import { MediaCache } from "./media-cache.js";
-import { assertVerifiedMediaSource, verifiedMediaSource, mediaReference, sourceIdentityError } from "./media-source.js";
+import { assertVerifiedMediaSource, verifiedMediaSource, mediaReference, mediaPublicationKey, sourceIdentityError } from "./media-source.js";
 import { observeTelegramUpload } from "./telegram-upload-observer.js";
 import { historyIntent, selectContext, historyPage, localTime, dialoguePolicy, responseDecision, researchForReply } from "./conversation-context.js";
 import { UpdateInbox, ChatQueue, isPermanentUpdateError } from "./update-inbox.js";
@@ -50,7 +50,8 @@ import {
   escapeHtml as helperEscapeHtml,
   escapeHtmlAttribute as helperEscapeHtmlAttribute,
   escapeRegex as helperEscapeRegex,
-  extractSocialVideoUrlFromText,
+  socialMessageLinks,
+  addressedMediaDownload,
   getOpenAIWebSearchStatus,
   getOpenClawWebSearchStatus,
   isSocialVideoHostName,
@@ -227,7 +228,7 @@ const socialVideoDownloader = process.env.SOCIAL_VIDEO_DOWNLOADER || "yt-dlp";
 const socialVideoFfprobe = process.env.SOCIAL_VIDEO_FFPROBE || "ffprobe";
 const socialVideoFfmpeg = process.env.SOCIAL_VIDEO_FFMPEG || "ffmpeg";
 const socialVideoTikTokFallbackApi = (process.env.SOCIAL_VIDEO_TIKTOK_FALLBACK_API || "https://www.tikwm.com/api/").trim();
-const socialVideoMaxMediaItems = Number.parseInt(process.env.SOCIAL_VIDEO_MAX_MEDIA_ITEMS || "20", 10);
+const socialVideoMaxMediaItems = Number.parseInt(process.env.SOCIAL_VIDEO_MAX_MEDIA_ITEMS || "35", 10);
 const socialVideoHttpTimeoutMs = clampInteger(Number.parseInt(process.env.SOCIAL_VIDEO_HTTP_TIMEOUT_MS || "45000", 10), 5000, 120000);
 const socialVideoCircuitFailureThreshold = clampInteger(Number.parseInt(process.env.SOCIAL_VIDEO_CIRCUIT_FAILURE_THRESHOLD || "3", 10), 1, 20);
 const socialVideoCircuitCooldownMs = clampInteger(Number.parseInt(process.env.SOCIAL_VIDEO_CIRCUIT_COOLDOWN_MS || String(10 * 60 * 1000), 10), 30000, 60 * 60 * 1000);
@@ -624,25 +625,26 @@ function scheduleUpdate(update) {
   const pending = updateInbox.state?.pending.find(item => item.update_id === update.update_id);
   if (!pending) return;
   if (pending.deferredMedia) {
-    if (pending.deferredMedia.retryAt > Date.now() || resumingInstagramUpdate) return;
+    // An older inbox marker describes one link; later siblings in that same
+    // retained update are already due, even if its original link is waiting.
+    const legacyLinks = !pending.mediaBatch && pending.message && messageSocialLinks(pending.message).urls;
+    if ((pending.deferredMedia.retryAt > Date.now() && !(legacyLinks?.length > 1)) || resumingInstagramUpdate) return;
     resumingInstagramUpdate = true;
     let settled = false;
     mediaQueue.add(update.update_id, chatId, async () => {
-      const outcome = await handleUpdate(pending, { durableUpdateId: pending.update_id });
+      const outcome = await handleUpdate(pending, { durableUpdateId: pending.update_id, legacyLinks });
       await finishMediaUpdate(pending.update_id, outcome);
       settled = true;
     }, { messageId: pending.message?.message_id }).finally(() => {
       resumingInstagramUpdate = false;
-      if (!settled || shuttingDown) return;
-      const next = updateInbox.state.pending.find(item => item.deferredMedia?.retryAt <= Date.now());
-      if (next) scheduleUpdate(next);
+      if (settled) scheduleNextDeferred(pending.update_id);
     });
     return;
   }
   workQueue.add(update.update_id, chatId, async () => {
     await mediaQueue.waitForMessage(chatId, update.message?.reply_to_message?.message_id);
     let result;
-    try { result = await handleUpdate(update, { deferMedia: true, durableUpdateId: update.update_id }); }
+    try { result = await handleUpdate(pending, { deferMedia: true, durableUpdateId: update.update_id }); }
     catch (error) {
       if (!isPermanentUpdateError(error)) throw error;
       logError("permanent_update_failure", error, { updateId: update.update_id, status: error.status });
@@ -650,6 +652,7 @@ function scheduleUpdate(update) {
     if (result?.mediaWork) {
       // Keep the original durable inbox entry until the background operation
       // finishes. Polling may see it again, but both queues reject duplicate IDs.
+      let batchPending = false;
       mediaQueue.add(update.update_id, chatId, async () => {
         let outcome;
         try { outcome = await result.mediaWork(); }
@@ -658,7 +661,10 @@ function scheduleUpdate(update) {
           logError("permanent_media_failure", error, { updateId: update.update_id, status: error.status });
         }
         await finishMediaUpdate(update.update_id, outcome);
-      }, { messageId: update.message?.message_id });
+        batchPending = outcome?.batchPending;
+      }, { messageId: update.message?.message_id }).finally(() => {
+        if (batchPending) scheduleNextDeferred(update.update_id);
+      });
       logInfo("media_queued", { queued: mediaQueue.ids.size });
       return;
     }
@@ -666,7 +672,16 @@ function scheduleUpdate(update) {
   });
 }
 
+function scheduleNextDeferred(afterId) {
+  if (shuttingDown || resumingInstagramUpdate) return;
+  const ready = updateInbox.state.pending.filter(item => item.deferredMedia?.retryAt <= Date.now() &&
+    !mediaQueue.ids.has(item.update_id) && !workQueue.ids.has(item.update_id));
+  const next = ready.find(item => item.update_id > afterId) || ready[0];
+  if (next) scheduleUpdate(next);
+}
+
 async function finishMediaUpdate(updateId, outcome) {
+  if (outcome?.batchPending) return;
   if (outcome?.deferredMedia) {
     const { operationId, retryAt } = outcome.deferredMedia;
     await updateInbox.deferMedia(updateId, operationId, retryAt);
@@ -707,8 +722,25 @@ async function writeRuntimeStatus() {
     queuedUpdates: new Set([...workQueue.ids, ...mediaQueue.ids]).size, queuedMedia: mediaQueue.ids.size, updatedAt: Date.now() });
 }
 
-async function handleUpdate(update, { deferMedia = false, durableUpdateId } = {}) {
-  const handle = () => update.deferredMedia ? resumeDeferredMedia(update) : handleScopedUpdate(update);
+async function handleUpdate(update, { deferMedia = false, durableUpdateId, legacyLinks } = {}) {
+  const handle = async () => {
+    if (update.mediaBatch) return deferMediaWork(() => runMediaBatch(update.message, update.mediaBatch));
+    if (!update.deferredMedia) return handleScopedUpdate(update);
+    if (legacyLinks?.length > 1) {
+      const operation = (await mediaOperations.read()).find(op => op.id === update.deferredMedia.operationId &&
+        op.sourceRetry?.updateId === update.update_id && op.chatId === update.message.chat.id &&
+        (op.topicId ?? op.threadId ?? null) === judgeThreadId(update.message) && op.sourceMessageId === update.message.message_id);
+      if (operation && legacyLinks.some(url => mediaPublicationKey(url) === mediaPublicationKey(operation.url))) {
+        const marker = { ...update.deferredMedia,
+          retryAt: ["done", "unknown", "failed"].includes(operation.status) ? 0 : update.deferredMedia.retryAt };
+        const items = legacyLinks.map((url, index) => ({ url, number:index + 1,
+          ...(mediaPublicationKey(url) === mediaPublicationKey(operation.url) ? marker : {}) }));
+        await updateInbox.saveMediaBatch(update.update_id, items);
+        return runMediaBatch(update.message, items);
+      }
+    }
+    return resumeDeferredMedia(update);
+  };
   if (!setup) return behaviorContext.run({ ...behavior(), deferMedia, durableUpdateId }, handle);
   setupStore.bind(botInfo.id);
   const chatId = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id;
@@ -2327,13 +2359,21 @@ function mimeTypeForPath(filePath) {
 
 async function maybeHandleMediaRetry(message) {
   if (groupMode(message.chat.id, "download") === "off") return false;
-  if (!isMediaRetryText(getMessageTextForRouting(message), botInfo.username)) return false;
+  const { urls, outsideLinks } = messageSocialLinks(message);
+  if (urls.length > 1 || !isMediaRetryText(urls.length ? outsideLinks : getMessageTextForRouting(message), botInfo.username)) return false;
   if (message.forward_origin || message.forward_from || message.forward_date || message.via_bot) return false;
   const mentioned = extractMessageText(message).toLowerCase().includes("@" + botInfo.username.toLowerCase());
-  const operation = await mediaOperations.find(message, mentioned, {chatId:message.chat.id,topicId:judgeThreadId(message)});
+  const matches = await mediaOperations.candidates(message, mentioned || urls.length === 1, {
+    chatId: message.chat.id, topicId: judgeThreadId(message), url: urls[0], resumeRequest: true });
+  if (matches.length > 1) {
+    await telegram("sendMessage", { ...assembleReplyTarget(message), text: chooseMediaPublication() });
+    return true;
+  }
+  const [operation] = matches;
   if (!operation) {
     return false;
   }
+  if (operation.lastRequest?.messageId === message.message_id && ["failed", "unknown", "done"].includes(operation.status)) return true;
   if (operation.status === "done") {
     await telegram("sendMessage", { chat_id: message.chat.id, text: "Цю спробу вже успішно виконано.", reply_to_message_id: message.message_id }); return true;
   }
@@ -2350,11 +2390,59 @@ function deferredMedia(operation) {
   return { deferredMedia: { operationId: operation.id, retryAt: operation.sourceRetry.retryAt } };
 }
 
+function chooseMediaPublication() {
+  return say(behavior().locale, "Which link do you mean? Reply to its result or include the link.",
+    "Какую ссылку ты имеешь в виду? Ответь на её результат или укажи ссылку.",
+    "Яке посилання ти маєш на увазі? Відповідай на його результат або вкажи посилання.");
+}
+
+function messageSocialLinks(message) {
+  const original = message.text || message.caption;
+  if (!original) return socialMessageLinks(extractMessageText(message));
+  const text = message._voiceTranscript ? original + "\n" + message._voiceTranscript : original;
+  return socialMessageLinks(text, message.text ? message.entities : message.caption_entities);
+}
+
+function linkNotice(message, text) {
+  const number = message._mediaLinkNumber;
+  return number ? say(behavior().locale, `Link ${number} — ${text}`, `Ссылка ${number} — ${text}`, `Посилання ${number} — ${text}`) : text;
+}
+
+async function runMediaBatch(message, items) {
+  const updateId = behaviorContext.getStore()?.durableUpdateId;
+  const durable = Number.isSafeInteger(updateId), started = Date.now();
+  let remaining = [...items];
+  let processed = 0;
+  for (const item of items) {
+    if (item.retryAt > Date.now()) continue;
+    // Yield the worker between bounded slices; the durable tail remains due.
+    if (durable && processed && (processed >= 3 || Date.now() - started >= 20000)) break;
+    processed++;
+    const target = { ...message, _mediaLinkNumber: item.number };
+    let next;
+    try {
+      const outcome = item.operationId
+        ? await resumeDeferredMedia({ message: target, update_id: updateId, deferredMedia: item })
+        : await deliverSocialPublication(target, item.url);
+      if (outcome?.deferredMedia) next = { ...item, ...outcome.deferredMedia };
+    } catch (error) {
+      logError("media_batch_item_failed", error, messageLogMeta(message, { linkNumber: item.number }));
+      if (!isPermanentUpdateError(error)) {
+        if (!durable) throw error;
+        next = { ...item, retryAt: Date.now() + 5000 };
+      }
+    }
+    remaining = remaining.flatMap(current => current === item ? (next ? [next] : []) : [current]);
+    if (durable) await updateInbox.saveMediaBatch(updateId, remaining);
+  }
+  return remaining.length ? { batchPending: true } : true;
+}
+
 function closedSourceRetry(operation) {
   if (!operation?.sourceRetry) return {};
   // Already accepted reposts may still be waiting behind this job in the
   // per-chat queue. Fresh requests arriving after completion keep normal reuse.
-  return { sourceRetry: { ...operation.sourceRetry, throughUpdateId: updateInbox.state.offset - 1 } };
+  return { sourceRetry: { ...operation.sourceRetry, throughUpdateId: updateInbox.state ? updateInbox.state.offset - 1 : operation.sourceRetry.updateId } };
 }
 
 async function finishLimitedSource(message, operation) {
@@ -2362,7 +2450,7 @@ async function finishLimitedSource(message, operation) {
   const failure = { code: emptyVideoReply ? "TIMEOUT" : "SOURCE_RETRY_EXHAUSTED",
     stage: emptyVideoReply ? "upload" : "download", retryable: true };
   await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "failed", failure });
-  const text = failureMessage(failure, behavior().locale);
+  const text = linkNotice(message, failureMessage(failure, behavior().locale));
   if (emptyVideoReply) {
     await telegram("editMessageText", { chat_id: message.chat.id, message_id: operation.videoReplyId, text });
     if (operation.cacheId) await mediaCache.release(operation.cacheId);
@@ -2382,7 +2470,7 @@ async function waitForInstagram(message, operation, failure, { contacted, starte
   const waiting = await mediaOperations.record({ ...operation, status: "waiting_source", failure, sourceRetry });
   if (waiting.status === "failed") {
     await mediaOperations.record({ ...waiting, ...closedSourceRetry(waiting) });
-    await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage(waiting.failure, behavior().locale) });
+    await telegram("sendMessage", { ...assembleReplyTarget(message), text: linkNotice(message, failureMessage(waiting.failure, behavior().locale)) });
     return true;
   }
   return deferredMedia(waiting);
@@ -2392,13 +2480,11 @@ async function resumeDeferredMedia(update) {
   const { message, deferredMedia: marker } = update;
   const operation = (await mediaOperations.read()).find(item => item.id === marker.operationId);
   if (!operation || operation.sourceRetry?.updateId !== update.update_id ||
-      operation.chatId !== message?.chat?.id || operation.topicId !== judgeThreadId(message)) return;
+      operation.chatId !== message?.chat?.id || operation.topicId !== judgeThreadId(message) ||
+      (marker.url && (operation.sourceMessageId !== message.message_id || mediaPublicationKey(operation.url) !== mediaPublicationKey(marker.url)))) return;
   if (!["waiting_source", "running", "prepared", "uploading"].includes(operation.status)) return;
   const receipts = operation.sentMessageIds || [];
-  const allReceived = operation.mediaItems?.length > 0 && operation.deliveredFileCount === operation.mediaItems.length &&
-    receipts.length === operation.deliveredFileCount && new Set(receipts).size === receipts.length &&
-    receipts.every(id => Number.isSafeInteger(id) && id > 0) && (!operation.videoReplyId || receipts[0] === operation.videoReplyId);
-  if (allReceived) {
+  if (allMediaAcknowledged(operation)) {
     await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "done", failure: null });
     if (operation.cacheId) await mediaCache.release(operation.cacheId);
     return;
@@ -2428,22 +2514,45 @@ async function resumeDeferredMedia(update) {
   return maybeHandleSocialVideo(target, operation, { anchored });
 }
 
+function allMediaAcknowledged(operation) {
+  const receipts = operation.sentMessageIds || [];
+  return operation.mediaItems?.length > 0 && operation.deliveredFileCount === operation.mediaItems.length &&
+    receipts.length === operation.deliveredFileCount && new Set(receipts).size === receipts.length &&
+    receipts.every(id => Number.isSafeInteger(id) && id > 0) && (!operation.videoReplyId || receipts[0] === operation.videoReplyId);
+}
+
 async function maybeHandleSocialVideo(message, retry = null, { anchored = false } = {}) {
   if (!canDownloadMedia(message)) return false;
   if (!["group", "supergroup"].includes(message.chat.type)) return false;
 
+  if (retry) return deferMediaWork(() => deliverSocialPublication(message, retry.url, retry, { anchored }));
+  const { urls, outsideLinks } = messageSocialLinks(message);
+  if (!urls.length || !addressedMediaDownload(outsideLinks, botInfo?.username)) return false;
+  return deferMediaWork(async () => {
+    if (urls.length === 1) return deliverSocialPublication(message, urls[0]);
+    const items = urls.map((url, index) => ({ url, number: index + 1 }));
+    const updateId = behaviorContext.getStore()?.durableUpdateId;
+    if (Number.isSafeInteger(updateId)) await updateInbox.saveMediaBatch(updateId, items);
+    return runMediaBatch(message, items);
+  });
+}
+
+async function deliverSocialPublication(message, url, retry = null, { anchored = false } = {}) {
+  if (!canDownloadMedia(message) || !["group", "supergroup"].includes(message.chat?.type)) return false;
   const messageText = extractMessageText(message);
-  if (!retry && botInfo?.username && messageText.toLowerCase().includes("@"+botInfo.username.toLowerCase()) && stripBotMention(messageText).replace(/https?:\/\/\S+/gu,"").trim()) return false;
-  const url = retry?.url || extractSocialVideoUrl(messageText);
-  if (!url) return false;
-  if (behaviorContext.getStore()?.deferMedia) return deferMediaWork(() => maybeHandleSocialVideo(message, retry, { anchored }));
   const provider = socialVideoProviderForUrl(url);
 
   if (retry?.id) retry = (await mediaOperations.read()).find(operation => operation.id === retry.id) || retry;
-  const recovered = !retry && await mediaOperations.find({ ...message, reply_to_message: { message_id: message.message_id } }, false,
-    { chatId: message.chat.id, topicId: judgeThreadId(message) });
+  const recovered = retry ? (retry.lastRequest?.messageId === message.message_id ? retry : null)
+    : await mediaOperations.forSourceMessage(message, judgeThreadId(message), url);
   const existing = retry || recovered;
   const updateId = behaviorContext.getStore()?.durableUpdateId;
+  if (recovered && ["failed", "unknown", "done"].includes(recovered.status)) return true;
+  if (recovered && allMediaAcknowledged(recovered)) {
+    await mediaOperations.record({ ...recovered, ...closedSourceRetry(recovered), status: "done", failure: null });
+    if (recovered.cacheId) await mediaCache.release(recovered.cacheId);
+    return true;
+  }
   if (provider === "instagram") {
     const pending = existing?.sourceRetry && ["waiting_source", "running", "prepared", "uploading"].includes(existing.status)
       ? existing : await mediaOperations.coalescedPublication(message.chat.id, judgeThreadId(message), url, updateId);
@@ -2544,7 +2653,7 @@ async function maybeHandleSocialVideo(message, retry = null, { anchored = false 
   }
   try {
     let cached = await mediaCache.forDelivery({ chatId: message.chat.id, topicId: judgeThreadId(message), botId: botInfo.id,
-      ...(retry ? { entryId: retry.cacheId, messageId: retry.sourceMessageId } : { sourceUrl: url }) });
+      ...(retry?.cacheId ? { entryId: retry.cacheId } : { messageId: retry?.sourceMessageId, sourceUrl: url }) });
     if (cached) {
       try {
         assertVerifiedMediaSource(cached.source, cached.source.requested.url);
@@ -2675,8 +2784,10 @@ async function maybeHandleSocialVideo(message, retry = null, { anchored = false 
     try { sent = await deliverRemaining(); }
     catch (error) {
       const delivered = operation.deliveredFileCount || 0;
-      if (error.deliveryUnknown || error.status !== 400 || !/wrong (?:remote )?file|file[_ ]?id|file reference.*expired|invalid.*file.*identifier/iu.test(error.message) ||
-          !mediaFiles.slice(delivered).some(file => file.telegramFileId)) throw error;
+      const remaining = mediaFiles.slice(delivered);
+      const rejectedReference = /wrong (?:remote )?file|file[_ ]?id|file reference.*expired|invalid.*file.*identifier/iu.test(error.message) ||
+        (telegramRejectedPhoto(error) && remaining.length === 1 && remaining[0].telegramFileId);
+      if (error.deliveryUnknown || error.status !== 400 || !rejectedReference || !remaining.some(file => file.telegramFileId)) throw error;
       operation = await mediaOperations.record({ ...operation, status: "prepared", failure: null, staleRejected: true });
       await mediaCache.invalidateReceipts(preparedCache.id, mediaFiles.slice(delivered).map((_, index) => delivered + index));
       if (mediaFiles.slice(delivered).some(file => !file.filePath)) {
@@ -2753,7 +2864,7 @@ async function maybeHandleSocialVideo(message, retry = null, { anchored = false 
       return waitForInstagram(message, operation, failure, {
         contacted: sourceThrottled && error.code !== "SOCIAL_VIDEO_PROVIDER_COOLDOWN", startedAt: attemptStarted });
     }
-    const description = failureMessage(failure, behavior().locale);
+    const description = linkNotice(message, failureMessage(failure, behavior().locale));
     // Never turn a possibly delivered video back into an error message.
     const notice = operation?.videoReplyId && !operation.videoEditPending && !error.deliveryUnknown
       ? await telegram("editMessageText", { chat_id: message.chat.id, message_id: operation.videoReplyId, text: description }).catch(() => {})
@@ -2771,10 +2882,6 @@ async function maybeHandleSocialVideo(message, retry = null, { anchored = false 
   }
 
   return true;
-}
-
-function extractSocialVideoUrl(text) {
-  return extractSocialVideoUrlFromText(text);
 }
 
 async function reportVisibleVideo(message, id) {
@@ -2802,7 +2909,7 @@ async function isBotAdminInChat(chatId, deadline) {
 }
 
 function getSocialVideoMaxMediaItems() {
-  return Number.isFinite(socialVideoMaxMediaItems) && socialVideoMaxMediaItems > 0 ? socialVideoMaxMediaItems : 20;
+  return Number.isFinite(socialVideoMaxMediaItems) && socialVideoMaxMediaItems > 0 ? Math.min(35, socialVideoMaxMediaItems) : 35;
 }
 
 async function downloadSocialVideo(url, options) {
@@ -2822,10 +2929,14 @@ async function downloadBudgetedMedia(url, reservation, deadline) {
     socialVideoBudget.completeSource(reservation, { success: true });
     return { ...result, files };
   } catch (error) {
-    if (error.code !== "SOCIAL_VIDEO_PROVIDER_COOLDOWN") socialVideoBudget.completeSource(reservation, { success: false });
+    if (error.code !== "SOCIAL_VIDEO_PROVIDER_COOLDOWN") socialVideoBudget.completeSource(reservation, sourceFailureAllowance(error));
     if (result?.tempDir) await fs.promises.rm(result.tempDir, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
+}
+
+function sourceFailureAllowance(error) {
+  return { success: false, providerFailure: ["RATE_LIMIT", "TIMEOUT", "SERVICE_ERROR"].includes(mediaFailure(error).code) };
 }
 
 function shouldTryTikTokFallback(url) {
@@ -3111,12 +3222,37 @@ async function sendTelegramSocialMedia(message, mediaFiles, caption, onSent = as
 async function sendTelegramSingleSocialMedia(message, media, caption) {
   if (!media) throw new Error("no media to send");
   if (media.mediaKind === "image") {
-    return sendTelegramMultipartMedia("sendPhoto", message, "photo", media.filePath, caption, media.mimeType, media);
+    try {
+      return await sendTelegramMultipartMedia("sendPhoto", message, "photo", media.filePath, caption, media.mimeType, media);
+    } catch (error) {
+      if (!telegramRejectedPhoto(error) || media.telegramFileId || !media.filePath) throw error;
+    }
+    // Telegram explicitly rejected the photo. Rebuild it in a private temporary
+    // directory, even when the original belongs to the persistent media cache.
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "telegram-photo-"));
+    try {
+      const { telegramFileId, ...local } = media;
+      const [jpeg] = await prepareMediaForTelegram([local], { photoOutputDir: dir,
+        ffmpeg: socialVideoFfmpeg, ffprobe: socialVideoFfprobe, deadline: message._mediaDeadline });
+      try {
+        return await sendTelegramMultipartMedia("sendPhoto", message, "photo", jpeg.filePath, caption, jpeg.mimeType, jpeg);
+      } catch (error) {
+        if (!telegramRejectedPhoto(error)) throw error;
+      }
+      return await sendTelegramDocument(message, local.filePath, caption, local.mimeType);
+    } finally {
+      await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
   }
   if (media.mediaKind === "video") {
     return sendTelegramMultipartMedia("sendVideo", message, "video", media.filePath, caption, media.mimeType || "video/mp4", media);
   }
   return sendTelegramDocument(message, media.filePath, caption, media.mimeType);
+}
+
+function telegramRejectedPhoto(error) {
+  return error.method === "sendPhoto" && error.status === 400 && error.telegramErrorCode === 400 &&
+    /^(?:Bad Request:\s*)?IMAGE_PROCESS_FAILED$/i.test(error.message);
 }
 
 async function sendTelegramMediaGroup(message, mediaFiles, caption) {
@@ -3173,7 +3309,8 @@ async function sendTelegramMultipartMedia(method, message, fieldName, filePath, 
   if (media?.telegramFileId) form.set(fieldName, media.telegramFileId);
   else form.set(fieldName, await fs.openAsBlob(filePath, { type: mimeType }), path.basename(filePath));
 
-  return telegramMultipart(method, form, {deadline:message._mediaDeadline, diagnosticId:message._mediaOperationId});
+  return telegramMultipart(method, form, {deadline:message._mediaDeadline, diagnosticId:message._mediaOperationId,
+    expectedAttachment: method === "sendPhoto" ? "photo" : undefined});
 }
 
 async function sendTelegramDocument(message, filePath, caption, mimeType = "application/octet-stream") {
@@ -3182,10 +3319,12 @@ async function sendTelegramDocument(message, filePath, caption, mimeType = "appl
   form.set("chat_id", String(message.chat.id));
   form.set("reply_to_message_id", String(message.message_id));
   form.set("disable_content_type_detection", "true");
+  if (judgeThreadId(message)) form.set("message_thread_id", String(judgeThreadId(message)));
   if (caption) form.set("caption", caption.slice(0, 1000));
   form.set("document", await fs.openAsBlob(filePath, { type: mimeType }), fileName);
 
-  return telegramMultipart("sendDocument", form, {deadline:message._mediaDeadline, diagnosticId:message._mediaOperationId});
+  return telegramMultipart("sendDocument", form, {deadline:message._mediaDeadline, diagnosticId:message._mediaOperationId,
+    expectedAttachment: "document"});
 }
 
 async function maybeHandleVisualQuestion(message, question) {
@@ -3898,10 +4037,20 @@ async function performMessageAction(message, question, decision, context) {
     return null;
   }
   if (!target) return "Не вдалося визначити початкове повідомлення в доступній історії. Відповідай на потрібне повідомлення — тоді виконаю дію.";
+  const explicit = messageSocialLinks(message).urls;
+  const targetUrls = target.sourceUrl ? [target.sourceUrl] : (target.socialUrls || socialMessageLinks(target.text || "").urls);
+  if (explicit.length > 1 || (!explicit.length && targetUrls.length > 1)) return chooseMediaPublication();
+  const selectedUrl = explicit[0] || targetUrls[0];
+  if (explicit.length && targetUrls.length && !targetUrls.some(url => mediaPublicationKey(url) === mediaPublicationKey(selectedUrl))) {
+    return chooseMediaPublication();
+  }
   if (decision.action === "download") {
     const reference = {...message, reply_to_message:{message_id:target.messageId}};
-    const operation = await mediaOperations.find(reference, false, {chatId:message.chat.id,topicId:judgeThreadId(message)});
-    const url = operation?.url || target.sourceUrl || extractSocialVideoUrl(target.text);
+    const matches = await mediaOperations.candidates(reference, false, { chatId: message.chat.id, topicId: judgeThreadId(message),
+      url: selectedUrl, resumeRequest: true });
+    if (matches.length > 1) return chooseMediaPublication();
+    const [operation] = matches;
+    const url = operation?.url || selectedUrl;
     if (!url || !socialVideoProviderForUrl(url)) return "У цьому повідомленні не знайшов підтримуваного посилання для завантаження.";
     if (operation?.failure && !canRetryMediaOperation(operation)) return failureMessage(operation.failure, behavior().locale);
     if(!canDownloadMedia(message))return "Завантаження медіа зараз вимкнено в налаштуваннях бота.";
@@ -3910,16 +4059,18 @@ async function performMessageAction(message, question, decision, context) {
     if (handled?.mediaWork) return handled;
     return handled ? null : "Не вдалося запустити завантаження за цим запитом.";
   }
-  return deferMediaWork(() => analyzeReferencedMedia(message, question, target, items, { wholePublication: decision.mediaScope === "publication" }));
+  return deferMediaWork(() => analyzeReferencedMedia(message, question, target, items, {
+    wholePublication: decision.mediaScope === "publication", sourceUrl: selectedUrl,
+    explicitSource: !target.isBot && explicit.length === 1 }));
 }
 
-async function analyzeReferencedMedia(message, question, target, scopedContext, { wholePublication = false } = {}) {
+async function analyzeReferencedMedia(message, question, target, scopedContext, { wholePublication = false, sourceUrl, explicitSource = false } = {}) {
   if (setupStore && !canAnalyzeMedia(message)) return "Media analysis is disabled for this chat.";
   const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "telegram-evidence-"));
   let downloadedDirectory = null, ticket = null, fetchedFromSource = false;
   try {
-    const sourceUrl = target.sourceUrl || extractSocialVideoUrl(target.text);
-    let cached = await mediaCache.get({chatId:message.chat.id,topicId:judgeThreadId(message),messageId:target.messageId,wholePublication});
+    let cached = await mediaCache.get({chatId:message.chat.id,topicId:judgeThreadId(message),messageId:target.messageId,wholePublication,
+      sourceUrl: target.isBot ? undefined : sourceUrl});
     let analysisSource = null;
     const candidateSource = cached?.source || target.mediaSource;
     try { analysisSource = assertVerifiedMediaSource(candidateSource, target.isBot ? candidateSource?.requested?.url : sourceUrl || cached?.sourceUrl); } catch {}
@@ -3927,7 +4078,7 @@ async function analyzeReferencedMedia(message, question, target, scopedContext, 
     // may still be inspected as visible Telegram content, with unknown origin.
     if (cached && !target.isBot && sourceUrl && !analysisSource) cached = null;
     let files = cached?.files || [];
-    if (!files.length && target.media?.fileId) {
+    if (!files.length && target.media?.fileId && !explicitSource) {
       try {
       const media = target.media;
       const maxBytes = 20 * 1024 * 1024;
@@ -3958,7 +4109,7 @@ async function analyzeReferencedMedia(message, question, target, scopedContext, 
         if (!wholePublication && target.media?.fileId && (files.length !== 1 || (target.media.kind && files[0].mediaKind !== target.media.kind))) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", analysisSource.provider);
         socialVideoBudget.complete(budget.reservation,{success:true});
         fetchedFromSource = true;
-      } catch(error){socialVideoBudget.complete(budget.reservation,{success:false});throw error;}
+      } catch(error){socialVideoBudget.complete(budget.reservation,sourceFailureAllowance(error));throw error;}
     }
     if (!files.length) return "У збереженому повідомленні є лише підпис або посилання, без доступного медіафайлу. Не можу оцінити його вміст за цими даними.";
     const images=[], evidence=[], selected=files.slice(0,6); let processed=0;
@@ -4205,6 +4356,9 @@ async function rememberMessage(message) {
   if (!text) return;
 
   const current = historyByChat.get(message.chat.id) || [];
+  // Store hidden social targets alongside the exact original text so a later
+  // reply can resolve them even after the operations journal has expired.
+  const socialUrls = message.from?.is_bot ? [] : messageSocialLinks(message).urls;
   const item = {
     chatId: message.chat.id,
     messageId: message.message_id,
@@ -4220,6 +4374,7 @@ async function rememberMessage(message) {
     isForum: Boolean(message.chat.is_forum || message.is_topic_message),
     media: storedMedia(message),
     sourceUrl: message._sourceUrl,
+    ...(socialUrls.length ? { socialUrls } : {}),
     mediaSource: message._mediaSource,
     mediaSelection: message._mediaSelection,
     choices: message.reply_markup?.inline_keyboard?.flat().map(button => ({text:button.text, data:button.callback_data})),
@@ -4394,21 +4549,31 @@ async function telegramMultipart(method, form, options = {}) {
         });
         httpStatus = response.status;
         const body = await response.json().catch(() => ({}));
-        apiOk = body.ok === true;
+        apiOk = body?.ok === true;
         return { response, body };
       }, {
         report: timings => logInfo("telegram_upload_attempt", { method, uploadId, diagnosticId: options.diagnosticId,
           attempt, fileBytes, files: files.length, httpStatus, apiOk, ...timings }),
       }));
     } catch (error) { throw unconfirmedUpload(error, method); }
-    if (!response.ok || !body.ok) {
-      const error = telegramApiError(method, response, body);
-      if (response.status >= 500 || (response.ok && !body.error_code)) throw unconfirmedUpload(error, method);
+    if (!response.ok || body?.ok !== true) {
+      const error = telegramApiError(method, response, body || {});
+      if (response.status >= 500 || (response.ok && (body?.ok !== false || !body.error_code))) throw unconfirmedUpload(error, method);
       throw error;
     }
     const results = Array.isArray(body.result) ? body.result : [body.result];
-    if (method.startsWith("send") && (results.length !== (options.expectedCount || 1) || results.some(item => !Number.isSafeInteger(item?.message_id)))) {
+    if (method.startsWith("send") && (results.length !== (options.expectedCount || 1) || results.some(item => !Number.isSafeInteger(item?.message_id) || item.message_id <= 0))) {
       throw unconfirmedUpload(new Error("Telegram returned no delivery receipt"), method);
+    }
+    if (options.expectedAttachment) {
+      const sent = body.result;
+      const attachment = options.expectedAttachment === "photo" ? sent?.photo?.at(-1) : sent?.document;
+      const expectedThread = form.get("message_thread_id");
+      const sameTopic = expectedThread === null ? !judgeThreadId(sent) : sent?.message_thread_id === Number(expectedThread);
+      if (typeof attachment?.file_id !== "string" || !attachment.file_id.trim() || !sameTopic ||
+          sent?.chat?.id !== Number(form.get("chat_id"))) {
+        throw unconfirmedUpload(new Error("Missing matching Telegram attachment receipt"), method);
+      }
     }
     if (options.expectedVideoReply) {
       const edited = body.result;
@@ -4455,6 +4620,7 @@ async function withTelegramRetry(method, operation, {deadline = Infinity} = {}) 
 function telegramApiError(method, response, body) {
   const error = new Error(body.description || response.statusText || `Telegram ${method} failed`);
   error.status = response.status;
+  if (body.ok === false) error.telegramErrorCode = body.error_code;
   error.method = method;
   error.retryAfterSeconds = Number(body.parameters?.retry_after);
   return error;

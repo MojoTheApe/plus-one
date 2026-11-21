@@ -69,6 +69,11 @@ Automatic public-link downloads are enabled for new configured groups: supported
 Instagram, Threads and TikTok URLs, bot administrator rights and installed tools
 are required. Private posts, login requirements, site blocks, quotas and file
 limits can prevent downloading. Previously saved disabled settings stay disabled.
+A message can contain several supported links, including links embedded in text.
+Each publication keeps its own delivery or queued retry in the original topic.
+Albums retain their source order, including repeated slides in a TikTok photo
+post of up to 35 images. If Telegram explicitly rejects a single photo twice,
+the bot can attach the original prepared file as a document.
 Instagram post/Reel aliases share one native-identity manifest adapter and the
 explicit optional session, also used by native single-video compatibility.
 The native fallback can also deliver a verified single photo from a public

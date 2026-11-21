@@ -33,6 +33,20 @@ test("real compression fits the upload budget without cropping duration", { skip
   assert.ok(Math.abs(after.duration - 4) < 0.1); assert.ok(after.width && after.height);
 });
 
+test('a compatible MP4 between the compression target and upload limit keeps its original bytes', {skip:!available}, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pass-video-'));
+  t.after(() => fs.rm(root, {recursive:true,force:true}));
+  const file = path.join(root, 'original.mp4');
+  execFileSync('ffmpeg', ['-v','error','-f','lavfi','-i','color=s=64x64:r=5','-t','1','-c:v','libx264','-threads','1','-pix_fmt','yuv420p',file]);
+  const padding = Buffer.alloc(18 * 1024 * 1024);
+  padding.writeUInt32BE(padding.length); padding.write('free', 4);
+  await fs.appendFile(file, padding);
+  const [prepared] = await prepareMediaForTelegram([{filePath:file,mediaKind:'video',mimeType:'video/mp4'}]);
+  assert.equal(prepared.filePath,file);
+  assert.equal(prepared.converted,undefined);
+  assert.ok(prepared.size > padding.length);
+});
+
 test("a real oversized photograph is decoded and reduced before sending; a counterfeit image is rejected", { skip: !available }, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "photo-qa-")); t.after(() => fs.rm(root, { recursive: true, force: true }));
   const width = 2048, height = 2048, header = Buffer.alloc(13);

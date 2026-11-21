@@ -31,7 +31,7 @@ export function resolveActionTarget(items, message, targetMessageId = null) {
   const current = items.find(i => i.messageId === message.message_id);
   if (targetMessageId === message.message_id) return current || null;
   if (targetMessageId) return items.find(i => i.messageId === targetMessageId && i.messageId < message.message_id) || null;
-  if (current && (current.media?.fileId || current.sourceUrl || /https?:\/\//iu.test(current.text))) return current;
+  if (current && (current.media?.fileId || current.sourceUrl || current.socialUrls?.length || /https?:\/\//iu.test(current.text))) return current;
   const byId = new Map(items.map(i => [i.messageId, i]));
   let id = message.reply_to_message?.message_id;
   const seen = new Set();
@@ -39,7 +39,7 @@ export function resolveActionTarget(items, message, targetMessageId = null) {
     seen.add(id);
     const item = byId.get(id);
     if (!item) break;
-    if (item.media?.fileId || item.sourceUrl || /https?:\/\//iu.test(item.text)) return item;
+    if (item.media?.fileId || item.sourceUrl || item.socialUrls?.length || /https?:\/\//iu.test(item.text)) return item;
     id = item.replyToMessageId;
   }
   return null;

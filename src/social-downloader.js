@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { mediaReference, nativeExtractorSource, verifiedMediaSource, assertVerifiedMediaSource, sourceIdentityError, instagramMediaCode } from "./media-source.js";
+import { maxPublicationItems } from "./media-items.js";
 import { mediaFailure } from "./media-operations.js";
 import {
   isCircuitBreakerOpen,
@@ -12,13 +13,11 @@ import {
 import {
   extensionFromUrl,
   extractHtmlMetaContent,
-  extractTargetThreadsPost,
-  extractThreadsPostFromHtml,
+  extractThreadsPublication,
   inferRemoteMediaKind,
   isThreadsSocialVideoUrl,
   mediaExtensionForMimeType,
   normalizeMediaMimeType,
-  uniqueStrings,
 } from "./social-video.js";
 
 export function createSocialDownloader(deps) {
@@ -184,33 +183,37 @@ export async function downloadTikTokWithFallbackApi(url, tempDir, titleHint = ""
     id: body.data.aweme_id || body.data.id, owner: body.data.author?.unique_id });
 
   const title = titleHint || (typeof body.data.title === "string" ? body.data.title : "");
-  const maxItems = deps.getMaxMediaItems();
-  const imageUrls = uniqueStrings(Array.isArray(body.data.images) ? body.data.images : []);
+  const imageUrls = Array.isArray(body.data.images) ? body.data.images : [];
+  if ((body.data.image_count != null && body.data.image_count !== imageUrls.length) ||
+      imageUrls.length > Math.min(maxPublicationItems, deps.getMaxMediaItems()) ||
+      imageUrls.some(url => typeof url !== "string" || !URL.canParse(url) || new URL(url).protocol !== "https:")) {
+    throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "tiktok-api");
+  }
   if (imageUrls.length) {
     const files = [];
-    for (const [index, imageUrl] of imageUrls.slice(0, maxItems).entries()) {
+    for (const [index, imageUrl] of imageUrls.entries()) {
       const downloaded = await downloadRemoteMediaFile(
         imageUrl,
         tempDir,
         `tiktok-image-${Date.now()}-${index + 1}`,
         url,
-        "image",
+        "",
         deps,
       );
+      if (downloaded.mediaKind !== "image") throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", "tiktok-api");
       downloaded.title = "TikTok image";
       files.push(downloaded);
     }
 
-    const selectedFiles = deps.uniqueMediaFiles(files).slice(0, maxItems);
-    if (!selectedFiles.length) throw new Error("TikTok fallback API returned no downloadable images");
     return {
       source,
       tempDir,
-      files: selectedFiles,
+      files,
       title: title || "TikTok images",
     };
   }
 
+  if (mediaReference(resolvedUrl)?.kind === "photo") throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "tiktok-api");
   const mediaUrl = body.data.play || body.data.wmplay;
   if (!mediaUrl) throw new Error("TikTok fallback API returned no playable video");
 
@@ -261,31 +264,27 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
   if (/\/(?:accounts\/)?login(?:\/|\?|$)/iu.test(new URL(resolvedUrl).pathname)) {
     throw Object.assign(new Error("Threads redirected to login; authentication required"), { code: "AUTH_REQUIRED" });
   }
-  const extracted = extractThreadsPostFromHtml(html, resolvedUrl);
-  const mediaUrls = extracted.mediaUrls;
-  if (!mediaUrls.length) {
+  const extracted = extractThreadsPublication(html, resolvedUrl);
+  if (!extracted.items.length) {
     if (/"status"\s*:\s*"fail_ssr_disabled"/u.test(html)) {
       throw Object.assign(new Error("Threads returned a page without server-rendered post contents"), { code: "THREADS_RENDER_UNAVAILABLE" });
+    }
+    if (!extracted.post && ["og:image", "twitter:image", "og:video", "og:video:url", "twitter:player:stream"].some(key => extractHtmlMetaContent(html, key))) {
+      throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
     }
     const error = new Error("Threads fetch returned no media");
     error.code = "THREADS_MEDIA_NOT_FOUND";
     throw error;
   }
-  const nativeMetaUrl = extractHtmlMetaContent(html, "og:url");
-  const identityUrl = mediaReference(resolvedUrl)?.id ? resolvedUrl : nativeMetaUrl;
-  const post = extractTargetThreadsPost(html, identityUrl);
-  const meta = mediaReference(nativeMetaUrl);
-  const nativeVideo = extractHtmlMetaContent(html, "og:video") || extractHtmlMetaContent(html, "og:video:url") || extractHtmlMetaContent(html, "twitter:player:stream");
-  // A generic OG image can be an avatar/preview. It does not establish that
-  // the provider actually exposed the requested post's media.
-  if (!post && (!nativeVideo || !meta?.id)) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
-  const source = verifiedMediaSource(url, { provider: "threads-page", resolvedUrl: identityUrl,
-    id: post?.code || meta.id, owner: post?.user?.username || meta.owner });
+  const ref = mediaReference(extracted.resolvedUrl);
+  const source = verifiedMediaSource(url, { provider: "threads-page", resolvedUrl: extracted.resolvedUrl,
+    id: extracted.post?.code || ref?.id, owner: extracted.post?.user?.username || ref?.owner });
+  if (extracted.items.length > Math.min(20, deps.getMaxMediaItems())) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
 
   const files = [];
-  const maxItems = deps.getMaxMediaItems();
-  for (const [index, mediaUrl] of mediaUrls.slice(0, maxItems).entries()) {
-    const downloaded = await downloadRemoteMediaFile(mediaUrl, tempDir, `threads-media-${Date.now()}-${index + 1}`, resolvedUrl, "", deps);
+  for (const [index, item] of extracted.items.entries()) {
+    const downloaded = await downloadRemoteMediaFile(item.url, tempDir, `threads-media-${Date.now()}-${index + 1}`, resolvedUrl, "", deps);
+    if (downloaded.mediaKind !== item.kind) throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", "threads-page");
     if (downloaded.mediaKind === "video") {
       const video = await deps.validateDownloadedVideo(downloaded.filePath, { requireAudio: false });
       downloaded.hasAudio = video.hasAudio;
@@ -296,13 +295,11 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
     files.push(downloaded);
   }
 
-  const selectedFiles = await deps.selectMediaFiles(files, maxItems, resolvedUrl);
-  if (!selectedFiles.length) throw new Error("Threads fetch returned no downloadable media");
   return {
     source,
     tempDir,
-    files: selectedFiles,
-    title: extracted.caption || (selectedFiles.length > 1 ? "Threads media" : selectedFiles[0].title.replace(/^Instagram/, "Threads")),
+    files,
+    title: extracted.caption || (files.length > 1 ? "Threads media" : files[0].title.replace(/^Instagram/, "Threads")),
   };
 }
 
@@ -338,7 +335,7 @@ export async function downloadInstagramPost(url, tempDir, deps) {
   }
   const source = verifiedMediaSource(url, { provider: "instaloader", resolvedUrl: manifest.url, id: manifest.id, owner: manifest.owner });
   const count = Number(manifest.count), selected = Math.min(20, deps.getMaxMediaItems(), count);
-  if (!Number.isSafeInteger(count) || count < 1 || !Array.isArray(manifest.items) || manifest.items.length !== selected) {
+  if (!Number.isSafeInteger(count) || count < 1 || !Array.isArray(manifest.items) || manifest.items.length !== count || count > selected) {
     throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader");
   }
   const files = [];
@@ -369,6 +366,10 @@ export async function downloadSocialVideo(url, deps) {
     }
     // yt-dlp has no Threads extractor. Its generic unsupported-URL error says
     // nothing about the media format and must not mask the actual page result.
+    if (mediaReference(url)?.kind === "photo" && mediaReference(url)?.platform === "tiktok") {
+      // A slideshow rendered as a video cannot prove the number and order of original slides.
+      return await runSocialVideoFallback("tiktok", () => deps.downloadTikTok(url, tempDir), deps);
+    }
     if (isThreadsSocialVideoUrl(url)) return await runSocialVideoFallback("threads", () => deps.downloadThreads(url, tempDir), deps);
     if (mediaReference(url)?.platform === "instagram" && ["post", "reel"].includes(mediaReference(url)?.kind) && deps.instagramScript) {
       try { return await downloadInstagramPost(url, tempDir, deps); }

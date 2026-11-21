@@ -81,7 +81,7 @@ test('prepared delivery bypasses source quota/cooldown while holding the same co
   assert.equal(budget.reserveSource(cached.reservation).reason, 'SUCCESS_QUOTA');
   budget.complete(cached.reservation, { success: true });
   assert.equal(budget.chats.get('1').successes.length, 1);
-  assert.equal(budget.chats.get('1').failures.length, 0);
+  assert.equal(budget.chats.get('1').providers.size, 0);
   const failed = budget.reserve(2, 'broken', { source: false });
   budget.reserveSource(failed.reservation); budget.completeSource(failed.reservation, { success: false });
   budget.complete(failed.reservation, { success: false });
@@ -89,7 +89,20 @@ test('prepared delivery bypasses source quota/cooldown while holding the same co
   assert.equal(reuse.allowed, true);
   assert.equal(budget.reserveSource(reuse.reservation).reason, 'FAILURE_COOLDOWN');
   budget.complete(reuse.reservation, { success: true });
-  assert.equal(budget.chats.get('2').failures.length, 1);
+  assert.equal(budget.chats.get('2').providers.get('other').failures.length, 1);
+});
+
+test('only upstream failures pause other links at the same provider in the same group', () => {
+  const budget = new MediaBudget({ hourlyLimit: 0, now: () => 1000, maxFailures: 1 });
+  const blocked = budget.reserve(7, 'https://www.instagram.com/p/private/');
+  budget.complete(blocked.reservation, { success: false, providerFailure: false });
+  assert.equal(budget.reserve(7, 'https://www.instagram.com/p/private/').reason, 'URL_BACKOFF');
+  const down = budget.reserve(7, 'https://www.instagram.com/p/outage/');
+  assert.equal(down.allowed, true);
+  budget.complete(down.reservation, { success: false, providerFailure: true });
+  assert.equal(budget.reserve(7, 'https://www.instagram.com/p/next/').reason, 'FAILURE_COOLDOWN');
+  assert.equal(budget.reserve(7, 'https://www.tiktok.com/@a/video/12/').allowed, true);
+  assert.equal(budget.reserve(8, 'https://www.instagram.com/p/next/').allowed, true);
 });
 
 test('abandoned cache work and upload/cache errors never invent upstream failures', () => {

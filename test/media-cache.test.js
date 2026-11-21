@@ -209,3 +209,48 @@ test('long-lived metadata cannot exceed the readable index bound or evict pendin
   assert.equal((await cache.read()).entries.length, state.entries.length);
   assert.equal(await fs.readFile(pinned.files[0].filePath, 'utf8'), 'tiny');
 });
+
+test("a document fallback preserves the message binding and clears an earlier photo or video receipt", async t => {
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, "file");
+  await fs.writeFile(filePath, "test");
+  const cacheRoot = path.join(directory, "cache"), cache = new MediaCache(cacheRoot);
+  const files = ["image", "video", "document"].map(mediaKind => ({ filePath, mediaKind }));
+  const entry = await cache.put({ chatId: 7, sourceMessageId: 1, files });
+  await cache.bind(entry.id, [11, 12], { botId: 9, items: [{ photo: [{ file_id: "old-photo" }] }, { video: { file_id: "old-video" } }] });
+  await cache.bind(entry.id, [21, 22, 23], { botId: 9, items: files.map(() => ({ document: { file_id: "document" } })) });
+  const restored = new MediaCache(cacheRoot);
+  const publication = await restored.forDelivery({ chatId: 7, entryId: entry.id, botId: 9 });
+  assert.deepEqual(publication.files.map(f => f.telegramFileId), [undefined, undefined, "document"]);
+  assert.deepEqual((await restored.get({ chatId: 7, messageId: 21 })).files.map(f => f.mediaKind), ["image"]);
+});
+
+test("legacy Threads previews and potentially truncated slides are readable by message but never reused for a fresh URL", async t => {
+  const { verifiedMediaSource } = await import("../src/media-source.js");
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, "one.jpg");
+  const cacheRoot = path.join(directory, "cache"), cache = new MediaCache(cacheRoot);
+  await fs.writeFile(filePath, "first slide");
+  const cases = [["threads-page", "https://www.threads.com/@u/post/abc/", "abc"], ["tiktok-api", "https://www.tiktok.com/@u/photo/1/", "1"]];
+  for (const [provider, url, id] of cases) {
+    const source = verifiedMediaSource(url, { provider, id, owner: "u" });
+    const entry = await cache.put({ chatId: 7, sourceMessageId: 11, source, sourceUrl: url, files: [{ filePath, mediaKind: "image" }] });
+    const index = await cache.read();
+    delete index.entries.find(item => item.id === entry.id).orderedMediaVersion;
+    await cache.write(index);
+    const restored = new MediaCache(cacheRoot);
+    assert.equal(await restored.forDelivery({ chatId: 7, sourceUrl: url, botId: 9 }), null);
+    assert.equal((await restored.forDelivery({ chatId: 7, entryId: entry.id, botId: 9 })).complete, true);
+    assert.equal((await restored.get({ chatId: 7, messageId: 11 })).complete, true);
+  }
+});
+
+test("TikTok video and photo aliases with the same ID cannot reuse a rendered clip as source slides", async t => {
+  const { verifiedMediaSource } = await import("../src/media-source.js");
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, "rendered.mp4");
+  await fs.writeFile(filePath, "clip");
+  const cache = new MediaCache(path.join(directory, "cache"));
+  const video = "https://www.tiktok.com/@u/video/123/", photo = "https://www.tiktok.com/@u/photo/123/";
+  const source = verifiedMediaSource(video, { provider: "yt-dlp", id: "123", owner: "u" });
+  await cache.put({ chatId: 1, sourceMessageId: 10, source, sourceUrl: video, files: [{ filePath, mediaKind: "video" }] });
+  assert.ok((await cache.forDelivery({ chatId: 1, sourceUrl: video })).complete);
+  assert.equal(await cache.forDelivery({ chatId: 1, sourceUrl: photo }), null);
+});

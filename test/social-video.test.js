@@ -126,7 +126,8 @@ test("selectSocialMediaFiles keeps Threads items and Instagram carousel images",
     { mediaKind: "image", hash: "c", size: 30 },
   ];
 
-  assert.deepEqual(await selectSocialMediaFiles(files, 2, "https://threads.net/@user/post/abc"), [files[0], files[1]]);
+  assert.deepEqual(await selectSocialMediaFiles(files, 3, "https://threads.net/@user/post/abc"), files);
+  await assert.rejects(selectSocialMediaFiles(files, 2, "https://threads.net/@user/post/abc"), { code: "MEDIA_SOURCE_UNVERIFIED" });
   assert.deepEqual(await selectSocialMediaFiles(files, 2, "https://www.instagram.com/p/abc/"), [files[0], files[1]]);
 });
 

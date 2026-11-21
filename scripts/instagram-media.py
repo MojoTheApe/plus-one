@@ -46,16 +46,58 @@ def verified_alternate_urls(post, native_id, children=None):
             raise ValueError("MEDIA_SOURCE_UNVERIFIED")
         if str(alternate.get("pk")) != str(native_id) or alternate.get("media_type") != expected_type:
             raise ValueError("MEDIA_SOURCE_MISMATCH")
+        if alternate.get("code") and alternate["code"] != post.shortcode:
+            raise ValueError("MEDIA_SOURCE_MISMATCH")
         if children is not None:
             if any(not re.fullmatch(r"[0-9]+", str(item.get("pk", ""))) or item.get("media_type") not in {1, 2} for item in alternate["carousel_media"]):
                 raise ValueError("MEDIA_SOURCE_UNVERIFIED")
             actual = [(str(item["pk"]), item["media_type"] == 2) for item in alternate["carousel_media"]]
             if actual != children:
                 raise ValueError("MEDIA_SOURCE_MISMATCH")
+            if any(item.get("code") and item["code"] != post.mediaid_to_shortcode(int(item["pk"])) for item in alternate["carousel_media"]):
+                raise ValueError("MEDIA_SOURCE_MISMATCH")
     try:
         yield
     finally:
         context.iphone_support = enabled
+
+
+def sidecar_children(post, parent, edges, native_id):
+    # Instaloader 4.16 preserves the raw Polaris carousel in the normalized
+    # parent, but omits the numeric child IDs in edge_sidecar_to_children.
+    raw = parent.get("carousel_media")
+    if raw is not None:
+        if str(parent.get("pk")) != str(native_id) or parent.get("code") != post.shortcode or parent.get("media_type") != 8:
+            raise ValueError("MEDIA_SOURCE_MISMATCH")
+        if not isinstance(raw, list) or len(raw) != len(edges) or parent.get("carousel_media_count", len(raw)) != len(raw):
+            raise ValueError("MEDIA_SOURCE_UNVERIFIED")
+    children = []
+    for index, edge in enumerate(edges):
+        node = edge["node"]
+        is_video = node["is_video"]
+        if type(is_video) is not bool:
+            raise ValueError("MEDIA_SOURCE_UNVERIFIED")
+        item = raw[index] if raw is not None else {}
+        if raw is not None and (type(item.get("media_type")) is not int or item["media_type"] != (2 if is_video else 1)):
+            raise ValueError("MEDIA_SOURCE_MISMATCH")
+        media_id = str(item["pk"] if raw is not None else node["id"])
+        if not re.fullmatch(r"[1-9][0-9]{0,19}", media_id) or int(media_id).bit_length() > 64:
+            raise ValueError("MEDIA_SOURCE_UNVERIFIED")
+        if node.get("id") is not None and str(node["id"]) != media_id:
+            raise ValueError("MEDIA_SOURCE_MISMATCH")
+        for shortcode in (item.get("code"), node.get("shortcode")):
+            if shortcode and shortcode != post.mediaid_to_shortcode(int(media_id)):
+                raise ValueError("MEDIA_SOURCE_MISMATCH")
+        if raw is not None:
+            # Verify the normalized position against the same raw child's
+            # selected asset even when Instagram supplies no child shortcode.
+            versions = item.get("video_versions") if is_video else (item.get("image_versions2") or {}).get("candidates")
+            if not versions or not versions[0].get("url") or versions[0]["url"] != node.get("video_url" if is_video else "display_url"):
+                raise ValueError("MEDIA_SOURCE_UNVERIFIED")
+        children.append((media_id, is_video))
+    if len({media_id for media_id, _ in children}) != len(children):
+        raise ValueError("MEDIA_SOURCE_UNVERIFIED")
+    return children
 
 
 def publication_manifest(post, max_items):
@@ -70,12 +112,12 @@ def publication_manifest(post, max_items):
         raise ValueError("MEDIA_SOURCE_UNVERIFIED")
     if post.typename == "GraphSidecar":
         edges = post._field("edge_sidecar_to_children", "edges")
+        children = sidecar_children(post, getattr(post, "_node", {}), edges, native_id)
         if any(edge["node"]["is_video"] and "video_url" not in edge["node"] for edge in edges[:max_items]):
-            full_edges = post._full_metadata["edge_sidecar_to_children"]["edges"]
-            if [edge["node"]["id"] for edge in full_edges] != [edge["node"]["id"] for edge in edges]:
+            full = post._full_metadata
+            full_edges = full["edge_sidecar_to_children"]["edges"]
+            if sidecar_children(post, full, full_edges, native_id) != children:
                 raise ValueError("MEDIA_SOURCE_MISMATCH")
-            edges = full_edges
-        children = [(str(edge["node"]["id"]), edge["node"]["is_video"]) for edge in edges]
         # Sidecar videos use GraphQL URLs; only selected photos ask the library
         # for alternate high-quality URLs.
         if any(not is_video for _, is_video in children[:max_items]):
@@ -86,7 +128,7 @@ def publication_manifest(post, max_items):
         if len(edges) != count or len(nodes) != min(count, max_items):
             raise ValueError("MEDIA_SOURCE_UNVERIFIED")
         items = [{"index": index, "kind": "video" if node.is_video else "image",
-                  "mediaId": str(edges[index]["node"]["id"]),
+                  "mediaId": children[index][0],
                   "url": node.video_url if node.is_video else node.display_url}
                  for index, node in enumerate(nodes)]
         if any(node.is_video != edges[index]["node"]["is_video"] for index, node in enumerate(nodes)):

@@ -200,8 +200,9 @@ temporary cookie file, removed with the attempt. The adapter reads the JSON with
 pickle or automatic login. Access/challenges remain the operator's responsibility; missing login
 does not authorize an unbound third-party downloader or a different Stories item.
 
-If one Instagram method requires sign-in and another is temporarily limited,
-the group can request a retry after the displayed wait. If an upload timed out
+When Instagram confirms a temporary limit, the group link stays queued and
+resumes automatically within the recovery window. Other supported links in the
+same message keep their own delivery state. If an upload timed out
 but its video appeared, a reply to the bot's video lets it recognize that
 publication in the same group and topic and point subsequent retries to it.
 
@@ -213,8 +214,9 @@ IDs may be reused for30 days within the existing300-entry/4MiB-index caps.
 Protected pending recovery is never evicted to fit metadata. Partial/unknown
 and legacy records keep48-hour bounds. Fresh recovery requires the original
 ordered item identities; no legacy album replacement is guessed by position.
-`SOCIAL_VIDEO_PER_CHAT_PER_HOUR` limits successful new source retrievals, not
-prepared/Telegram repeats. A stale reference that needs the source again consumes
+`SOCIAL_VIDEO_PER_CHAT_PER_HOUR` limits successful new source retrievals.
+Set it to 0 to disable the hourly quota. The queue and source backoff stay active.
+Prepared files and Telegram repeats bypass the quota. A stale reference that needs the source again consumes
 source allowance; cache or upload errors do not count as upstream failures.
 The next job waits/fails before upload if protected files exhaust its256MiB budget.
 Captions retain title/source/link only; requester and operation data stay private.

@@ -311,20 +311,41 @@ export class MediaOperations {
       op.observedMessageId = video.message_id;
     });
   }
-  async find(message, allowLatest = false, scope = {}) {
+  async forSourceMessage(message, topicId, url) {
+    const key = mediaPublicationKey(url);
+    return (await this.read()).find(op => String(op.chatId) === String(message.chat.id) &&
+      (op.topicId ?? op.threadId ?? null) === topicId && op.sourceMessageId === message.message_id &&
+      mediaPublicationKey(op.url) === key);
+  }
+  async candidates(message, allowLatest = false, scope = {}) {
     const chatId = scope.chatId ?? message.chat.id;
     const topicId = scope.topicId !== undefined ? scope.topicId : message.is_topic_message === true ? message.message_thread_id ?? null : null;
-    const all = (await this.read()).filter(op => String(op.chatId) === String(chatId) && (op.topicId ?? op.threadId ?? null) === topicId);
+    const key = scope.url && mediaPublicationKey(scope.url);
+    const all = (await this.read()).filter(op => String(op.chatId) === String(chatId) && (op.topicId ?? op.threadId ?? null) === topicId &&
+      (!key || mediaPublicationKey(op.url) === key));
+    if (scope.resumeRequest) {
+      const previous = all.find(op => op.lastRequest?.messageId === message.message_id && op.sourceMessageId !== message.message_id);
+      if (previous) return [previous];
+    }
     const targets = [...(scope.referenceMessageIds || [])];
     let reply = message.reply_to_message;
     for (let depth = 0; reply && depth < 8; depth++, reply = reply.reply_to_message) targets.push(reply.message_id);
     // Exact references are allowed across participants, but never across chats/topics.
     for (const target of targets) {
-      const operation = all.find(op => operationReferences(op).includes(target));
-      if (operation) return operation;
+      const matches = all.filter(op => operationReferences(op).includes(target));
+      if (matches.length) {
+        const unfinished = matches.filter(op => op.status !== "done");
+        return unfinished.length ? unfinished : matches;
+      }
     }
-    if (targets.length) return null;
-    return allowLatest ? all.find(op => op.userId === message.from?.id && op.status !== "done") || null : null;
+    if (targets.length || !allowLatest) return [];
+    const latest = all.find(op => op.userId === message.from?.id && op.status !== "done");
+    if (!latest) return [];
+    return all.filter(op => op.sourceMessageId === latest.sourceMessageId && op.userId === latest.userId && op.status !== "done");
+  }
+  async find(message, allowLatest = false, scope = {}) {
+    const matches = await this.candidates(message, allowLatest, scope);
+    return matches.length === 1 ? matches[0] : null;
   }
   async evidence(message, { referenceMessageIds = [], topicId = null } = {}) {
     const references = new Set(referenceMessageIds.filter(Number.isSafeInteger));

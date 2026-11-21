@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { assertVerifiedMediaSource, mediaPublicationKey } from "./media-source.js";
-import { assertSameMediaItems, hasMediaItemIdentity } from "./media-items.js";
+import { assertVerifiedMediaSource, mediaPublicationKey, mediaReference } from "./media-source.js";
+import { assertSameMediaItems, hasMediaItemIdentity, maxPublicationItems } from "./media-items.js";
 
 const safeId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const safeName = /^\d{1,2}\.[a-z0-9]{1,6}$/;
@@ -22,7 +22,7 @@ export class MediaCache {
       const state = await this.read();
       await this.trim(state);
       const id = randomUUID(), destination = path.join(this.directory, id);
-      const entry = { id, chatId, topicId, sourceMessageId, sourceUrl: String(sourceUrl).slice(0, 4096),
+      const entry = { id, chatId, topicId, sourceMessageId, sourceUrl: String(sourceUrl).slice(0, 4096), orderedMediaVersion: 1,
         source, title: String(title).slice(0, 1000), sentMessageIds: [], bindings: [], receipts: [], sourceMessageIds: [sourceMessageId],
         createdAt: this.now(), pending, ...(pending ? { pendingSince: this.now() } : {}), files: [], sourceFileCount: files.length,
         manifest: files.map((file, index) => ({ index, sourceItemId: file.sourceItemId, mediaKind: file.mediaKind, mimeType: file.mimeType,
@@ -31,14 +31,14 @@ export class MediaCache {
         const sizes = await Promise.all(files.map(file => fs.lstat(file.filePath)));
         const required = sizes.reduce((sum, stat) => sum + stat.size, 0);
         const reserved = state.entries.filter(item => item.pending).reduce((sum, item) => sum + item.files.reduce((n, file) => n + file.size, 0), 0);
-        if (files.length > 20 || sizes.some(stat => !stat.isFile() || stat.isSymbolicLink() || stat.size > this.maxFileBytes) || required + reserved > this.maxTotalBytes) {
+        if (files.length > maxPublicationItems || sizes.some(stat => !stat.isFile() || stat.isSymbolicLink() || stat.size > this.maxFileBytes) || required + reserved > this.maxTotalBytes) {
           throw capacityError();
         }
       }
       await fs.mkdir(destination, { mode: 0o700 });
       try {
         let bytes = 0;
-        for (const [index, file] of files.slice(0, 20).entries()) {
+        for (const [index, file] of files.slice(0, maxPublicationItems).entries()) {
           const source = await fs.lstat(file.filePath).catch(() => null);
           if (!source?.isFile() || source.isSymbolicLink() || source.size > this.maxFileBytes
             || bytes + source.size > this.maxTotalBytes) continue;
@@ -72,25 +72,38 @@ export class MediaCache {
         entry.sentMessageIds = [...new Set([...entry.sentMessageIds, ...sentMessageIds.filter(Number.isSafeInteger)])].slice(-50);
         for (const [offset, messageId] of sentMessageIds.entries()) {
           const index = startIndex + offset;
-          if (!Number.isSafeInteger(messageId) || messageId <= 0 || !(entry.manifest?.length ? entry.manifest : entry.files).some(file => file.index === index)) continue;
-          entry.bindings = [...entry.bindings.filter(binding => binding.messageId !== messageId), { messageId, index }].slice(-50);
-          const item = items[offset], fileId = item?.video?.file_id || item?.photo?.at(-1)?.file_id || item?.document?.file_id;
-          if (Number.isSafeInteger(botId) && typeof fileId === "string" && fileId.length <= 1024) {
-            entry.receipts = [...(entry.receipts || []).filter(receipt => receipt.index !== index), { index, botId, fileId }];
+          const file = (entry.manifest?.length ? entry.manifest : entry.files).find(file => file.index === index);
+          if (!Number.isSafeInteger(messageId) || messageId <= 0 || !file) continue;
+          const binding = entry.bindings.find(binding => binding.messageId === messageId);
+          if (binding) binding.index = index;
+          else entry.bindings.push({ messageId, index });
+          const item = items[offset];
+          if (Number.isSafeInteger(botId) && (item?.video || item?.photo || item?.document)) {
+            const fileId = file.mediaKind === "image" ? item.photo?.at(-1)?.file_id :
+              file.mediaKind === "video" ? item.video?.file_id : file.mediaKind === "document" ? item.document?.file_id : undefined;
+            if (typeof fileId === "string" && fileId.length && fileId.length <= 1024) {
+              entry.receipts = [...entry.receipts.filter(receipt => receipt.index !== index), { index, botId, fileId }];
+            } else {
+              entry.receipts = entry.receipts.filter(receipt => receipt.index !== index || receipt.botId !== botId);
+            }
           }
         }
+        entry.bindings = retainMediaBindings(entry.bindings);
       }
       await this.write(state);
       return entry ? this.expose(entry) : null;
     });
   }
 
-  async get({ chatId, topicId = null, messageId, wholePublication = false }) {
+  async get({ chatId, topicId = null, messageId, wholePublication = false, sourceUrl }) {
     return this.lock(async () => {
       const state = await this.read();
       await this.trim(state);
+      const key = sourceUrl && mediaPublicationKey(sourceUrl);
       const entry = state.entries.slice().reverse().find(item => String(item.chatId) === String(chatId)
-        && item.topicId === topicId && (item.sourceMessageId === messageId || item.sourceMessageIds?.includes(messageId) || item.sentMessageIds.includes(messageId)));
+        && item.topicId === topicId && (!key || [item.sourceUrl, item.source?.resolved?.url].some(url => url && mediaPublicationKey(url) === key))
+        && (item.sourceMessageId === messageId || item.sourceMessageIds?.includes(messageId) ||
+          item.sentMessageIds.includes(messageId) || item.bindings.some(binding => binding.messageId === messageId)));
       await this.write(state);
       if (!entry) return null;
       if (messageId === entry.sourceMessageId || entry.sourceMessageIds?.includes(messageId) || wholePublication) return this.expose(entry);
@@ -109,9 +122,10 @@ export class MediaCache {
     return this.lock(async () => {
       const state = await this.read();
       await this.trim(state);
+      const key = sourceUrl && mediaPublicationKey(sourceUrl);
       const entry = state.entries.slice().reverse().find(item => String(item.chatId) === String(chatId) && item.topicId === topicId &&
-        (entryId ? item.id === entryId : messageId ? item.sourceMessageId === messageId :
-          !item.pending && [item.sourceUrl, item.source?.resolved?.url].some(value => value && mediaPublicationKey(value) === mediaPublicationKey(sourceUrl))));
+        (entryId ? item.id === entryId : messageId ? item.sourceMessageId === messageId : !item.pending && key && reusablePublication(item, sourceUrl)) &&
+        (!key || [item.sourceUrl, item.source?.requested?.url, item.source?.resolved?.url].some(value => value && mediaPublicationKey(value) === key)));
       await this.write(state);
       if (!entry) return null;
       const manifest = entry.manifest?.length === entry.sourceFileCount ? entry.manifest : entry.files;
@@ -194,12 +208,13 @@ export class MediaCache {
           topicId: entry.topicId ?? null, sentMessageIds: Array.isArray(entry.sentMessageIds) ? entry.sentMessageIds.filter(Number.isSafeInteger).slice(-50) : [],
           sourceMessageIds: Array.isArray(entry.sourceMessageIds) ? entry.sourceMessageIds.filter(Number.isSafeInteger).slice(-50) : [],
           receipts: Array.isArray(entry.receipts) ? entry.receipts.filter(value => Number.isSafeInteger(value?.index) && value.index >= 0 && value.index < entry.sourceFileCount && Number.isSafeInteger(value.botId) &&
-            typeof value.fileId === "string" && value.fileId.length > 0 && value.fileId.length <= 1024).slice(0, 20) : [],
-          manifest: Array.isArray(entry.manifest) ? entry.manifest.slice(0, 20).map(file => ({ index: file.index, sourceItemId: file.sourceItemId, mediaKind: file.mediaKind,
+            typeof value.fileId === "string" && value.fileId.length > 0 && value.fileId.length <= 1024).slice(0, maxPublicationItems) : [],
+          manifest: Array.isArray(entry.manifest) ? entry.manifest.slice(0, maxPublicationItems).map(file => ({ index: file.index, sourceItemId: file.sourceItemId, mediaKind: file.mediaKind,
             mimeType: file.mimeType, title: String(file.title || "").slice(0, 1000), size: file.size, width: file.width, height: file.height,
             duration: file.duration, hasAudio: file.hasAudio })) : [],
-          bindings: Array.isArray(entry.bindings) ? entry.bindings.filter(binding => Number.isSafeInteger(binding?.messageId) && binding.messageId > 0 && Number.isSafeInteger(binding.index) && binding.index >= 0 && binding.index < entry.sourceFileCount).slice(-50) : [],
-          files: entry.files.filter(file => file && safeName.test(file.name)).slice(0, 20)
+          bindings: Array.isArray(entry.bindings) ? retainMediaBindings(entry.bindings.filter(binding => Number.isSafeInteger(binding?.messageId) && binding.messageId > 0 &&
+            Number.isSafeInteger(binding.index) && binding.index >= 0 && binding.index < Math.min(maxPublicationItems, entry.sourceFileCount))) : [],
+          files: entry.files.filter(file => file && safeName.test(file.name)).slice(0, maxPublicationItems)
             .map(file => ({ ...file, index: Number.parseInt(file.name, 10) - 1 })) })) };
     } catch (error) { if (error.code === "ENOENT") return { version: 1, entries: [] }; throw error; }
   }
@@ -273,6 +288,30 @@ export class MediaCache {
 
 function capacityError() {
   return Object.assign(new Error("Prepared media cache is reserved by unfinished deliveries"), { code: "MEDIA_CACHE_CAPACITY" });
+}
+
+function retainMediaBindings(bindings) {
+  // Keep the first Telegram message for each slide for the life of this cache
+  // entry, plus the existing recent-message window for retries and repeats.
+  const first = new Set();
+  return bindings.filter((binding, position) => {
+    const original = !first.has(binding.index);
+    first.add(binding.index);
+    return original || position >= bindings.length - 50;
+  });
+}
+
+function reusablePublication(entry, sourceUrl) {
+  // TikTok shares a native ID between /video and /photo permalinks. A
+  // rendered slideshow from the video path cannot supply the original slides.
+  if (mediaReference(sourceUrl)?.kind === "photo" && (entry.source?.provider !== "tiktok-api" ||
+      !entry.manifest?.length || !entry.manifest.every(item => item.mediaKind === "image"))) return false;
+  if (entry.orderedMediaVersion === 1) return true;
+  // Before ordered selection, a cached prefix, duplicate collapse or video
+  // poster could look complete. Exact message/recovery lookups retain it.
+  if (entry.source?.provider === "threads-page" || entry.source?.resolved?.kind === "photo") return false;
+  if (entry.source?.provider === "tiktok-api") return entry.sourceFileCount === 1 && entry.manifest?.[0]?.mediaKind === "video";
+  return !(entry.source?.provider === "instaloader" && entry.manifest?.some(file => file.sourceItemId?.startsWith("native:")));
 }
 
 function hasReusableReceipts(entry) {
