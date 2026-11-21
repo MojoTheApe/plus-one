@@ -12,6 +12,8 @@ import {
   getOpenAIWebSearchStatus,
   getOpenClawWebSearchStatus,
   extractSocialVideoUrlFromText,
+  socialMessageLinks,
+  addressedMediaDownload,
   hasDistinctUkrainianOrthographyText,
   isAssembleRequestText,
   isBotDirectedInsultText,
@@ -311,6 +313,34 @@ test("extractSocialVideoUrlFromText returns supported social URLs and trims punc
   assert.equal(isSocialVideoHostName("m.tiktok.com"), true);
   assert.equal(isSocialVideoHostName("youtu.be"), false);
   assert.equal(isSocialVideoHostName("evilinstagram.com"), false);
+});
+
+test("Telegram links use UTF-16 offsets and preserve target order, aliases and hidden-link boundaries", () => {
+  const url = "https://www.instagram.com/p/apple/";
+  const threads = "www.threads.net/@fixture/post/berry";
+  const decoy = "https://www.instagram.com/p/decoy/";
+  const text = "  🍓 " + threads + " второй " + decoy + " https://www.instagram.com/reel/apple/?utm=copy";
+  const parsed = socialMessageLinks(text, [
+    { type: "text_link", offset: text.indexOf(decoy), length: decoy.length, url: "https://example.org/" },
+    { type: "text_link", offset: text.indexOf("второй"), length: 6, url },
+    { type: "url", offset: text.indexOf(threads), length: threads.length },
+    { type: "text_link", offset: text.length, length: 100, url: decoy },
+  ]);
+  assert.deepEqual(parsed.urls, ["https://" + threads, url]);
+  assert.equal(socialMessageLinks("https://example.org/instagram.com/p/a/ @instagram.com/p/b/").urls.length, 0);
+  assert.equal(socialMessageLinks("https://user@instagram.com/p/a/ https://instagram.com:123/p/b/").urls.length, 0);
+  assert.deepEqual(socialMessageLinks("А также instagram.com/p/x/ или https://threads.com/@y/post/z.").urls,
+    ["https://instagram.com/p/x/", "https://threads.com/@y/post/z"]);
+});
+
+test("only explicit addressed download imperatives bypass dialogue", () => {
+  for (const text of ["@test_bot скачай, пожалуйста", "@Test_Bot надішли файлом", "please @test_bot download", "@test_bot"]) {
+    assert.equal(addressedMediaDownload(text, "test_bot"), true, text);
+  }
+  for (const text of ["@test_bot как скачать?", "@test_bot скачать?", "@test_bot не скачай",
+    "@test_bot скачай и объясни смысл", "@test_bot проаналізуй", "@test_bot what is this?"]) {
+    assert.equal(addressedMediaDownload(text, "test_bot"), false, text);
+  }
 });
 
 test("socialVideoProviderForUrl classifies supported hosts", () => {

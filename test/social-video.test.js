@@ -100,6 +100,31 @@ test('a Threads payload belonging to a different author cannot replace the reque
   assert.equal(extractThreadsPostFromHtml(html,'https://www.threads.com/@user/post/abc123').mediaUrls.length,0);
 });
 
+test("Threads chooses the complete compatible native carousel independently of script order", () => {
+  const source = "https://www.threads.com/@fixture/post/test/";
+  const base = {code:"test", user:{username:"fixture"}};
+  const pic = name => ({ media_type:1, image_versions2:{candidates:[{url:"https://scontent-test.cdninstagram.com/" + name + ".jpg"}]} });
+  const video = {media_type:2, video_versions:[{url:"https://scontent-test.cdninstagram.com/two.mp4"}]};
+  const first = pic("one"), card = {...base,...first};
+  const full = {...base, media_type:8, carousel_media_count:2, carousel_media:[first,video], caption:{text:"Album"}};
+  const parse = posts => extractThreadsPostFromHtml(posts.map(p => '<script type="application/json">' + JSON.stringify(p) + '</script>').join(''), source);
+  const expected = [first.image_versions2.candidates[0].url, video.video_versions[0].url];
+  for (const variant of [card, {...full,carousel_media:[first]}, {...full,carousel_media:undefined}, structuredClone(full)]) {
+    for (const pair of [[variant,full],[full,variant]]) assert.deepEqual(parse(pair), {mediaUrls:expected,caption:"Album"});
+  }
+  const headed = {...full,carousel_media:[{...first,pk:"1"},{...video,pk:"2"}]};
+  const conflicts = [
+    {...card,...pic("different-cover")}, {...full,carousel_media_count:3},
+    {...full,carousel_media:[video,first]}, {...full,carousel_media:[{...first,pk:"other"},video]},
+    {...full,carousel_media:[first,{...pic("two")}]},
+  ];
+  for (const other of conflicts) {
+    for (const pair of [[other,headed],[headed,other]]) {
+      assert.throws(() => parse(pair), error => error.code === "MEDIA_SOURCE_UNVERIFIED");
+    }
+  }
+});
+
 test("media type helpers infer kind, mime, and extension", () => {
   assert.equal(inferRemoteMediaKind("https://example.com/photo.webp", ""), "image");
   assert.equal(inferRemoteMediaKind("https://d.rapidcdn.app/file", "application/octet-stream"), "video");
@@ -126,7 +151,8 @@ test("selectSocialMediaFiles keeps Threads items and Instagram carousel images",
     { mediaKind: "image", hash: "c", size: 30 },
   ];
 
-  assert.deepEqual(await selectSocialMediaFiles(files, 2, "https://threads.net/@user/post/abc"), [files[0], files[1]]);
+  assert.deepEqual(await selectSocialMediaFiles(files, 3, "https://threads.net/@user/post/abc"), files);
+  await assert.rejects(selectSocialMediaFiles(files, 2, "https://threads.net/@user/post/abc"), { code: "MEDIA_SOURCE_UNVERIFIED" });
   assert.deepEqual(await selectSocialMediaFiles(files, 2, "https://www.instagram.com/p/abc/"), [files[0], files[1]]);
 });
 

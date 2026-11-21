@@ -7,7 +7,7 @@ export const telegramUploadBudget = 48 * 1024 * 1024;
 export const telegramPhotoBudget = 9 * 1024 * 1024;
 const videoTargetBytes = 18 * 1024 * 1024;
 
-export async function prepareMediaForTelegram(files, { maxDurationSeconds = 300, maxUploadBytes = telegramUploadBudget, ffmpeg = "ffmpeg", ffprobe = "ffprobe", execute = run, deadline = Infinity } = {}) {
+export async function prepareMediaForTelegram(files, { maxDurationSeconds = 300, maxUploadBytes = telegramUploadBudget, ffmpeg = "ffmpeg", ffprobe = "ffprobe", execute = run, deadline = Infinity, photoOutputDir } = {}) {
   const boundedOptions = timeout => {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw Object.assign(new Error("Media attempt deadline exceeded"), {code:"SOCIAL_DOWNLOAD_TIMEOUT"});
@@ -30,12 +30,14 @@ export async function prepareMediaForTelegram(files, { maxDurationSeconds = 300,
         throw Object.assign(new Error("Invalid image media"), { code: "MEDIA_IMAGE_INVALID" });
       }
       const geometryAllowed = image.width + image.height <= 10000 && Math.max(image.width / image.height, image.height / image.width) <= 20;
-      if (stat.size > telegramPhotoBudget || !geometryAllowed || !["mjpeg", "png"].includes(image.codec_name)) {
-        const output = path.join(path.dirname(item.filePath), "telegram-photo-" + path.basename(item.filePath, path.extname(item.filePath)) + ".jpg");
+      if (photoOutputDir || stat.size > telegramPhotoBudget || !geometryAllowed || !["mjpeg", "png"].includes(image.codec_name)) {
+        const output = path.join(photoOutputDir || path.dirname(item.filePath), "telegram-photo-" + path.basename(item.filePath, path.extname(item.filePath)) + ".jpg");
+        // ICC profiles travel as frame side data even with map_metadata disabled.
+        const stripRejectedProfile = photoOutputDir ? ",sidedata=mode=delete:type=ICC_PROFILE" : "";
         // Pad extreme aspect ratios rather than cropping away source content.
         await execute(ffmpeg, ["-v", "error", "-y", "-threads", "1", "-protocol_whitelist", "file,pipe", "-i", item.filePath,
-          "-frames:v", "1", "-vf", "scale=w='min(2560,iw)':h='min(2560,ih)':force_original_aspect_ratio=decrease,pad=w='ceil(max(iw,ih/20)/2)*2':h='ceil(max(ih,iw/20)/2)*2':x=(ow-iw)/2:y=(oh-ih)/2:color=white",
-          "-q:v", "3", "-threads", "1", output], boundedOptions(30000));
+          "-frames:v", "1", "-vf", "scale=w='min(2560,iw)':h='min(2560,ih)':force_original_aspect_ratio=decrease,pad=w='ceil(max(iw,ih/20)/2)*2':h='ceil(max(ih,iw/20)/2)*2':x=(ow-iw)/2:y=(oh-ih)/2:color=white" + stripRejectedProfile,
+          "-map_metadata", "-1", "-pix_fmt", "yuvj420p", "-flags:v", "+bitexact", "-q:v", "3", "-threads", "1", output], boundedOptions(30000));
         const checked = await probe(output), size = (await fs.stat(output)).size;
         if (!checked || checked.codec_name !== "mjpeg" || Number(checked.nb_read_frames) !== 1 || !(checked.width > 0 && checked.height > 0) ||
             checked.width + checked.height > 10000 || Math.max(checked.width / checked.height, checked.height / checked.width) > 20 || size > telegramPhotoBudget) {
@@ -59,7 +61,7 @@ export async function prepareMediaForTelegram(files, { maxDurationSeconds = 300,
       const compatible = stream.codec_name === "h264" && ["yuv420p", "yuvj420p"].includes(stream.pix_fmt) &&
         (!audio || audio.codec_name === "aac") && String(metadata.format?.format_name || "").split(",").includes("mp4");
       const targetBytes = Math.min(maxUploadBytes, videoTargetBytes);
-      const oversized = stat.size > targetBytes;
+      const oversized = stat.size > maxUploadBytes;
       if (oversized || !compatible) {
         const output = path.join(path.dirname(item.filePath), "telegram-" + path.basename(item.filePath, path.extname(item.filePath)) + ".mp4");
         // Tiny budgets need proportionally more room for container/keyframe

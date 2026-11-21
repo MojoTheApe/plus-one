@@ -1,4 +1,5 @@
 import path from "node:path";
+import { sourceIdentityError } from "./media-source.js";
 import { decodeHtmlEntities, escapeRegex } from "./helpers.js";
 
 export function formatSocialVideoCaption(url, title) {
@@ -89,7 +90,8 @@ export function isThreadsSocialVideoUrl(url) {
 
 export async function selectSocialMediaFiles(files, maxItems, sourceUrl = "") {
   if (isThreadsSocialVideoUrl(sourceUrl)) {
-    return uniqueMediaFiles(files).slice(0, maxItems);
+    if (files.length > maxItems) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+    return files;
   }
 
   const videos = files.filter((file) => file.mediaKind === "video");
@@ -266,43 +268,26 @@ export function extractSnapinstaMediaUrls(html) {
 }
 
 export function extractThreadsPostFromHtml(html, sourceUrl = "") {
+  const result = extractThreadsPublication(html, sourceUrl);
+  return { mediaUrls: result.items.map(item => item.url), caption: result.caption };
+}
+
+export function extractThreadsPublication(html, sourceUrl) {
   const metaUrl = extractHtmlMetaContent(html, "og:url");
-  // Some share pages keep the short URL but expose the target in public metadata.
-  // Never substitute a different post when the requested permalink is known.
   const resolvedUrl = !threadsShortcodeFromUrl(sourceUrl) && isThreadsSocialVideoUrl(metaUrl) && threadsShortcodeFromUrl(metaUrl) ? metaUrl : sourceUrl;
-  const targetPost = extractTargetThreadsPost(html, resolvedUrl);
-  if (targetPost) {
-    return {
-      mediaUrls: extractThreadsPostMediaUrls(targetPost),
-      caption: extractThreadsPostCaption(targetPost),
-    };
-  }
+  const post = extractTargetThreadsPost(html, resolvedUrl);
+  if (post) return { items: threadsMediaItems(post), caption: extractThreadsPostCaption(post), post, resolvedUrl };
+  const empty = { items: [], caption: "", resolvedUrl };
+  if (!isThreadsSocialVideoUrl(metaUrl) || !threadsShortcodeFromUrl(resolvedUrl) ||
+      threadsShortcodeFromUrl(metaUrl) !== threadsShortcodeFromUrl(resolvedUrl) ||
+      threadsHandleFromUrl(metaUrl).toLowerCase() !== threadsHandleFromUrl(resolvedUrl).toLowerCase()) return empty;
 
-  if (metaUrl && threadsShortcodeFromUrl(resolvedUrl) &&
-      (threadsShortcodeFromUrl(metaUrl) !== threadsShortcodeFromUrl(resolvedUrl) ||
-       (threadsHandleFromUrl(metaUrl) && threadsHandleFromUrl(resolvedUrl) && threadsHandleFromUrl(metaUrl).toLowerCase() !== threadsHandleFromUrl(resolvedUrl).toLowerCase()))) {
-    return { mediaUrls: [], caption: "" };
-  }
-
-  const metaVideoUrl = extractHtmlMetaContent(html, "og:video") || extractHtmlMetaContent(html, "og:video:url") || extractHtmlMetaContent(html, "twitter:player:stream");
-  if (metaVideoUrl && threadsShortcodeFromUrl(resolvedUrl) &&
-      (!metaUrl || threadsShortcodeFromUrl(metaUrl) === threadsShortcodeFromUrl(resolvedUrl))) {
-    const normalized = normalizeSocialMediaUrl(metaVideoUrl);
-    if (normalized && isLikelyThreadsPostMediaUrl(normalized)) return { mediaUrls: [normalized],
-      caption: extractHtmlMetaContent(html, "og:description") || extractHtmlMetaContent(html, "description") };
-  }
-  const metaImageUrl = extractHtmlMetaContent(html, "og:image") || extractHtmlMetaContent(html, "twitter:image");
-  if (metaImageUrl) {
-    const normalized = normalizeSocialMediaUrl(metaImageUrl);
-    if (normalized && isLikelyThreadsPostMediaUrl(normalized)) {
-      return {
-        mediaUrls: [normalized],
-        caption: extractHtmlMetaContent(html, "og:description") || extractHtmlMetaContent(html, "description"),
-      };
-    }
-  }
-
-  return { mediaUrls: [], caption: "" };
+  // A page's preview image can be a poster or avatar. Only a video explicitly
+  // attached to this exact permalink can substitute for native post metadata.
+  const video = extractHtmlMetaContent(html, "og:video") || extractHtmlMetaContent(html, "og:video:url") || extractHtmlMetaContent(html, "twitter:player:stream");
+  const url = normalizeSocialMediaUrl(video);
+  if (!url || !isLikelyThreadsPostMediaUrl(url) || inferRemoteMediaKind(url, "") === "image") return empty;
+  return { items: [{ url, kind: "video" }], caption: extractHtmlMetaContent(html, "og:description") || extractHtmlMetaContent(html, "description"), resolvedUrl };
 }
 
 export function extractTargetThreadsPost(html, sourceUrl) {
@@ -323,12 +308,64 @@ export function extractTargetThreadsPost(html, sourceUrl) {
     if (!handle) return true;
     return String(post?.user?.username || "").toLowerCase() === handle.toLowerCase();
   });
-  return matchingPosts[0] || null;
+  if (matchingPosts.length < 2) return matchingPosts[0] || null;
+  // A hydrated page may repeat a top-level cover card alongside the native
+  // carousel. Select from all representations of this owner and publication.
+  const albums = matchingPosts.filter(isThreadsCarousel);
+  const post = albums.length ? albums.reduce((best, item) =>
+    (item.carousel_media?.length || 0) > (best.carousel_media?.length || 0) ? item : best)
+    : matchingPosts.find(item => threadsMediaItems(item).length) || matchingPosts[0];
+  const selected = threadsMediaItems(post);
+  for (const other of matchingPosts) {
+    if (other === post) continue;
+    const album = isThreadsCarousel(other);
+    const declared = other.carousel_media_count;
+    // A short native array is only a compatible prefix when either native
+    // record supplies a cardinality confirming the entire selected array.
+    if (["pk", "id"].some(field => post[field] != null && other[field] != null && String(post[field]) !== String(other[field])) ||
+        (album && declared != null && declared !== selected.length) ||
+        (album && other.media_type != null && other.media_type !== 8) ||
+        (album && other.carousel_media?.length !== selected.length && declared == null && post.carousel_media_count == null)) {
+      throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+    }
+    const children = album ? other.carousel_media : [other];
+    if (album && children == null) continue;
+    if (!Array.isArray(children)) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+    const observed = album && children.length === 0 ? [] :
+      threadsMediaItems(album ? { ...other, carousel_media_count: children.length } : other);
+    for (const [index, item] of observed.entries()) {
+      const chosen = selected[index], original = post.carousel_media?.[index] || post, alternative = children[index];
+      const projection = albums.length > 0 && !album;
+      // A cover card carries the parent ID. Compare child IDs only for two
+      // native album positions; a card must match a real first-slide asset.
+      const ids = projection ? [] : ["pk", "id"].filter(field => original[field] != null && alternative[field] != null);
+      if (!chosen || ids.some(field => String(original[field]) !== String(alternative[field]))) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+      if (chosen.kind === item.kind && (ids.length || chosen.url === item.url)) continue;
+      const cover = projection && item.kind === "image" && chosen.kind === "video";
+      if ((chosen.kind !== item.kind && !cover) || !matchingThreadsAsset(original, alternative, item.kind)) {
+        throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+      }
+    }
+  }
+  return post;
+}
+
+function isThreadsCarousel(post) {
+  return post.media_type === 8 || post.carousel_media?.length > 0 || post.carousel_media_count > 0;
+}
+
+function matchingThreadsAsset(original, alternative, kind) {
+  const assets = post => {
+    const versions = kind === "video" ? post.video_versions : post.image_versions2?.candidates;
+    return (Array.isArray(versions) ? versions : []).map(item => bestThreadsUrl([item], kind)).filter(Boolean);
+  };
+  const urls = new Set(assets(original));
+  return assets(alternative).some(url => urls.has(url));
 }
 
 export function collectThreadsPostsByCode(value, shortcode, posts, depth = 0) {
   if (!value || typeof value !== "object" || depth > 40) return;
-  if (!Array.isArray(value) && value.code === shortcode && (value.video_versions || value.image_versions2 || value.carousel_media)) {
+  if (!Array.isArray(value) && value.code === shortcode && (value.media_type || value.video_versions || value.image_versions2 || value.carousel_media || value.carousel_media_count)) {
     posts.push(value);
   }
 
@@ -339,19 +376,26 @@ export function collectThreadsPostsByCode(value, shortcode, posts, depth = 0) {
   for (const key of Object.keys(value)) collectThreadsPostsByCode(value[key], shortcode, posts, depth + 1);
 }
 
-export function extractThreadsPostMediaUrls(post) {
-  const mediaItems = Array.isArray(post.carousel_media) && post.carousel_media.length ? post.carousel_media : [post];
-  const mediaUrls = [];
-  for (const item of mediaItems) {
-    const videoUrl = bestThreadsVideoUrl(item);
-    if (videoUrl) {
-      mediaUrls.push(videoUrl);
-      continue;
-    }
-    const imageUrl = bestThreadsImageUrl(item);
-    if (imageUrl) mediaUrls.push(imageUrl);
+function threadsMediaItems(post) {
+  const carousel = isThreadsCarousel(post);
+  const items = carousel ? post.carousel_media : [post];
+  if (!Array.isArray(items) || !items.length || (carousel && post.media_type != null && post.media_type !== 8) ||
+      (carousel && post.carousel_media_count != null && post.carousel_media_count !== items.length)) {
+    throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
   }
-  return uniqueStrings(mediaUrls.map(normalizeSocialMediaUrl).filter(Boolean)).filter(isLikelyThreadsPostMediaUrl);
+  return items.flatMap(item => {
+    const kind = item?.media_type === 2 || item?.is_video === true || item?.video_versions?.length ? "video" : "image";
+    const url = kind === "video" ? bestThreadsVideoUrl(item) : bestThreadsImageUrl(item);
+    if (!url || (item?.media_type != null && item.media_type !== (kind === "video" ? 2 : 1))) {
+      if (!carousel && !item?.video_versions?.length && !item?.image_versions2?.candidates?.length) return [];
+      throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
+    }
+    return [{ url, kind }];
+  });
+}
+
+export function extractThreadsPostMediaUrls(post) {
+  return threadsMediaItems(post).map(item => item.url);
 }
 
 export function extractThreadsPostCaption(post) {
@@ -371,15 +415,22 @@ export function extractThreadsPostCaption(post) {
 }
 
 export function bestThreadsVideoUrl(item) {
-  const versions = Array.isArray(item?.video_versions) ? item.video_versions : [];
-  const sorted = versions.filter((version) => version?.url).sort((a, b) => mediaCandidateScore(b) - mediaCandidateScore(a));
-  return sorted[0]?.url || "";
+  return bestThreadsUrl(item?.video_versions, "video");
 }
 
 export function bestThreadsImageUrl(item) {
-  const candidates = Array.isArray(item?.image_versions2?.candidates) ? item.image_versions2.candidates : [];
-  const sorted = candidates.filter((candidate) => candidate?.url).sort((a, b) => mediaCandidateScore(b) - mediaCandidateScore(a));
-  return sorted[0]?.url || "";
+  return bestThreadsUrl(item?.image_versions2?.candidates, "image");
+}
+
+function bestThreadsUrl(versions, kind) {
+  const ranked = Array.isArray(versions) ? versions.filter(Boolean).sort((a, b) => mediaCandidateScore(b) - mediaCandidateScore(a)) : [];
+  for (const candidate of ranked) {
+    const url = normalizeSocialMediaUrl(candidate.url);
+    if (!isLikelyThreadsPostMediaUrl(url)) continue;
+    const inferred = inferRemoteMediaKind(url, "");
+    if (!inferred || inferred === kind) return url;
+  }
+  return "";
 }
 
 export function mediaCandidateScore(candidate) {
@@ -430,7 +481,8 @@ export function padBase64Url(value) {
 export function isLikelyThreadsPostMediaUrl(value) {
   try {
     const url = new URL(value);
-    if (!/scontent-[^/]+\.cdninstagram\.com$/i.test(url.hostname) && !/(?:^|\.)fbcdn\.net$/i.test(url.hostname)) return false;
+    if (url.protocol !== "https:" || url.username || url.password || url.port) return false;
+    if (!/^scontent-[^/]+\.cdninstagram\.com$/i.test(url.hostname) && !/(?:^|\.)fbcdn\.net$/i.test(url.hostname)) return false;
     if (/\/t51\.(?:2885|82787)-19\//i.test(url.pathname)) return false;
     if (/profile_pic|s150x150|s640x640/i.test(value)) return false;
     return /\.(mp4|webm|mov|m4v|jpg|jpeg|png|webp)(?:[?#]|$)/i.test(url.pathname) || /\/o1\/v\/t16\//i.test(url.pathname);

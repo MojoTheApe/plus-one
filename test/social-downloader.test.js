@@ -476,11 +476,11 @@ test("downloadThreadsFromPage parses and references the final permalink after a 
   assert.equal(calls[1].options.headers.referer, finalUrl);
 });
 
-test("downloadTikTokWithFallbackApi downloads image carousels", async () => {
+test("TikTok preserves duplicate slides even when they have the same URL and bytes", async () => {
   const fsMock = mockFs();
   const calls = [];
   const result = await downloadTikTokWithFallbackApi("https://www.tiktok.com/@u/video/1", "/tmp/social", "", {
-    ...baseDeps(fsMock),
+    ...baseDeps(fsMock), getMaxMediaItems: () => 35,
     fetch: async (url, options = {}) => {
       calls.push({ url: String(url), options });
       if (calls.length === 1) {
@@ -503,29 +503,31 @@ test("downloadTikTokWithFallbackApi downloads image carousels", async () => {
   });
 
   assert.equal(result.title, "Photo set");
-  assert.equal(result.files.length, 2);
+  assert.equal(result.files.length, 3);
+  assert.deepEqual(calls.slice(1).map(call => call.url), ["https://cdn.example.com/a.jpg", "https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg"]);
   assert.equal(result.files[0].title, "TikTok image");
   assert.match(calls[0].url, /^https:\/\/tikwm\.test\/api\/\?url=/);
 });
 
 for (const provider of ['tiktok', 'threads']) {
-  test(`${provider}: a failed selected item cannot become a verified complete album; successful selection keeps native order and cap`, async () => {
+  test(`${provider}: a failed selected item cannot become a verified complete album; a complete selection keeps native order, an undersized cap uploads nothing`, async () => {
     const media = ['https://scontent.example.fbcdn.net/first.jpg','https://scontent.example.fbcdn.net/second.jpg','https://scontent.example.fbcdn.net/third.jpg'];
-    for (const fail of [true,false]) {
+    for (const scenario of ["failing-asset", "complete", "undersized-cap"]) {
       const calls=[],files=mockFs();
-      const deps={...baseDeps(files),fetch:async url=>{
+      const deps={...baseDeps(files),getMaxMediaItems:()=>scenario==="undersized-cap"?2:35,fetch:async url=>{
         calls.push(String(url));
         if(calls.length===1) return provider==='tiktok'
           ? mockJsonResponse({code:0,data:{id:'1',author:{unique_id:'u'},images:media}})
           : mockTextResponse(`<script type="application/json">${JSON.stringify({code:'abc',user:{username:'u'},carousel_media:media.map(url=>({image_versions2:{candidates:[{url,width:100,height:100}]}}))})}</script>`);
-        if(fail&&String(url)===media[0])return mockResponse({ok:false,status:503});
+        if(scenario==="failing-asset"&&String(url)===media[0])return mockResponse({ok:false,status:503});
         return mockResponse({headers:{'content-type':'image/jpeg'},chunks:[Buffer.from(String(url).includes('first')?'first':'second')]});
       }};
       const retrieve=()=>provider==='tiktok'
         ? downloadTikTokWithFallbackApi('https://www.tiktok.com/@u/photo/1','/tmp/social','',deps)
         : downloadThreadsFromPage('https://www.threads.com/@u/post/abc','/tmp/social',deps);
-      if(fail){await assert.rejects(retrieve(),error=>error.status===503);assert.equal(calls.length,2);}
-      else{const result=await retrieve();assert.deepEqual(calls.slice(1),media.slice(0,2));assert.equal(result.files.length,2);assert.deepEqual(result.files.map(file=>files.writes.get(file.filePath).toString()),['first','second']);}
+      if(scenario==="undersized-cap"){await assert.rejects(retrieve(),{code:"MEDIA_SOURCE_UNVERIFIED"});assert.equal(calls.length,1);}
+      else if(scenario==="failing-asset"){await assert.rejects(retrieve(),error=>error.status===503);assert.equal(calls.length,2);}
+      else{const result=await retrieve();assert.deepEqual(calls.slice(1),media);assert.equal(result.files.length,3);assert.deepEqual(result.files.map(file=>files.writes.get(file.filePath).toString()),['first','second','second']);}
     }
   });
 }
@@ -813,5 +815,116 @@ test('a restricted post stops on evidenced access denial, while generic adapter 
     if (expectedCalls === 1) await assert.rejects(result);
     else assert.equal((await result).mediaKind, 'video');
     assert.equal(calls, expectedCalls);
+  }
+});
+
+test("a TikTok photo permalink retrieves all 35 original slides in order, including duplicates, before creating cache receipts", async t => {
+  const { MediaCache } = await import("../src/media-cache.js");
+  const { identifyMediaItems } = await import("../src/media-items.js");
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "tiktok-35-"));
+  t.after(() => fs.promises.rm(directory, { recursive: true, force: true }));
+  const target = "https://www.tiktok.com/@u/photo/1/";
+  const images = Array.from({ length: 35 }, (_, i) => `https://cdn.example.com/slide-${i}.jpg`);
+  images[34] = images[1];
+  const calls = [];
+  const downloader = createSocialDownloader({
+    ...baseDeps(fs), getMaxMediaItems: () => 35,
+    execFileAsync: () => assert.fail("An assembled video cannot prove original slides"),
+    fetch: async url => {
+      calls.push(String(url));
+      if (calls.length === 1) return mockJsonResponse({ code: 0, data: { id: "1", author: { unique_id: "u" }, images, image_count: 35 } });
+      return mockResponse({ headers: { "content-type": "image/jpeg" }, chunks: [Buffer.from(String(url))] });
+    },
+  });
+  const result = await downloader.download(target);
+  t.after(() => fs.promises.rm(result.tempDir, { recursive: true, force: true }));
+  assert.deepEqual(calls.slice(1), images);
+  assert.equal(result.files.length, 35);
+  const identities = await identifyMediaItems(result.files, result.source);
+  assert.equal(identities[1].sourceItemId, identities[34].sourceItemId);
+  const cachePath = path.join(directory, "cache");
+  const cache = new MediaCache(cachePath);
+  const entry = await cache.put({ chatId: 7, sourceMessageId: 10, sourceUrl: target, source: result.source, files: result.files, pending: true });
+  for (const firstId of [100, 200]) {
+    for (let start = 0; start < images.length; start += 10) {
+      const ids = images.slice(start, start + 10).map((_, i) => firstId + start + i);
+      await cache.bind(entry.id, ids, { startIndex: start, botId: 7, items: ids.map(id => ({ photo: [{ file_id: String(id) }] })) });
+    }
+  }
+  await cache.release(entry.id);
+  const reopened = new MediaCache(cachePath);
+  const restored = await reopened.forDelivery({ chatId: 7, sourceUrl: target, botId: 7 });
+  assert.ok(restored.complete);
+  assert.deepEqual(restored.files.map(file => file.telegramFileId), images.map((_, i) => String(200 + i)));
+  assert.deepEqual(restored.manifest.map(file => file.sourceItemId), identities.map(item => item.sourceItemId));
+  assert.equal(restored.bindings.length, 70);
+  for (const messageId of [100, 119, 134, 200, 219, 234]) {
+    assert.equal((await reopened.get({ chatId: 7, messageId })).selectedFileIndex, messageId % 100);
+  }
+  // A partial later repeat updates only acknowledged slots. Original replies
+  // still resolve even after the rolling window starts discarding older repeats.
+  for (const firstId of [300, 400, 500]) {
+    const ids = Array.from({ length: 10 }, (_, i) => firstId + i);
+    await reopened.bind(entry.id, ids, { botId: 7, items: ids.map(id => ({ photo: [{ file_id: String(id) }] })) });
+  }
+  const partial = await reopened.forDelivery({ chatId: 7, sourceUrl: target, botId: 7 });
+  assert.ok(partial.bindings.length <= 35 + 50);
+  assert.equal(partial.files[9].telegramFileId, "509");
+  assert.equal(partial.files[10].telegramFileId, "210");
+  assert.equal((await reopened.get({ chatId: 7, messageId: 100 })).selectedFileIndex, 0);
+});
+
+test("Threads never substitutes an OG poster, a native video preview, or a partial carousel", async () => {
+  const target = "https://www.threads.com/@u/post/abc/";
+  const poster = "https://scontent.example.fbcdn.net/poster.jpg";
+  const video = "https://scontent.example.fbcdn.net/content.mp4";
+  const image = { image_versions2: { candidates: [{ url: poster }] }, media_type: 1 };
+  const htmlPost = fields => `<script type="application/json">${JSON.stringify({ code: "abc", user: { username: "u" }, ...fields })}</script>`;
+  const invalid = [
+    `<meta property="og:url" content="${target}"><meta property="og:video" content="https://outside.example/movie.mp4"><meta property="og:image" content="${poster}">`,
+    htmlPost({ ...image, media_type: 2, video_versions: [] }),
+    htmlPost({ media_type: 8, carousel_media: [image, { media_type: 2 }, image] }),
+    htmlPost({ media_type: 8, carousel_media_count: 3, carousel_media: [image, image] }),
+  ];
+  for (const html of invalid) {
+    let requests = 0;
+    await assert.rejects(downloadThreadsFromPage(target, "/tmp/social", {
+      ...baseDeps(mockFs()), fetch: async () => { requests++; return mockTextResponse(html); },
+    }), { code: "MEDIA_SOURCE_UNVERIFIED" });
+    assert.equal(requests, 1);
+  }
+  const ogVideo = `<meta property="og:url" content="${target}"><meta property="og:video" content="${video}">`;
+  await assert.rejects(downloadThreadsFromPage(target, "/tmp/social", {
+    ...baseDeps(mockFs()), fetch: async url => url === target ? mockTextResponse(ogVideo) : mockResponse({ headers: { "content-type": "image/jpeg" } }),
+  }), { code: "MEDIA_SOURCE_MISMATCH" });
+  const calls = [];
+  const result = await downloadThreadsFromPage(target, "/tmp/social", {
+    ...baseDeps(mockFs()), getMaxMediaItems: () => 20, fetch: async url => {
+      calls.push(url);
+      if (url === target) return mockTextResponse(htmlPost({ media_type: 8, carousel_media_count: 3, carousel_media: [
+        image, { media_type: 2, video_versions: [{ url: video }], image_versions2: image.image_versions2 }, image,
+      ] }));
+      return mockResponse({ headers: { "content-type": url === video ? "video/mp4" : "image/jpeg" } });
+    },
+  });
+  assert.deepEqual(calls.slice(1), [poster, video, poster]);
+  assert.deepEqual(result.files.map(file => file.mediaKind), ["image", "video", "image"]);
+});
+
+test("a declared TikTok slideshow is never replaced by an API video or a shorter image list", async () => {
+  for (const data of [
+    { play: "https://cdn.example/preview.mp4" },
+    { images: ["https://cdn.example/first.jpg"], image_count: 35 },
+    { images: Array(36).fill("https://cdn.example/repeated.jpg") },
+    { images: ["https://cdn.example/one.jpg", null] },
+  ]) {
+    let requests = 0;
+    await assert.rejects(downloadTikTokWithFallbackApi("https://www.tiktok.com/@u/photo/1/", "/tmp/social", "", {
+      ...baseDeps(mockFs()), getMaxMediaItems: () => 35, fetch: async () => {
+        requests++;
+        return mockJsonResponse({ code: 0, data: { id: "1", author: { unique_id: "u" }, ...data } });
+      },
+    }), { code: "MEDIA_SOURCE_UNVERIFIED" });
+    assert.equal(requests, 1);
   }
 });

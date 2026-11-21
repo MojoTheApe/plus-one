@@ -2,13 +2,15 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { sourceIdentityError } from "./media-source.js";
 
+export const maxPublicationItems = 35;
+
 const validIdentity = value => typeof value === "string" && /^[\w:.-]{1,300}$/u.test(value);
 
 // Called only on freshly retrieved, publication-verified original files, before
 // conversion. Native child IDs survive CDN/encoding changes. Where a provider
 // has no child identity, original bytes give a conservative recovery boundary.
 export async function identifyMediaItems(files, source) {
-  if (!Array.isArray(files) || !files.length || files.length > 20 || files.some(file => !["image", "video"].includes(file.mediaKind))) {
+  if (!Array.isArray(files) || !files.length || files.length > maxPublicationItems || files.some(file => !["image", "video"].includes(file.mediaKind))) {
     throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", source.provider);
   }
   const nativeIds = new Set();

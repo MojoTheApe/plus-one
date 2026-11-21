@@ -15,6 +15,12 @@ import { ConversationStore } from "../src/conversation-store.js";
 const fixturePhoto = fs.readFile(path.resolve("test-support/media-photo.png"));
 async function photoBytes(marker = 0) { return Buffer.concat([await fixturePhoto, Buffer.from([marker])]); }
 
+function photoReceipt(form, messageId, fileId = 'fixture-photo') {
+  const scope = { chat: { id: Number(form.get('chat_id')) } };
+  if (form.has('message_thread_id')) scope.message_thread_id = Number(form.get('message_thread_id'));
+  return { ...scope, message_id: messageId, photo: [{ file_id: fileId }] };
+}
+
 async function fixture(t, profile = "legacy", owner, configure = async () => {}, answerBackend = "codex", voice = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "bot-reliability-"));
   const oldEnv = { ...process.env }, oldFetch = globalThis.fetch;
@@ -44,7 +50,7 @@ async function fixture(t, profile = "legacy", owner, configure = async () => {},
     const payload = multipart ? Object.fromEntries(options.body.entries()) : JSON.parse(options.body || "{}");
     assert.notEqual(method, "getUpdates"); calls.push({ method, payload });
     if (multipart && uploadFn) return uploadFn(method, options.body);
-    const result = method === "getStickerSet" ? { name: payload.name, sticker_type: "regular" } : method === "getChatMember" ? (memberLookup ? memberLookup(payload) : { status: memberStatus }) : method === "getFile" ? {file_path:"photos/fixture.jpg",file_size:3} : { message_id: nextMessage++ };
+    const result = method === "getStickerSet" ? { name: payload.name, sticker_type: "regular" } : method === "getChatMember" ? (memberLookup ? memberLookup(payload) : { status: memberStatus }) : method === "getFile" ? {file_path:"photos/fixture.jpg",file_size:3} : method === "sendPhoto" ? photoReceipt(options.body, nextMessage++) : { message_id: nextMessage++ };
     assert.ok(["getChatMember", "sendChatAction", "sendMessage", "getFile", "sendAnimation", "sendPhoto", "sendVideo", "sendMediaGroup", "getStickerSet", "getChatAdministrators", "answerCallbackQuery", "editMessageText", "banChatMember", "unbanChatMember"].includes(method), method);
     return new Response(JSON.stringify({ ok: true, result }));
   };
@@ -244,7 +250,7 @@ test('an unconfirmed upload is not retried automatically; an explicit retry uses
   const notice=f.calls.filter(call=>call.method==='sendMessage').at(-1).payload.text;
   assert.match(notice,/Якщо файлу немає/);
   await f.restart();f.setMediaNow(()=>Date.now()+31000);
-  f.setUpload(async()=>{uploads++;return new Response(JSON.stringify({ok:true,result:{message_id:1900}}));});
+  f.setUpload(async(_method, form)=>{uploads++;return Response.json({ok:true,result:photoReceipt(form,1900)});});
   await f.handle({message_id:1500,text:'Repeat',reply_to_message:{message_id:journal.operations[0].errorMessageId,from:{id:77,is_bot:true},text:notice}});
   journal=JSON.parse(await fs.readFile(f.root+'/runtime/media.json'));
   assert.equal(downloads,1);assert.equal(uploads,2);assert.equal(journal.operations[0].status,'done');
@@ -262,7 +268,7 @@ test('a repeated verified publication uses its Telegram file after restart and d
   f.setDownloader(download);
   f.setUpload(async (method, form) => {
     assert.equal(method, 'sendPhoto'); assert.ok(form.get('photo') instanceof Blob); uploads++;
-    return new Response(JSON.stringify({ ok: true, result: { message_id: 2000, photo: [{ file_id: 'saved-telegram-photo' }] } }));
+    return new Response(JSON.stringify({ ok: true, result: photoReceipt(form, 2000, 'saved-telegram-photo') }));
   });
   await f.handle({ message_id: 500, text: url + '?igsh=one' });
   const cache = JSON.parse(await fs.readFile(f.root + '/runtime/media-cache/index.json'));
@@ -274,7 +280,7 @@ test('a repeated verified publication uses its Telegram file after restart and d
     assert.match(form.get('caption'), /Original publication/);
     assert.doesNotMatch(form.get('caption'), /Fixture|#50[01]|Requested by|Запит від/);
     assert.ok(form.get('caption').includes(url)); uploads++;
-    return new Response(JSON.stringify({ ok: true, result: { message_id: 2001, photo: [{ file_id: 'saved-telegram-photo' }] } }));
+    return new Response(JSON.stringify({ ok: true, result: photoReceipt(form, 2001, 'saved-telegram-photo') }));
   });
   await f.handle({ message_id: 501, text: url + '?igsh=two' });
   assert.equal(downloads, 1); assert.equal(uploads, 2);
@@ -282,7 +288,7 @@ test('a repeated verified publication uses its Telegram file after restart and d
   assert.equal(operation.status, 'done'); assert.equal(operation.deliveryRoute, 'telegram-file-id');
 });
 
-test('a definitely rejected stale Telegram file ID falls back once to the prepared file without a source download', async t => {
+for (const description of ['wrong file identifier', 'Bad Request: IMAGE_PROCESS_FAILED']) test('a definitely rejected stale Telegram file ID falls back once to the prepared file without a source download (' + description + ')', async t => {
   const f = await fixture(t), url = 'https://www.instagram.com/p/stale/';
   const filePath = path.join(f.root, 'stale.png'); await fs.writeFile(filePath, await photoBytes());
   const source = nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'stale' });
@@ -290,8 +296,9 @@ test('a definitely rejected stale Telegram file ID falls back once to the prepar
   f.setDownloader(async () => { downloads++; return { source, files: [{ filePath, mediaKind: 'image', mimeType: 'image/png' }] }; });
   f.setUpload(async (_method, form) => {
     const value = form.get('photo'); attempts.push(typeof value === 'string' ? value : 'uploaded');
-    if (typeof value === 'string') return new Response(JSON.stringify({ ok: false, description: 'wrong file identifier', error_code: 400 }), { status: 400 });
-    return new Response(JSON.stringify({ ok: true, result: { message_id: 2000 + attempts.length, photo: [{ file_id: 'stale-photo-id' }] } }));
+    if (typeof value === 'string') return new Response(JSON.stringify({ ok: false, description, error_code: 400 }), { status: 400 });
+    assert.deepEqual(Buffer.from(await value.arrayBuffer()), await photoBytes());
+    return Response.json({ ok: true, result: photoReceipt(form, 2000 + attempts.length, 'stale-photo-id') });
   });
   await f.handle({ message_id: 500, text: url });
   await f.handle({ message_id: 501, text: url });
@@ -314,7 +321,7 @@ test('a rejected Telegram file is downloaded again after disk eviction and copie
     const value = form.get('photo'); attempts.push(typeof value === 'string' ? value : 'uploaded');
     if (typeof value === 'string') return new Response(JSON.stringify({ ok: false, description: 'wrong file identifier', error_code: 400 }), { status: 400 });
     assert.deepEqual(Buffer.from(await value.arrayBuffer()), await photoBytes());
-    return new Response(JSON.stringify({ ok: true, result: { message_id: 2000 + attempts.length, photo: [{ file_id: 'refreshed-photo-id' }] } }));
+    return new Response(JSON.stringify({ ok: true, result: photoReceipt(form, 2000 + attempts.length, 'refreshed-photo-id') }));
   });
   await f.handle({ message_id: 500, text: url });
   const cache = JSON.parse(await fs.readFile(f.root + '/runtime/media-cache/index.json'));
@@ -523,21 +530,70 @@ test('an interrupted album retry sends only files without acknowledged delivery'
   for(let i=0;i<11;i++){const file=path.join(f.root,`image-${i}.jpg`);await fs.writeFile(file,await photoBytes(i));files.push({filePath:file,mediaKind:'image',mimeType:'image/jpeg'});}
   const source=verifiedMediaSource('https://www.tiktok.com/@fixture/photo/123/',{provider:'tiktok-api',id:'123',owner:'fixture'});
   f.setDownloader(async()=>{downloads++;return {source,files};});
-  f.setUpload(async method=>{
+  f.setUpload(async (method,form)=>{
     uploads.push(method);
-    if(method==='sendMediaGroup')return new Response(JSON.stringify({ok:true,result:Array.from({length:10},(_,i)=>({message_id:2000+i}))}));
+    if(method==='sendMediaGroup')return Response.json({ok:true,result:Array.from({length:10},(_,i)=>photoReceipt(form,2000+i))});
     throw new Error('fetch failed');
   });
   await f.handle({message_id:500,text:'https://www.tiktok.com/@fixture/photo/123/'});
   const before=JSON.parse(await fs.readFile(f.root+'/runtime/media.json')).operations[0];
   assert.equal(before.deliveredFileCount,10);assert.equal(before.sentMessageIds.length,10);
   f.setMediaNow(()=>Date.now()+31000);
-  f.setUpload(async method=>{uploads.push(method);return new Response(JSON.stringify({ok:true,result:{message_id:2010}}));});
+  f.setUpload(async (method,form)=>{uploads.push(method);return Response.json({ok:true,result:photoReceipt(form,2010)});});
   await f.handle({message_id:1500,text:'Repeat',reply_to_message:{message_id:before.errorMessageId,from:{id:77,is_bot:true},text:'Upload unconfirmed'}});
   const after=JSON.parse(await fs.readFile(f.root+'/runtime/media.json')).operations[0];
   assert.deepEqual(uploads,['sendMediaGroup','sendPhoto','sendPhoto']);assert.equal(downloads,1);
   assert.equal(after.status,'done');assert.equal(after.deliveredFileCount,11);assert.equal(after.sentMessageIds.length,11);
 });
+
+for (const scenario of ['normalized', 'document', 'ambiguous', 'wrong-receipt', 'invalid-first-receipt', 'wrong-error']) {
+  test('rejected group photo recovery: ' + scenario, async t => {
+    const f = await fixture(t);
+    const url = 'https://www.tiktok.com/@fixture/photo/314/';
+    const source = verifiedMediaSource(url, { provider: 'tiktok-api', id: '314', owner: 'fixture' });
+    const input = path.join(f.root, 'original.png'), bytes = await photoBytes();
+    await fs.writeFile(input, bytes);
+    f.setDownloader(async () => ({ source, files: [{ mediaKind: 'image', mimeType: 'image/png', filePath: input }] }));
+    const methods = [];
+    const rejection = () => Response.json({ ok: false, error_code: 400, description: 'Bad Request: IMAGE_PROCESS_FAILED' }, { status: 400 });
+    const base = { message_id: 4040, chat: { id: -123 }, message_thread_id: 9 };
+    f.setUpload(async (method, form) => {
+      methods.push(method);
+      assert.equal(form.get('reply_to_message_id'), '514');
+      assert.equal(form.get('message_thread_id'), '9');
+      if (methods.length === 1) {
+        assert.equal(method, 'sendPhoto');
+        assert.deepEqual(Buffer.from(await form.get('photo').arrayBuffer()), bytes);
+        if (scenario === 'invalid-first-receipt') return Response.json({ok:true,result:{...base,chat:{id:-456},photo:[{file_id:'other-chat'}]}});
+        if (scenario === 'wrong-error') return Response.json({ok:false,error_code:400,description:'Bad Request: invalid caption'}, {status:400});
+        return rejection();
+      }
+      if (method === 'sendDocument') {
+        assert.equal(form.get('disable_content_type_detection'), 'true');
+        assert.deepEqual(Buffer.from(await form.get('document').arrayBuffer()), bytes);
+        return Response.json({ ok:true,result:{...base, document:{file_id:'document-only'}} });
+      }
+      const jpeg = Buffer.from(await form.get('photo').arrayBuffer());
+      assert.equal(form.get('photo').type, 'image/jpeg');
+      assert.equal(jpeg.readUInt16BE(0), 0xffd8);
+      if (scenario === 'document') return rejection();
+      if (scenario === 'ambiguous') return new Response('', { status: 504 });
+      return Response.json({ ok:true, result: {...base, message_thread_id: scenario === 'wrong-receipt' ? 10 : 9, photo:[{file_id:'normalized-photo'}]} });
+    });
+    await f.handle({ message_id: 514, text: url });
+    const [op] = JSON.parse(await fs.readFile(path.join(f.root,'runtime/media.json'))).operations;
+    const recovered = ['normalized','document'].includes(scenario);
+    assert.equal(op.status, recovered ? 'done' : scenario === 'wrong-error' ? 'failed' : 'unknown');
+    assert.deepEqual(methods, ['wrong-error', 'invalid-first-receipt'].includes(scenario) ? ['sendPhoto'] : scenario === 'document'
+      ? ['sendPhoto','sendPhoto','sendDocument'] : ['sendPhoto','sendPhoto']);
+    if (recovered) {
+      assert.deepEqual(op.sentMessageIds,[4040]);
+      assert.equal(op.deliveredFileCount,1);
+      const [entry] = JSON.parse(await fs.readFile(path.join(f.root,'runtime/media-cache/index.json'))).entries;
+      assert.deepEqual(entry.receipts.map(r => r.fileId), scenario === 'document' ? [] : ['normalized-photo']);
+    }
+  });
+}
 
 test('an unavailable explicit judge anchor cannot silently fall back to another discussion',async t=>{
   const f=await fixture(t);
@@ -1774,7 +1830,7 @@ for (const change of ['none', 'last', 'acknowledged-first', 'order', 'missing', 
         return Response.json({ ok: false, error_code: 400, description: 'wrong file identifier' }, { status: 400 });
       }
       if (pass === 1 && method === 'sendPhoto') assert.equal(Buffer.from(await form.get('photo').arrayBuffer()).at(-1), 10);
-      const response = items.map((_, i) => ({ message_id: 2000 + uploads.length * 100 + i, photo: [{ file_id: `file-${method === 'sendPhoto' ? 10 : i}` }] }));
+      const response = items.map((_, i) => photoReceipt(form, 2000 + uploads.length * 100 + i, `file-${method === 'sendPhoto' ? 10 : i}`));
       return Response.json({ ok: true, result: method === 'sendPhoto' ? response[0] : response });
     });
     await f.handle({ message_id: 500, text: url });
@@ -1814,7 +1870,7 @@ test('source quota allows cached repeats, but blocks both new URLs and stale-ref
   });
   f.setUpload(async (_method, form) => stale && typeof form.get('photo') === 'string'
     ? Response.json({ ok: false, error_code: 400, description: 'wrong file identifier' }, { status: 400 })
-    : Response.json({ ok: true, result: { message_id: 2200, photo: [{ file_id: 'known-quota' }] } }));
+    : Response.json({ ok: true, result: photoReceipt(form, 2200, 'known-quota') }));
   await f.handle({ message_id: 500, text: url });
   await f.handle({ message_id: 501, text: url });
   assert.equal(downloads, 1); assert.equal(f.calls.filter(item => item.method === 'sendPhoto').length, 2);
@@ -1870,7 +1926,7 @@ test('a partial stale-reference recovery paused by source quota resumes only its
   f.setUpload(async (method, form) => {
     uploads.push({ pass, method });
     if (pass === 1 && method === 'sendPhoto') return Response.json({ ok: false, error_code: 400, description: 'wrong file identifier' }, { status: 400 });
-    const items = Array.from({ length: method === 'sendMediaGroup' ? 10 : 1 }, (_, i) => ({ message_id: 2000 + uploads.length * 100 + i, photo: [{ file_id: `known-${i}` }] }));
+    const items = Array.from({ length: method === 'sendMediaGroup' ? 10 : 1 }, (_, i) => photoReceipt(form, 2000 + uploads.length * 100 + i, `known-${i}`));
     if (pass === 2) assert.equal(Buffer.from(await form.get('photo').arrayBuffer()).at(-1), 10);
     return Response.json({ ok: true, result: method === 'sendMediaGroup' ? items : items[0] });
   });
@@ -1903,7 +1959,7 @@ for (const recovery of ['in-attempt', 'after-quota-pause']) {
     f.setUpload(async (method, form) => {
       uploads.push({ pass, method });
       if (pass === 1 && method === 'sendPhoto' && typeof form.get('photo') === 'string') return Response.json({ ok: false, error_code: 400, description: 'wrong file identifier' }, { status: 400 });
-      const items = Array.from({ length: method === 'sendMediaGroup' ? 10 : 1 }, (_, i) => ({ message_id: 2000 + uploads.length * 100 + i, photo: [{ file_id: `known-${method === 'sendPhoto' ? 10 : i}` }] }));
+      const items = Array.from({ length: method === 'sendMediaGroup' ? 10 : 1 }, (_, i) => photoReceipt(form, 2000 + uploads.length * 100 + i, `known-${method === 'sendPhoto' ? 10 : i}`));
       return Response.json({ ok: true, result: method === 'sendMediaGroup' ? items : items[0] });
     });
     await f.handle({ message_id: 500, text: url });
@@ -2154,7 +2210,7 @@ test('Instagram resumes the original group post after a real 429 and restart, wi
     assert.equal(form.get('chat_id'), '-123');
     assert.equal(form.get('reply_to_message_id'), '501');
     assert.ok(form.get('photo') instanceof Blob);
-    return Response.json({ ok: true, result: { message_id: 901, photo: [{ file_id: 'queued-photo' }] } });
+    return Response.json({ ok: true, result: photoReceipt(form, 901, 'queued-photo') });
   });
   const [pending] = await f.pending();
   time = waiting.sourceRetry.retryAt - 1;
@@ -2281,5 +2337,232 @@ for (const phase of ['saved anchor', 'saved receipt']) {
     assert.equal((await journal.read())[0].status, 'done');
     assert.equal(f.calls.filter(call => call.payload.text === 'Надсилаю…').length, 1);
     assert.deepEqual(targets, phase === 'saved anchor' ? [done.videoReplyId, done.videoReplyId] : [done.videoReplyId]);
+  });
+}
+
+test('a caption batch keeps only pending links, restores a deferred source and never resends a completed sibling after restart', async t => {
+  let time = Date.now();
+  t.mock.method(Date, 'now', () => time);
+  const f = await fixture(t), sourceCalls = [], sent = [];
+  const instagram = 'https://www.instagram.com/p/deferred/';
+  const tiktok = 'https://www.tiktok.com/@source/photo/25/';
+  const threads = 'https://www.threads.net/@source/post/hidden/';
+  const caption = '@ReliabilityTestBot скачай ' + instagram + ' 📎 два три';
+  const message = { ...instagramUpdate(500).message, text: undefined, caption, chat: { id: -123, type: 'group' },
+    is_topic_message: false, message_thread_id: 451, caption_entities: [
+      { type: 'text_link', offset: caption.indexOf('два'), length: 3, url: tiktok },
+      { type: 'text_link', offset: caption.indexOf('три'), length: 3, url: threads },
+    ] };
+  // The emoji belongs to the link label and is two Telegram UTF-16 units.
+  message.caption_entities[0].offset = caption.indexOf('📎');
+  message.caption_entities[0].length = '📎 два'.length;
+  const filePath = path.join(f.root, 'fixture.png');
+  await fs.writeFile(filePath, await photoBytes());
+  function download(url) {
+    sourceCalls.push(url);
+    if (url === threads) throw Object.assign(new Error('Login required'), { code:'AUTH_REQUIRED', status:401 });
+    if (url === instagram && sourceCalls.filter(value => value === url).length === 1) {
+      throw Object.assign(new Error('HTTP Error 429: Too Many Requests'), { retryAfterSeconds:70 });
+    }
+    const source = url === instagram ? nativeExtractorSource(url, { extractor_key:'Instagram', id:'deferred' })
+      : verifiedMediaSource(url, { provider:'tiktok-api', id:'25', owner:'source' });
+    return { source, files:[{ filePath, mediaKind:'image', mimeType:'image/png' }] };
+  }
+  function upload(method, form) {
+    assert.equal(method, 'sendPhoto');
+    assert.equal(form.get('chat_id'), '-123');
+    assert.equal(form.get('reply_to_message_id'), '500');
+    assert.equal(form.get('message_thread_id'), null);
+    sent.push(form.get('caption').split('\n').at(-1));
+    return Response.json({ ok:true, result:{ message_id:800 + sent.length, chat:{id:Number(form.get('chat_id'))},
+      photo:[{file_id:'saved-' + sent.length}] } });
+  }
+  f.setDownloader(download); f.setUpload(upload);
+  await f.queue({update_id:500, message});
+  assert.deepEqual(sourceCalls, [instagram, tiktok, threads]);
+  assert.deepEqual(sent, [tiktok]);
+  const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  const operations = await journal.read();
+  assert.equal(operations.length, 3);
+  assert.ok(operations.every(op => op.topicId === null && op.sourceMessageId === 500));
+  const [retained] = await f.pending();
+  assert.deepEqual(retained.mediaBatch.map(item => item.url), [instagram]);
+  assert.equal(retained.mediaBatch[0].operationId, operations.find(op => op.url === instagram).id);
+  const notices = () => f.calls.filter(call => call.method === 'sendMessage').map(call => call.payload.text);
+  assert.equal(notices().length, 1);
+  assert.match(notices()[0], /3/);
+
+  // Disk snapshot after the sibling's Telegram receipt, before its inbox checkpoint.
+  const delivered = operations.find(op => op.url === tiktok);
+  await journal.record({ ...delivered, status:'uploading' });
+  retained.mediaBatch.push({ url:tiktok, number:2 }, { url:threads, number:3 });
+  retained.deferredMedia.retryAt = 0;
+  await fs.writeFile(path.join(f.root, 'runtime/inbox.json'), JSON.stringify({version:1, offset:501, pending:[retained]}));
+  time += 1000; await f.restart();
+  f.setDownloader(download); f.setUpload(upload);
+  await f.queue({update_id:500, message});
+  assert.deepEqual(sourceCalls, [instagram, tiktok, threads]);
+  assert.deepEqual(sent, [tiktok]);
+  assert.equal(notices().length, 1);
+  assert.deepEqual((await f.pending())[0].mediaBatch.map(item => item.url), [instagram]);
+  time = retained.mediaBatch[0].retryAt + 1;
+  await f.queue({update_id:500, message});
+  assert.deepEqual(sent, [tiktok, instagram]);
+  assert.deepEqual(sourceCalls, [instagram, tiktok, threads, instagram]);
+  assert.equal(notices().length, 1);
+  assert.deepEqual(await f.pending(), []);
+});
+
+test('manual retry selects one publication and its cached bytes when two failed links share a source message', async t => {
+  const f = await fixture(t), journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  const urls = ['https://www.instagram.com/p/first/', 'https://www.instagram.com/p/second/'];
+  let fetches = 0, sends = 0;
+  for (const [index, url] of urls.entries()) {
+    const filePath = path.join(f.root, index + '.png');
+    await fs.writeFile(filePath, await photoBytes(index + 1));
+    const cache = new MediaCache(path.join(f.root, 'runtime/media-cache'));
+    const source = nativeExtractorSource(url, {extractor_key:'Instagram', id:index ? 'second' : 'first'});
+    const file = { filePath, mediaKind:'image', mimeType:'image/png', sourceItemId:'slot-' + index };
+    await cache.put({ chatId:-123, topicId:9, sourceMessageId:500, sourceUrl:url, source, files:[file], pending:true });
+    // An older record without a cacheId must match the publication as well as the message.
+    await journal.record({ id:'op' + index, chatId:-123, topicId:9, sourceMessageId:500, url, userId:88,
+      mediaItems:[{sourceItemId:file.sourceItemId, mediaKind:'image'}], errorMessageId:800 + index, status:'failed',
+      failure:{code:'SERVICE_ERROR', retryable:true, stage:'upload'} });
+  }
+  f.setDownloader(async () => { fetches++; throw new Error('must use the matching cached copy'); });
+  f.setUpload(async (method, form) => {
+    assert.equal(method, 'sendPhoto');
+    assert.ok(form.get('caption').endsWith(urls[0]));
+    assert.deepEqual(Buffer.from(await form.get('photo').arrayBuffer()), await photoBytes(1));
+    sends++;
+    return Response.json({ok:true, result:{message_id:10000 + sends, chat:{id:Number(form.get('chat_id'))},
+      message_thread_id:Number(form.get('message_thread_id')), is_topic_message:true, photo:[{file_id:'specific-result'}]}});
+  });
+  await f.handle({ message_id:8001, text:'повтори', reply_to_message:{message_id:500} });
+  assert.match(f.calls.filter(call => call.method === 'sendMessage').at(-1).payload.text, /Яке посилання/);
+  assert.equal(sends, 0);
+  const retry = { ...instagramUpdate(8002).message, text:'повтори', reply_to_message:{message_id:800} };
+  await f.queue({update_id:8002, message:retry});
+  assert.equal(sends, 1); assert.equal(fetches, 0);
+  assert.deepEqual((await journal.read()).map(op => [op.id, op.status]), [['op0','done'], ['op1','failed']]);
+  await f.queue({update_id:8002, message:retry});
+  assert.equal(sends, 1);
+});
+
+test('a legacy single-marker inbox entry retains its original 429 and processes newly recognised siblings exactly once', async t => {
+  let time = Date.now();
+  t.mock.method(Date, 'now', () => time);
+  const f = await fixture(t);
+  const old = instagramUpdate(601), second = 'https://www.threads.com/@source/post/second/';
+  f.setDownloader(async () => { throw Object.assign(new Error('HTTP Error 429'), { retryAfterSeconds:70 }); });
+  await f.queue(old);
+  const [retained] = await f.pending();
+  const previous = { ...retained.deferredMedia };
+  retained.message.text = 'перша ' + old.message.text;
+  retained.message.entities = [{type:'text_link', offset:0, length:5, url:second}];
+  await fs.writeFile(path.join(f.root,'runtime/inbox.json'), JSON.stringify({version:1,offset:602,pending:[retained]}));
+  time += 1000; await f.restart();
+  const calls = [];
+  f.setDownloader(async url => { calls.push(url); throw Object.assign(new Error('HTTP 403 Forbidden'), {status:403}); });
+  await f.queue(retained);
+  assert.deepEqual(calls,[second]);
+  let [pending] = await f.pending();
+  assert.deepEqual(pending.mediaBatch,[{url:old.message.text, number:2, ...previous}]);
+  await f.queue(retained);
+  assert.deepEqual(calls,[second]);
+  time = previous.retryAt + 1;
+  await f.queue(pending);
+  assert.deepEqual(calls,[second,old.message.text]);
+  assert.deepEqual(await f.pending(),[]);
+  const journal = new MediaOperations(path.join(f.root,'runtime/media.json'));
+  assert.equal((await journal.read()).find(op => op.url === old.message.text).id, previous.operationId);
+});
+
+test('recovery yields a long message to another ready update and finishes every publication', async t => {
+  const f = await fixture(t), urls = [];
+  const batch = (id, names) => {
+    const links = names.map(name => 'https://www.instagram.com/p/' + name + '/');
+    return { ...instagramUpdate(id, links.join(' ')), deferredMedia:{retryAt:0}, mediaBatch:links.map((url,i) => ({url,number:i + 1})) };
+  };
+  const first = batch(901,['one','two','three','four']), second = batch(902,['other']);
+  await fs.mkdir(path.join(f.root,'runtime'), { recursive:true });
+  await fs.writeFile(path.join(f.root,'runtime/inbox.json'), JSON.stringify({ version:1, offset:903, pending:[first,second] }));
+  await f.restart();
+  f.setDownloader(async url => { urls.push(url); throw Object.assign(new Error('Private publication'), {code:'MEDIA_SOURCE_UNVERIFIED'}); });
+  await f.queue(first);
+  // Queues may become empty between slices. Wait until the persisted jobs settle.
+  for (let i = 0; i < 20 && (await f.pending()).length; i++) {
+    await new Promise(resolve => setImmediate(resolve)); await f.drainAll();
+  }
+  assert.deepEqual(await f.pending(),[]);
+  assert.deepEqual(urls.map(url => url.split('/').at(-2)), ['one','two','three','other','four']);
+});
+
+test('history-only media requests resolve hidden links and request the exact publication for download and analysis', async t => {
+  const f = await fixture(t), urls = ['https://www.instagram.com/p/first/','https://www.instagram.com/p/second/'];
+  const history = new ConversationStore(path.join(f.root,'runtime/conversations'));
+  await history.record({ chatId:-123,messageId:500,userId:88,isBot:false,sender:'Fixture',messageThreadId:9,isForum:true,
+    date:Date.now()-1000,text:'перший, другий',socialUrls:urls });
+  const calls = [];
+  f.setDownloader(async url => { calls.push(url); throw Object.assign(new Error('HTTP 403 Forbidden'), {status:403}); });
+  const request = { reply_to_message:{message_id:500, from:{id:88}, text:'перший, другий'} };
+  for (const action of ['download','analyze']) {
+    f.setAnswer(async () => ({ text:JSON.stringify({action,language:'uk',targetMessageId:500}),searchStatus:{succeeded:false} }));
+    await f.handle({...request,text:'@ReliabilityTestBot опрацюй це повідомлення', message_id:action === 'download' ? 701 : 702});
+    assert.match(f.calls.filter(call => call.method === 'sendMessage').at(-1).payload.text, /Яке посилання/);
+    assert.deepEqual(calls,[]);
+  }
+  const text = '@ReliabilityTestBot розкажи про матеріал за другим посиланням';
+  await f.handle({...request,message_id:703,text,entities:[{type:'text_link',offset:text.indexOf('другим'),length:6,url:urls[1]}]});
+  assert.deepEqual(calls,[urls[1]]);
+});
+
+for (const invalid of ["duplicate", "missing", "document", "blank file_id", "wrong chat", "wrong topic", "wrong order", "previous chunk"]) {
+  test(`Telegram album rejects ${invalid} receipts without binding or resending the uncertain chunk`, async t => {
+    const f = await fixture(t), url = "https://www.tiktok.com/@fixture/photo/123/";
+    const source = verifiedMediaSource(url, { provider: "tiktok-api", id: "123", owner: "fixture" });
+    const photoPath = path.join(f.root, "photo.png");
+    await fs.writeFile(photoPath, await fixturePhoto);
+    const count = invalid === "previous chunk" ? 12 : 2;
+    const files = Array.from({ length: count }, () => ({ filePath: photoPath, mediaKind: "image", mimeType: "image/png" }));
+    if (invalid === "wrong order") {
+      const filePath = path.join(f.root, "clip.mp4");
+      execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=s=32x32:r=5", "-t", "0.4", "-c:v", "libx264", "-threads", "1", filePath]);
+      files[1] = { filePath, mediaKind: "video", mimeType: "video/mp4" };
+    }
+    f.setDownloader(async () => ({ source, files }));
+    let calls = 0;
+    f.setUpload(async (method, form) => {
+      assert.equal(method, "sendMediaGroup");
+      const offset = 2000 + 10 * calls++;
+      const items = JSON.parse(form.get("media")).map(({type}, i) => {
+        const item = photoReceipt(form, offset + i, `file-${i}`);
+        if (type === "video") { delete item.photo; item.video = { file_id: "video" }; }
+        return item;
+      });
+      if (invalid === "duplicate") items[1].message_id = items[0].message_id;
+      if (invalid === "missing") items.pop();
+      if (invalid === "document") { delete items[1].photo; items[1].document = { file_id: "document" }; }
+      if (invalid === "blank file_id") items[1].photo[0].file_id = " ";
+      if (invalid === "wrong chat") items[1].chat.id = -321;
+      if (invalid === "wrong topic") items[1].message_thread_id++;
+      if (invalid === "wrong order") items.reverse();
+      if (invalid === "previous chunk" && calls === 2) items[1].message_id = 2000;
+      return Response.json({ ok: true, result: items });
+    });
+    const update = { update_id: 411, message: { message_id: 51, date: Math.floor(Date.now() / 1000), chat: { id: -123, type: "supergroup", is_forum: true },
+      is_topic_message: true, message_thread_id: 9, from: { id: 88 }, text: url } };
+    await f.queue(update);
+    const [operation] = await new MediaOperations(path.join(f.root, "runtime/media.json")).read();
+    const confirmed = invalid === "previous chunk" ? 10 : 0;
+    assert.equal(operation.status, "unknown");
+    assert.equal(operation.deliveredFileCount || 0, confirmed);
+    assert.deepEqual(operation.sentMessageIds || [], Array.from({ length: confirmed }, (_, i) => 2000 + i));
+    const cache = new MediaCache(path.join(f.root, "runtime/media-cache"));
+    const saved = await cache.forDelivery({ chatId: -123, topicId: 9, entryId: operation.cacheId, botId: 77 });
+    assert.equal(saved.bindings.length, confirmed);
+    assert.equal(saved.receipts.length, confirmed);
+    assert.equal(calls, confirmed ? 2 : 1);
+    assert.deepEqual(await f.pending(), []);
   });
 }

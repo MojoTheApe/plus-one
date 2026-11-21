@@ -1,3 +1,5 @@
+import { mediaPublicationKey, mediaReference } from "./media-source.js";
+
 export function say(locale, english, russian, ukrainian) {
   return locale === "ru" ? russian : locale === "uk" ? ukrainian : english;
 }
@@ -353,14 +355,50 @@ export function telegramRetryDelayMsForError(error, fallbackMs = 1000) {
 }
 
 export function extractSocialVideoUrlFromText(text) {
-  for (const raw of String(text || "").match(/https?:\/\/[^\s<>"'`]+/gi) || []) {
-    try {
-      const url = new URL(raw.trim().replace(/[),.!?\]}]+$/g, ""));
-      if (url.protocol !== "http:" && url.protocol !== "https:") continue;
-      if (isSocialVideoHostName(url.hostname)) return url.toString();
-    } catch {}
+  return socialMessageLinks(String(text || "")).urls[0] || "";
+}
+
+// Telegram entity ranges are UTF-16 offsets in the original (untrimmed) field.
+// A text_link's clickable target takes precedence over whatever its label says.
+export function socialMessageLinks(text, entities = []) {
+  const ranges = [];
+  for (const entity of entities || []) {
+    if (!["url", "text_link"].includes(entity.type) || !Number.isSafeInteger(entity.offset) ||
+        !Number.isSafeInteger(entity.length) || entity.length <= 0 || entity.offset < 0 || entity.offset + entity.length > text.length) continue;
+    const start = entity.offset, end = start + entity.length;
+    ranges.push({ start, end, raw: entity.type === "text_link" ? entity.url : text.slice(start, end) });
   }
-  return "";
+  const urlPattern = /(?<![\w.@/:-])(?:https?:\/\/|(?=(?:(?:www|m|vm|vt)\.)?(?:instagram\.com|threads\.(?:net|com)|tiktok\.com)\/))[^\s<>"'`]+/giu;
+  for (const match of text.matchAll(urlPattern)) {
+    const start = match.index, raw = match[0].replace(/[),.!?\]}]+$/gu, ""), end = start + raw.length;
+    if (!ranges.some(item => item.start < end && start < item.end)) ranges.push({ start, end, raw });
+  }
+  const urls = new Map();
+  let outsideLinks = "", position = 0;
+  for (const { start, end, raw } of ranges.sort((a, b) => a.start - b.start)) {
+    if (typeof raw !== "string" || start < position) continue;
+    let url;
+    try { url = new URL(/^[\w.-]+\//u.test(raw) ? "https://" + raw : raw); } catch { continue; }
+    if (!["http:", "https:"].includes(url.protocol)) continue;
+    url.protocol = "https:";
+    if (!mediaReference(url.href)) continue;
+    const key = mediaPublicationKey(url.href);
+    if (!urls.has(key)) urls.set(key, url.href);
+    outsideLinks += text.slice(position, start) + " ";
+    position = end;
+  }
+  return { urls: [...urls.values()], outsideLinks: (outsideLinks + text.slice(position)).trim() };
+}
+
+export function addressedMediaDownload(outsideLinks, username) {
+  if (!username) return true;
+  const mention = new RegExp("@" + escapeRegex(username) + "\\b", "giu");
+  if (!mention.test(outsideLinks)) return true;
+  const command = outsideLinks.replace(mention, "").toLowerCase().replace(/[\s,.!:;()[\]—–-]+/gu, " ").trim();
+  if (!command) return true;
+  // Only an unambiguous imperative bypasses dialogue. Questions, negations
+  // and requests to analyse the same publication retain semantic routing.
+  return /^(?:(?:будь ласка|пожалуйста|please) )?(?:скачай|скачайте|завантаж(?:те)?|надішли|скинь|пришли|отправь|download|send)(?: (?:будь ласка|пожалуйста|please|файлом|файлами|файл(?:и|ы)?|відео|видео|фото|ролик|это|це|the|as|a|files?|videos?|photos?|media|сюди|сюда|мне|мені|и|та|і|and|по ссылке|за посиланням))*$/iu.test(command);
 }
 
 export function socialVideoProviderForUrl(value) {

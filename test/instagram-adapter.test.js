@@ -202,3 +202,9 @@ print('ok')
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), 'ok');
 });
+
+test('Polaris native carousel fields bind each normalized asset to its child ID and reject substitutions', () => {
+  const result = spawnSync('python3', ['-B', path.resolve('test/instagram-polaris-fixture.py')], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /6 Polaris fixtures passed/);
+});

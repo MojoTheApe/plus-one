@@ -13,6 +13,17 @@ export class UpdateInbox {
       return state;
     });
   }
+  saveMediaBatch(id, remaining) {
+    return this.mutate(state => {
+      const update = state.pending.find(item => item.update_id === id);
+      if (update) {
+        update.mediaBatch = remaining;
+        // A fresh sibling is due even when an earlier publication is waiting.
+        update.deferredMedia = { retryAt: remaining.length ? Math.min(...remaining.map(item => item.retryAt || 0)) : 0 };
+      }
+      return state;
+    });
+  }
   done(id){return this.mutate(s=>({...s,pending:s.pending.filter(u=>u.update_id!==id)}));}
 }
 export class ChatQueue {
