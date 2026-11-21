@@ -163,3 +163,23 @@ test('only explicit Instagram rate-limit evidence can mark a persisted provider 
     assert.notEqual(mediaFailure(new Error(message)).confirmedRateLimit, true);
   }
 });
+
+test('the journal retains accepted Instagram waits when new submissions exceed capacity', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'waiting-capacity-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'media.json');
+  const journal = new MediaOperations(file);
+  const now = Date.now();
+  const pending = Array.from({ length: 64 }, (_, index) => ({
+    id: 'wait-' + index, status: 'waiting_source', updatedAt: now,
+    sourceRetry: { updateId: index + 1, retryAt: now + 60000, expiresAt: now + 1800000, attempts: 1 },
+  }));
+  const history = Array.from({ length: 236 }, (_, i) => ({ id: 'done-' + i, updatedAt: now, status: 'done' }));
+  await fs.writeFile(file, JSON.stringify({ version: 1, operations: [...history, ...pending] }));
+  const overflow = await journal.record({ ...pending[0], id: 'new-wait', sourceRetry: { ...pending[0].sourceRetry, updateId: 992 } });
+  assert.equal(overflow.failure.code, 'SOURCE_RETRY_CAPACITY');
+  assert.equal(overflow.status, 'failed');
+  const saved = await journal.read();
+  assert.equal(saved.length, 300);
+  assert.deepEqual(saved.filter(op => op.status === 'waiting_source').map(op => op.id), pending.map(op => op.id));
+});

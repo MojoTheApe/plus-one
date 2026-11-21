@@ -6,6 +6,7 @@ import { conversationThreadId } from "./conversation-store.js";
 import { say } from "./helpers.js";
 
 const durationText = n => { const seconds = Math.ceil(n); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; };
+const activeSourceRetry = op => op?.sourceRetry && ["waiting_source", "running", "prepared", "uploading"].includes(op.status);
 function limitedInstagramFallback(causes) {
   if (causes?.length === 2 && causes[0].provider === "instaloader" && causes[0].code === "AUTH_REQUIRED" &&
       causes[1].provider === "yt-dlp" && causes[1].code === "RATE_LIMIT" && causes[1].retryable && !causes[1].fallbackDisabled) return causes[1];
@@ -116,6 +117,8 @@ export function failureMessage(failure, locale = "uk") {
   switch (failure.code) {
     case "SOURCE_RETRY_EXHAUSTED":
       return text("Instagram kept limiting requests. I couldn’t retrieve this post.", "Instagram продолжает ограничивать запросы. Не удалось получить эту публикацию.", "Instagram продовжує обмежувати запити. Не вдалося отримати цю публікацію.");
+    case "SOURCE_RETRY_CAPACITY":
+      return text("The Instagram download queue is full. This post couldn’t be queued.", "Очередь загрузок из Instagram заполнена. Эту публикацию не удалось поставить в очередь.", "Черга завантажень з Instagram заповнена. Цю публікацію не вдалося додати до черги.");
     case "GROUP_RATE_LIMIT": case "URL_BACKOFF": case "RATE_LIMIT": case "IN_PROGRESS": case "CAPACITY": case "FAILURE_COOLDOWN":
       return wait > 0
         ? text(`Try again in ${wait} s.`, `Повтори через ${wait} с.`, `Повтори через ${wait} с.`)
@@ -234,7 +237,7 @@ export class MediaOperations {
     const key = mediaPublicationKey(url);
     return (await this.read()).find(op => op.sourceRetry && op.chatId === chatId &&
       (op.topicId ?? op.threadId ?? null) === topicId && mediaPublicationKey(op.url) === key &&
-      (["waiting_source", "running", "prepared", "uploading"].includes(op.status) ||
+      (activeSourceRetry(op) ||
         (updateId >= op.sourceRetry.updateId && updateId <= op.sourceRetry.throughUpdateId)));
   }
   async record(operation, { beginUpload = false } = {}) {
@@ -242,6 +245,10 @@ export class MediaOperations {
       const all = state.operations;
       const previous = all.find(op => op.id === operation.id);
       const entry = { ...previous, ...operation, id: operation.id || randomUUID().slice(0, 8), updatedAt: this.now() };
+      if (entry.status === "waiting_source" && !activeSourceRetry(previous) && all.filter(activeSourceRetry).length >= 64) {
+        entry.status = "failed";
+        entry.failure = { code: "SOURCE_RETRY_CAPACITY", stage: "download", retryable: true };
+      }
       if (entry.status === "running" && ["unknown", "uploading"].includes(previous?.status)) {
         entry.priorUploadFailure = previous.failure || mediaFailure({ deliveryUnknown: true }, { stage: "upload" });
       }
@@ -254,8 +261,9 @@ export class MediaOperations {
       entry.threadId = entry.topicId;
       entry.referenceMessageIds = [...new Set([...operationReferences(previous), ...operationReferences(entry)])].slice(-50);
       const recent = [entry, ...all.filter(op => op.id !== entry.id)];
-      state.operations = recent.filter((op, index) => index < 300 || (op.sourceRetry &&
-        ["waiting_source", "running", "prepared", "uploading"].includes(op.status)));
+      const reserved = recent.filter(activeSourceRetry).length;
+      let historySlots = 300 - reserved;
+      state.operations = recent.filter(op => activeSourceRetry(op) || historySlots-- > 0);
       const day = new Date(this.now()).toISOString().slice(0, 10);
       state.metrics ||= {};
       for (const key of Object.keys(state.metrics)) if (key < new Date(this.now() - 30 * 86400000).toISOString().slice(0, 10)) delete state.metrics[key];

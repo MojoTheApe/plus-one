@@ -313,6 +313,14 @@ export async function downloadInstagramWithSnapinsta(url, tempDir, deps) {
   throw Object.assign(sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "snapinsta"), { fallbackDisabled: true });
 }
 
+function isInstagramAssetUrl(value) {
+  try {
+    const target = new URL(value);
+    return target.protocol === "https:" && !target.username && !target.password && (!target.port || target.port === "443") &&
+      [".cdninstagram.com", ".fbcdn.net"].some(suffix => target.hostname.endsWith(suffix));
+  } catch { return false; }
+}
+
 export async function downloadInstagramPost(url, tempDir, deps) {
   let manifest;
   try {
@@ -337,11 +345,8 @@ export async function downloadInstagramPost(url, tempDir, deps) {
   const itemIds = new Set();
   let bytes = 0;
   for (const [index, item] of manifest.items.entries()) {
-    let target;
-    try { target = new URL(item.url); } catch { throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader"); }
     if (item.index !== index || typeof item.mediaId !== "string" || !/^\d+$/u.test(item.mediaId) || itemIds.has(item.mediaId) ||
-        !["image", "video"].includes(item.kind) || target.protocol !== "https:" || target.username || target.password ||
-        (target.port && target.port !== "443") || !["cdninstagram.com", "fbcdn.net"].some(host => target.hostname.endsWith("." + host))) {
+        !["image", "video"].includes(item.kind) || !isInstagramAssetUrl(item.url)) {
       throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader");
     }
     itemIds.add(item.mediaId);
@@ -368,9 +373,16 @@ export async function downloadSocialVideo(url, deps) {
     if (mediaReference(url)?.platform === "instagram" && ["post", "reel"].includes(mediaReference(url)?.kind) && deps.instagramScript) {
       try { return await downloadInstagramPost(url, tempDir, deps); }
       catch (error) {
-        if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error.code) || deps.signal?.aborted || mediaFailure(error).code === "RATE_LIMIT") throw error;
-        // Preserve native video posts when the photo adapter cannot access them.
-        try { return { ...await downloadSocialVideoWithYtDlp(url, tempDir, deps), previousFailure: error }; }
+        const failure = mediaFailure(error);
+        const isPost = mediaReference(url)?.kind === "post";
+        const deniedPost = isPost && ([401, 403].includes(failure.status) || error.adapterErrorType === "PrivateProfileNotFollowedException");
+        if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error.code) ||
+            deps.signal?.aborted || failure.code === "RATE_LIMIT" || deniedPost) throw error;
+        // A generic adapter login/unavailable result retains the prior native video path.
+        // Only an ordinary source failure opens the additional photo extraction path.
+        const nativeDeps = isPost && !["SERVICE_ERROR", "TIMEOUT", "NO_MEDIA"].includes(failure.code)
+          ? { ...deps, allowNativePhoto: false } : deps;
+        try { return { ...await downloadSocialVideoWithYtDlp(url, tempDir, nativeDeps), previousFailure: error }; }
         catch (native) { throw socialDownloadFailure(error, native, "yt-dlp"); }
       }
     }
@@ -486,6 +498,19 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
     error.actualDurationSeconds = duration;
     throw error;
   }
+  if (info.instagram_single_photo) {
+    const photo = info.instagram_single_photo;
+    const ref = mediaReference(url);
+    if (deps.allowNativePhoto === false || ref?.platform !== "instagram" || ref.kind !== "post" || !ref.id || info._type !== "playlist" ||
+        !Array.isArray(info.entries) || info.entries.length || typeof photo.publication_id !== "string" ||
+        !/^[1-9]\d{0,24}$/u.test(photo.publication_id) || instagramMediaCode(photo.publication_id) !== info.id || !isInstagramAssetUrl(photo.url)) {
+      throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "yt-dlp");
+    }
+    const source = nativeExtractorSource(url, info);
+    const file = await downloadRemoteMediaFile(photo.url, tempDir, "instagram-photo", source.resolved.url, "image", deps, { strictImage: true });
+    file.sourceItemId = `publication:${source.resolved.id}`;
+    return { tempDir, source, files: [file], title: info.title || "Instagram photo", ...(previousFailure ? { previousFailure } : {}) };
+  }
   if (info._type === "playlist" || Array.isArray(info.entries)) throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "yt-dlp");
   const source = nativeExtractorSource(url, info);
 
@@ -554,10 +579,14 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
 }
 
 export async function inspectSocialVideo(url, deps) {
+  const reference = mediaReference(url);
+  const pluginArgs = deps.allowNativePhoto !== false && reference?.platform === "instagram" && reference.kind === "post" && reference.id
+    ? ["--plugin-dirs", path.join(deps.rootDir, "src", "yt-dlp-plugins")] : [];
   const { stdout } = await deps.execFileAsync(
     deps.downloader,
     [
       "--ignore-config",
+      ...pluginArgs,
       ...(deps.instagramCookieArgs || []),
       "--js-runtimes", "node",
       "--no-playlist",
@@ -607,10 +636,11 @@ export async function downloadRemoteBinaryFile(url, filePath, { accept = "*/*", 
   await writeLimitedResponseFile(response, filePath, deps);
 }
 
-export async function downloadRemoteMediaFile(url, tempDir, baseName, referer, forcedMediaKind, deps) {
+export async function downloadRemoteMediaFile(url, tempDir, baseName, referer, forcedMediaKind, deps, { strictImage = false } = {}) {
   const response = await fetchWithTimeout(
     url,
     {
+      ...(strictImage ? { redirect: "manual" } : {}),
       headers: {
         accept: "video/mp4,video/*,image/*,*/*",
         referer,
@@ -620,8 +650,16 @@ export async function downloadRemoteMediaFile(url, tempDir, baseName, referer, f
     deps.httpTimeoutMs,
     deps.fetch,
   );
+  if (strictImage && response.status >= 300 && response.status < 400) {
+    await response.body?.cancel?.();
+    throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "yt-dlp");
+  }
   if (!response.ok) throw httpFailure("remote media download failed", response.status, response.headers);
   const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  if (strictImage && !/^image\/(?:jpeg|png|webp|avif)(?:;|$)/u.test(contentType)) {
+    await response.body?.cancel?.();
+    throw Object.assign(new Error("Instagram photo returned a different media type"), { code: "MEDIA_IMAGE_INVALID" });
+  }
   if (contentType.startsWith("text/html")) throw new Error("remote media returned HTML instead of a file");
   const mediaKind = forcedMediaKind || inferRemoteMediaKind(url, contentType);
   if (!mediaKind) throw new Error(`remote media type is not supported: ${contentType || "unknown content type"}`);

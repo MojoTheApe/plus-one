@@ -167,3 +167,38 @@ print('verified fallback preserved')
   const result = spawnSync('python3', ['-B', '-c', program, path.resolve('scripts/instagram-media.py')], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), 'verified fallback preserved');
 });
+
+test('the photo extension extracts only a native single image and keeps large publication IDs as strings', () => {
+  const program = `
+import runpy,sys,types
+class Core:
+ def __init_subclass__(cls, plugin_name=None): pass
+ def _extract_product(self, product, *args, **kwargs): return 'upstream'
+ def playlist_result(self, entries, playlist_id, playlist_title, **fields): return {**fields,'id':playlist_id,'entries':entries}
+class Error(Exception):
+ def __init__(self,message,**kwargs): super().__init__(message)
+instagram=types.ModuleType('yt_dlp.extractor.instagram');instagram.InstagramIE=Core
+def shortcode(pk):
+ assert str(pk)=='9007199254740993'
+ return 'gAAAAAAAB'
+instagram._pk_to_id=shortcode
+utils=types.ModuleType('yt_dlp.utils');utils.ExtractorError=Error
+sys.modules['yt_dlp.extractor.instagram']=instagram;sys.modules['yt_dlp.utils']=utils
+plugin=runpy.run_path(sys.argv[1])['_InstagramPhotoIE']()
+photo={'pk':'9007199254740993','id':'opaque-field','code':'gAAAAAAAB','media_type':1,
+ 'image_versions2':{'candidates':[{'url':'https://one.cdninstagram.com/photo.jpg'},{'url':'https://two.cdninstagram.com/smaller.jpg'}]},
+ 'user':{'username':'source'}}
+assert plugin._extract_product(photo)['instagram_single_photo']=={'publication_id':photo['pk'],'url':photo['image_versions2']['candidates'][0]['url']}
+below=photo.copy();below.pop('code')
+assert plugin._extract_product(below)['id']==photo['code']
+for updates in [{'code':'other'},{'pk':None},{'image_versions2':{}},{'carousel_media':[{}]},{'carousel_media_count':2}]:
+ try:plugin._extract_product({**photo,**updates});raise AssertionError('invalid photo accepted')
+ except Error:pass
+for typ in [2,8]:assert plugin._extract_product({**photo,'media_type':typ})=='upstream'
+print('ok')
+`;
+  const plugin = path.resolve('src/yt-dlp-plugins/instagram-photo/yt_dlp_plugins/extractor/instagram_photo.py');
+  const result = spawnSync('python3', ['-B', '-c', program, plugin], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'ok');
+});

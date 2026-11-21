@@ -2244,3 +2244,42 @@ test('Instagram stops after three actual 429 responses and sends one final notic
   assert.equal(notices[0].payload.reply_to_message_id, 535);
   assert.equal(notices[0].payload.message_thread_id, 9);
 });
+
+for (const phase of ['saved anchor', 'saved receipt']) {
+  test('a deferred video survives a restart after its ' + phase, async t => {
+    const f = await fixture(t);
+    const url = 'https://www.instagram.com/reel/anchored/';
+    const filePath = path.join(f.root, 'source.mp4');
+    execFileSync('ffmpeg', ['-v','error','-f','lavfi','-i','color=s=32x32:r=5','-t','0.4','-c:v','libx264','-threads','1',filePath]);
+    const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+    f.setDownloader(async () => ({
+      source: nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'anchored' }),
+      files: [{ filePath, mediaKind: 'video', mimeType: 'video/mp4' }],
+    }));
+    const targets = [];
+    f.setUpload(async (method, form) => {
+      assert.equal(method, 'editMessageMedia');
+      const id = Number(form.get('message_id'));
+      targets.push(id);
+      return Response.json({ ok: true, result: { chat: { id: -123 }, message_id: id, video: { file_id: 'known' } } });
+    });
+    await f.handle({ message_id: 500, text: url });
+    const [done] = await journal.read();
+    assert.equal(done.status, 'done');
+    const sourceRetry = { updateId: 505, retryAt: Date.now() - 1000, expiresAt: Date.now() + 120000, attempts: 1 };
+    const interrupted = { ...done, status: 'uploading', sourceRetry, failure: null };
+    if (phase === 'saved anchor') Object.assign(interrupted, {
+      deliveredFileCount: 0, sentMessageIds: [], videoEditAttempts: 0, videoEditPending: false, videoEditRequestId: null,
+    });
+    await journal.record(interrupted);
+    const retained = { ...instagramUpdate(500, url), update_id: 505, deferredMedia: { operationId: done.id, retryAt: sourceRetry.retryAt } };
+    await fs.writeFile(path.join(f.root, 'runtime/inbox.json'), JSON.stringify({ version: 1, offset: 506, pending: [retained] }));
+    await f.restart();
+    f.setDownloader(async () => { throw new Error('No new source retrieval should occur'); });
+    await f.queue((await f.pending())[0]);
+    assert.deepEqual(await f.pending(), []);
+    assert.equal((await journal.read())[0].status, 'done');
+    assert.equal(f.calls.filter(call => call.payload.text === 'Надсилаю…').length, 1);
+    assert.deepEqual(targets, phase === 'saved anchor' ? [done.videoReplyId, done.videoReplyId] : [done.videoReplyId]);
+  });
+}
