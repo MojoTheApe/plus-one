@@ -183,3 +183,76 @@ test('the journal retains accepted Instagram waits when new submissions exceed c
   assert.equal(saved.length, 300);
   assert.deepEqual(saved.filter(op => op.status === 'waiting_source').map(op => op.id), pending.map(op => op.id));
 });
+
+test("only one same-message alias can claim a verified publication, including after restart and ambiguous partial upload", async t => {
+  const { verifiedMediaSource } = await import("../src/media-source.js");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "native-aliases-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filename = path.join(root, "journal.json");
+  const journal = new MediaOperations(filename), full = "https://www.threads.com/@u/post/abc/";
+  const short = ["https://www.threads.com/share/?target=one", "https://www.threads.com/share/?target=two"];
+  const base = { chatId: -1, topicId: 7, sourceMessageId: 100, status: "running" };
+  const requests = await Promise.all(short.map(url => journal.record({ ...base, url })));
+  const claim = (store, entry, canonical = full) => store.record({ ...entry, source: verifiedMediaSource(entry.url, {
+    provider: "threads-page", resolvedUrl: canonical, id: "abc", owner: "u",
+  }) }, { claimPublication: true });
+  assert.deepEqual((await Promise.all(requests.map(entry => claim(journal, entry)))).map(result => result.id || result.duplicateOf), [requests[0].id, requests[0].id]);
+  const [owner] = await journal.read();
+  assert.equal((await journal.read()).length, 1);
+  await journal.record({ ...owner, status: "unknown", deliveredFileCount: 1, sentMessageIds: [831] });
+  const restarted = new MediaOperations(filename);
+  const lookup = url => restarted.forSourceMessage({ chat: { id: -1 }, message_id: 100 }, 7, url);
+  for (const url of [...short, full]) assert.equal((await lookup(url)).id, owner.id);
+  assert.equal(await lookup("https://www.threads.com/share/?target=other"), undefined);
+  assert.equal(await lookup("https://www.threads.com/@wrong/post/abc/"), undefined);
+  const third = await restarted.record({ ...base, url: "https://www.threads.com/share/three/" });
+  assert.deepEqual(await claim(restarted, third), { duplicateOf: owner.id });
+  assert.deepEqual((await lookup(full)).sentMessageIds, [831]);
+  for (const scope of [{ chatId: -2 }, { topicId: 9 }, { sourceMessageId: 101 }]) {
+    const other = await restarted.record({ ...base, ...scope, url: short[0] });
+    assert.equal((await claim(restarted, other)).id, other.id);
+  }
+});
+
+test("a bounded redirect before a source failure can be superseded only by the same verified target", async t => {
+  const { verifiedMediaSource } = await import("../src/media-source.js");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "resolved-alias-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filename = path.join(root, "journal.json"), journal = new MediaOperations(filename);
+  const short = "https://vt.tiktok.com/shortcut/", full = "https://www.tiktok.com/@u/photo/456/";
+  const base = { chatId: -1, topicId: 7, sourceMessageId: 100, status: "running" };
+  const before = await journal.record({ ...base, url: short });
+  assert.equal(await journal.coalesceResolvedLink(before.id, full), null);
+  await journal.record({ ...before, status: "failed", failure: { code: "SERVICE_ERROR" } });
+  const opaque = await journal.record({ ...base, url: "https://vt.tiktok.com/no-destination/", status: "failed" });
+  const restarted = new MediaOperations(filename);
+  const accepted = await restarted.record({ ...base, url: full, source: verifiedMediaSource(full, { provider: "tiktok-api", id: "456", owner: "u" }) }, { claimPublication: true });
+  const entries = await restarted.read();
+  assert.equal(entries.find(op => op.id === before.id).duplicateOf, accepted.id);
+  assert.equal(entries.find(op => op.id === opaque.id).duplicateOf, undefined);
+  const match = await restarted.forSourceMessage({ chat: { id: -1 }, message_id: 100 }, 7, short);
+  assert.equal(match.id, accepted.id);
+  const reentered = await restarted.record({ ...before, status: "uploading" }, { beginUpload: true });
+  assert.deepEqual(reentered, { duplicateOf: accepted.id });
+});
+
+test("a video receipt cannot own a later request for original TikTok slides or a different author's permalink", async t => {
+  const { verifiedMediaSource } = await import("../src/media-source.js");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "tiktok-representation-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const journal = new MediaOperations(path.join(root, "journal.json"));
+  const video = "https://www.tiktok.com/@u/video/123/", photo = "https://www.tiktok.com/@u/photo/123/";
+  const otherAuthor = "https://www.tiktok.com/@other/video/123/";
+  const common = { chatId: -1, topicId: 9, sourceMessageId: 41, status: "done" };
+  const preview = await journal.record({ ...common, url: video, source: verifiedMediaSource(video, { id:"123", owner:"u", provider:"yt-dlp" }),
+    mediaItems:[{mediaKind:"video"}] }, {claimPublication:true});
+  const lookup = url => journal.forSourceMessage({chat:{id:-1},message_id:41}, 9, url);
+  assert.equal((await lookup(video)).id, preview.id);
+  assert.equal(await lookup(photo), undefined);
+  assert.equal(await lookup(otherAuthor), undefined);
+  const original = await journal.record({ ...common, url:photo, source:verifiedMediaSource(photo,{id:"123",owner:"u",provider:"tiktok-api"}),
+    mediaItems:[{mediaKind:"image"},{mediaKind:"image"}] }, {claimPublication:true});
+  assert.ok(original.id);
+  assert.notEqual(original.id, preview.id);
+  assert.equal((await lookup(photo)).id, original.id);
+});

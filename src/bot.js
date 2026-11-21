@@ -27,11 +27,12 @@ import { prepareMediaEvidence } from "./media-evidence.js";
 import { MediaBudget } from "./media-budget.js";
 import { identifyMediaItems, mediaItemSnapshot, assertSameMediaItems, hasMediaItemIdentity } from "./media-items.js";
 import { MediaCache } from "./media-cache.js";
-import { assertVerifiedMediaSource, verifiedMediaSource, mediaReference, mediaPublicationKey, sourceIdentityError } from "./media-source.js";
+import { assertVerifiedMediaSource, verifiedMediaSource, isTikTokPhotoSet, requestedTikTokPhoto, mediaReference, mediaPublicationKey, sourceIdentityError } from "./media-source.js";
 import { observeTelegramUpload } from "./telegram-upload-observer.js";
 import { historyIntent, selectContext, historyPage, localTime, dialoguePolicy, responseDecision, researchForReply } from "./conversation-context.js";
 import { UpdateInbox, ChatQueue, isPermanentUpdateError } from "./update-inbox.js";
 import { MediaOperations, mediaFailure, failureMessage, isMediaRetryText, canRetryMediaOperation, instagramRetryWait } from "./media-operations.js";
+import { mediaPreparingText, mediaRequestFailureText } from "./media-request-text.js";
 import { prepareMediaForTelegram, telegramUploadBudget } from "./media-preparation.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -624,6 +625,14 @@ function scheduleUpdate(update) {
   // before admitting work, including on the first poll after a restart.
   const pending = updateInbox.state?.pending.find(item => item.update_id === update.update_id);
   if (!pending) return;
+  if (pending.mediaRequest?.finishing) {
+    if (pending.mediaRequest.finishRetryAt > Date.now()) return;
+    workQueue.add(update.update_id, chatId, async () => {
+      const outcome = await handleUpdate(pending, { durableUpdateId: update.update_id });
+      await finishMediaUpdate(update.update_id, outcome);
+    });
+    return;
+  }
   if (pending.deferredMedia) {
     // An older inbox marker describes one link; later siblings in that same
     // retained update are already due, even if its original link is waiting.
@@ -642,7 +651,10 @@ function scheduleUpdate(update) {
     return;
   }
   workQueue.add(update.update_id, chatId, async () => {
-    await mediaQueue.waitForMessage(chatId, update.message?.reply_to_message?.message_id);
+    if (update.message?.reply_to_message) {
+      const links = messageSocialLinks(update.message);
+      if (!links.urls.length || links.outsideLinks.trim()) await mediaQueue.waitForMessage(chatId, update.message.reply_to_message.message_id);
+    }
     let result;
     try { result = await handleUpdate(pending, { deferMedia: true, durableUpdateId: update.update_id }); }
     catch (error) {
@@ -668,20 +680,20 @@ function scheduleUpdate(update) {
       logInfo("media_queued", { queued: mediaQueue.ids.size });
       return;
     }
-    await updateInbox.done(update.update_id);
+    await finishMediaUpdate(update.update_id, result);
   });
 }
 
 function scheduleNextDeferred(afterId) {
   if (shuttingDown || resumingInstagramUpdate) return;
-  const ready = updateInbox.state.pending.filter(item => item.deferredMedia?.retryAt <= Date.now() &&
+  const ready = updateInbox.state.pending.filter(item => item.deferredMedia?.retryAt <= Date.now() && !(item.mediaRequest?.finishRetryAt > Date.now()) &&
     !mediaQueue.ids.has(item.update_id) && !workQueue.ids.has(item.update_id));
   const next = ready.find(item => item.update_id > afterId) || ready[0];
   if (next) scheduleUpdate(next);
 }
 
 async function finishMediaUpdate(updateId, outcome) {
-  if (outcome?.batchPending) return;
+  if (outcome?.batchPending || outcome?.statusPending) return;
   if (outcome?.deferredMedia) {
     const { operationId, retryAt } = outcome.deferredMedia;
     await updateInbox.deferMedia(updateId, operationId, retryAt);
@@ -723,8 +735,27 @@ async function writeRuntimeStatus() {
 }
 
 async function handleUpdate(update, { deferMedia = false, durableUpdateId, legacyLinks } = {}) {
+  const request = update.mediaRequest;
+  const requestContext = { deferMedia, durableUpdateId, mediaRequest: request, resumingMedia: Boolean(update.mediaBatch || update.deferredMedia) };
   const handle = async () => {
-    if (update.mediaBatch) return deferMediaWork(() => runMediaBatch(update.message, update.mediaBatch));
+    if (request?.finishing) return finishRequestStatus(update.message, true);
+    if (update.mediaBatch) return deferMediaWork(async () => finishRequestStatus(update.message, await runMediaBatch(update.message, update.mediaBatch)));
+    if (!update.deferredMedia && request?.urls?.length && request.chatId === update.message?.chat.id &&
+        request.topicId === judgeThreadId(update.message) && request.originalId === update.message.message_id) {
+      // A restart between acknowledging the request and creating its first operation
+      // must resume the accepted links, including a semantically resolved retry.
+      let retry;
+      if (request.retryOperationId) {
+        retry = (await mediaOperations.read()).find(op => op.id === request.retryOperationId &&
+          op.chatId === request.chatId && (op.topicId ?? op.threadId ?? null) === request.topicId);
+        if (!retry) return finishRequestStatus(update.message, { mediaFailure:{code:"SERVICE_ERROR",stage:"download"} });
+      } else if (request.retrySourceId) {
+        retry = { url:request.urls[0], sourceMessageId:request.retrySourceId };
+        const recovered = await mediaOperations.forSourceMessage({...update.message, message_id:request.retrySourceId}, request.topicId, retry.url);
+        if (recovered?.lastRequest?.messageId === request.originalId) retry = recovered;
+      }
+      return startMediaRequest(update.message, request.urls, retry);
+    }
     if (!update.deferredMedia) return handleScopedUpdate(update);
     if (legacyLinks?.length > 1) {
       const operation = (await mediaOperations.read()).find(op => op.id === update.deferredMedia.operationId &&
@@ -733,19 +764,20 @@ async function handleUpdate(update, { deferMedia = false, durableUpdateId, legac
       if (operation && legacyLinks.some(url => mediaPublicationKey(url) === mediaPublicationKey(operation.url))) {
         const marker = { ...update.deferredMedia,
           retryAt: ["done", "unknown", "failed"].includes(operation.status) ? 0 : update.deferredMedia.retryAt };
-        const items = legacyLinks.map((url, index) => ({ url, number:index + 1,
+        const numbers = messageSocialLinks(update.message).numbers;
+        const items = legacyLinks.map((url, index) => ({ url, number:numbers?.[index] ?? index + 1,
           ...(mediaPublicationKey(url) === mediaPublicationKey(operation.url) ? marker : {}) }));
         await updateInbox.saveMediaBatch(update.update_id, items);
-        return runMediaBatch(update.message, items);
+        return finishRequestStatus(update.message, await runMediaBatch(update.message, items));
       }
     }
-    return resumeDeferredMedia(update);
+    return finishRequestStatus(update.message, await resumeDeferredMedia(update));
   };
-  if (!setup) return behaviorContext.run({ ...behavior(), deferMedia, durableUpdateId }, handle);
+  if (!setup) return behaviorContext.run({ ...behavior(), ...requestContext }, handle);
   setupStore.bind(botInfo.id);
   const chatId = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id;
   const profile = setupStore.profile(chatId) ?? botProfile;
-  return behaviorContext.run({ ...profileBehavior(profile), chatId, deferMedia, durableUpdateId }, handle);
+  return behaviorContext.run({ ...profileBehavior(profile), chatId, ...requestContext }, handle);
 }
 
 function deferMediaWork(work) {
@@ -2373,7 +2405,9 @@ async function maybeHandleMediaRetry(message) {
   if (!operation) {
     return false;
   }
-  if (operation.lastRequest?.messageId === message.message_id && ["failed", "unknown", "done"].includes(operation.status)) return true;
+  if (operation.lastRequest?.messageId === message.message_id && ["failed", "unknown", "done"].includes(operation.status)) {
+    return finishRequestStatus(message, operationOutcome(operation));
+  }
   if (operation.status === "done") {
     await telegram("sendMessage", { chat_id: message.chat.id, text: "Цю спробу вже успішно виконано.", reply_to_message_id: message.message_id }); return true;
   }
@@ -2408,6 +2442,138 @@ function linkNotice(message, text) {
   return number ? say(behavior().locale, `Link ${number} — ${text}`, `Ссылка ${number} — ${text}`, `Посилання ${number} — ${text}`) : text;
 }
 
+async function saveRequestStatus(request) {
+  const id = behaviorContext.getStore()?.durableUpdateId;
+  if (Number.isSafeInteger(id)) await updateInbox.saveMediaRequest(id, request);
+}
+
+function telegramStatusRejection(error, method) {
+  return error.method === method && Number.isInteger(error.status) && error.status >= 400 && error.status < 500 &&
+    error.telegramErrorCode === error.status ? error.status : null;
+}
+
+async function openRequestStatus(message, urls, retry) {
+  const context = behaviorContext.getStore();
+  if (!context || context.mediaRequest || context.resumingMedia) return;
+  if (urls.length > 1) {
+    let completed = 0;
+    for (const url of urls) {
+      const prior = await mediaOperations.forSourceMessage(message, judgeThreadId(message), url);
+      if (!prior || !["done", "unknown", "failed"].includes(prior.status)) break;
+      completed++;
+    }
+    if (completed === urls.length) return;
+  }
+  const prior = urls.length === 1 && (retry?.id ? retry : await mediaOperations.forSourceMessage(message, judgeThreadId(message), urls[0]));
+  const replay = prior && (prior.sourceMessageId === message.message_id || prior.lastRequest?.messageId === message.message_id);
+  if (replay && ["done", "unknown", "failed"].includes(prior.status)) return;
+  if (!retry && urls.length === 1 && socialVideoProviderForUrl(urls[0]) === "instagram") {
+    const waiting = await mediaOperations.coalescedPublication(message.chat.id, judgeThreadId(message), urls[0], context.durableUpdateId);
+    if (waiting && waiting.sourceRetry.updateId !== context.durableUpdateId) return;
+  }
+  const request = { total: urls.length, locale: behavior().locale, failures: [], provider: socialVideoProviderForUrl(urls[0]), urls,
+    ...(retry?.id ? { retryOperationId:retry.id } : retry?.sourceMessageId ? { retrySourceId:retry.sourceMessageId } : {}),
+    chatId: message.chat.id, topicId: judgeThreadId(message), originalId: message.message_id,
+    messageId: replay && prior.videoReplyId || null };
+  context.mediaRequest = request;
+  // Claim creation before sendMessage. Losing its receipt must never create
+  // another status. Media delivery can proceed without a usable text target.
+  await saveRequestStatus(request);
+  if (request.messageId) return;
+  try {
+    const sent = await telegram("sendMessage", { ...assembleReplyTarget(message), text: mediaPreparingText(request.locale),
+      disable_notification: true }, { retry: false, record: false });
+    if (matchingMediaReply(sent, request.chatId, request.topicId, request.originalId, true)) request.messageId = sent.message_id;
+  } catch (error) {
+    request.rejectionCode = telegramStatusRejection(error, "sendMessage");
+    if (request.rejectionCode === 429 && error.retryAfterSeconds > 0) request.finishRetryAt = Date.now() + error.retryAfterSeconds * 1000;
+    logError("media_status_unavailable", error, messageLogMeta(message));
+  }
+  await saveRequestStatus(request);
+}
+
+function operationOutcome(operation) {
+  if (!operation) return true;
+  if (["failed", "unknown"].includes(operation.status)) return { mediaFailure: operation.failure || { code: "UPLOAD_UNKNOWN" } };
+  return { mediaReplyId: operation.videoReplyId && operation.sentMessageIds?.includes(operation.videoReplyId) ? operation.videoReplyId : null };
+}
+
+async function rememberMediaStatus(sent, message, request, text) {
+  await rememberMessage({ ...sent, chat:message.chat, from:{...botInfo,is_bot:true}, text,
+    date:sent.date || Math.floor(Date.now()/1000), reply_to_message:{message_id:request.originalId},
+    message_thread_id:request.topicId, is_topic_message:Boolean(request.topicId) })
+    .catch(error => logError("outgoing_history_failed", error, messageLogMeta(message)));
+}
+
+async function finishRequestStatus(message, outcome) {
+  const request = behaviorContext.getStore()?.mediaRequest;
+  if (!request || outcome?.mediaWork || outcome?.deferredMedia || outcome?.batchPending) return outcome;
+  if (request.chatId !== message.chat.id || request.topicId !== judgeThreadId(message) || request.originalId !== message.message_id) return outcome;
+  if (!request.finishing) {
+    if (outcome?.mediaFailure && request.total === 1) request.failures = [{ number: null, provider: request.provider, failure: outcome.mediaFailure }];
+    if (request.total > 1 && request.failures.length) {
+      const unique = [], owners = new Set();
+      for (const item of request.failures.sort((a, b) => a.number - b.number)) {
+        const owner = item.url && await mediaOperations.forSourceMessage(message, request.topicId, item.url);
+        if (owner?.status === "done" || (owner && owners.has(owner.id))) continue;
+        if (owner) owners.add(owner.id);
+        unique.push(item);
+      }
+      request.failures = unique;
+    }
+    request.keepMedia = Boolean(request.messageId && request.messageId === outcome?.mediaReplyId);
+    request.finishing = true;
+    request.finishUntil = Date.now() + 48 * 3600000;
+    await saveRequestStatus(request);
+  }
+  if (request.keepMedia || request.finishUntil <= Date.now()) return true;
+  const text = request.failures.length && mediaRequestFailureText(request.failures, request.locale, request.total);
+  const fallback = !request.messageId;
+  if (fallback && (!text || !request.rejectionCode || request.fallbackClaimed)) return true;
+  if (request.finishRetryAt > Date.now()) return { statusPending: true };
+  if (fallback) request.fallbackClaimed = true;
+  request.finalAttempt = (request.finalAttempt || 0) + 1;
+  await saveRequestStatus(request);
+  const target = { chat_id: request.chatId, message_id: request.messageId };
+  try {
+    if (fallback) {
+      const sent = await telegram("sendMessage", { ...assembleReplyTarget(message), text, disable_notification: true }, { retry:false, record:false });
+      if (matchingMediaReply(sent, request.chatId, request.topicId, request.originalId, true)) {
+        await rememberMediaStatus(sent, message, request, text);
+        for (const item of request.failures) {
+          const url = item.url || request.urls?.[0];
+          const op = request.retryOperationId ? { id:request.retryOperationId } : await mediaOperations.forSourceMessage(message, request.topicId, url);
+          if (op) await mediaOperations.linkRetryNotice(op.id, request.originalId, sent.message_id);
+        }
+      }
+      return true;
+    }
+    // editMessageText cannot replace a video whose edit receipt was lost.
+    if (text) {
+      const edited = await telegram("editMessageText", { ...target, text }, { retry: false });
+      if (edited?.message_id !== request.messageId || !matchingMediaReply(edited, request.chatId, request.topicId, request.originalId)) {
+        throw new Error("Telegram status edit receipt did not match");
+      }
+      await rememberMediaStatus(edited, message, request, text);
+    } else if (await telegram("deleteMessage", target, { retry: false }) !== true) throw new Error("Telegram status deletion was unconfirmed");
+  } catch (error) {
+    const rejected = telegramStatusRejection(error, fallback ? "sendMessage" : text ? "editMessageText" : "deleteMessage");
+    // Editing or deleting a known id is safe after an uncertain response.
+    // A second sendMessage is safe only after Telegram expressly declined it.
+    const canRetry = rejected === 429 || (!fallback && rejected === null);
+    if (canRetry && Number.isSafeInteger(behaviorContext.getStore()?.durableUpdateId) && Date.now() < request.finishUntil) {
+      if (fallback) request.fallbackClaimed = false;
+      const backoff = Math.min(300000, 5000 * 2 ** Math.min(6, request.finalAttempt - 1));
+      const wait = rejected === 429 ? error.retryAfterSeconds || 0 : 0;
+      request.finishRetryAt = Math.min(request.finishUntil, Date.now() + Math.max(backoff, wait * 1000));
+      await saveRequestStatus(request);
+      return { statusPending: true };
+    }
+    logError("media_status_finalization_failed", error, messageLogMeta(message));
+  }
+  return true;
+}
+
 async function runMediaBatch(message, items) {
   const updateId = behaviorContext.getStore()?.durableUpdateId;
   const durable = Number.isSafeInteger(updateId), started = Date.now();
@@ -2419,18 +2585,25 @@ async function runMediaBatch(message, items) {
     if (durable && processed && (processed >= 3 || Date.now() - started >= 20000)) break;
     processed++;
     const target = { ...message, _mediaLinkNumber: item.number };
-    let next;
+    let next, failure;
     try {
       const outcome = item.operationId
         ? await resumeDeferredMedia({ message: target, update_id: updateId, deferredMedia: item })
         : await deliverSocialPublication(target, item.url);
       if (outcome?.deferredMedia) next = { ...item, ...outcome.deferredMedia };
+      failure = outcome?.mediaFailure;
     } catch (error) {
       logError("media_batch_item_failed", error, messageLogMeta(message, { linkNumber: item.number }));
       if (!isPermanentUpdateError(error)) {
         if (!durable) throw error;
         next = { ...item, retryAt: Date.now() + 5000 };
-      }
+      } else failure = mediaFailure(error);
+    }
+    const request = behaviorContext.getStore()?.mediaRequest;
+    if (request && !next) {
+      request.failures = request.failures.filter(result => result.number !== item.number);
+      if (failure) request.failures.push({ number: item.number, url: item.url, provider: socialVideoProviderForUrl(item.url), failure });
+      await saveRequestStatus(request);
     }
     remaining = remaining.flatMap(current => current === item ? (next ? [next] : []) : [current]);
     if (durable) await updateInbox.saveMediaBatch(updateId, remaining);
@@ -2449,7 +2622,13 @@ async function finishLimitedSource(message, operation) {
   const emptyVideoReply = operation.videoReplyId && operation.videoEditAttempts === 0 && !operation.videoEditPending;
   const failure = { code: emptyVideoReply ? "TIMEOUT" : "SOURCE_RETRY_EXHAUSTED",
     stage: emptyVideoReply ? "upload" : "download", retryable: true };
-  await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "failed", failure });
+  const request = behaviorContext.getStore()?.mediaRequest;
+  await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "failed", failure,
+    ...(request?.messageId ? { errorMessageId: request.messageId } : {}) });
+  if (request) {
+    if (emptyVideoReply && operation.cacheId) await mediaCache.release(operation.cacheId);
+    return { mediaFailure: failure };
+  }
   const text = linkNotice(message, failureMessage(failure, behavior().locale));
   if (emptyVideoReply) {
     await telegram("editMessageText", { chat_id: message.chat.id, message_id: operation.videoReplyId, text });
@@ -2469,7 +2648,9 @@ async function waitForInstagram(message, operation, failure, { contacted, starte
   if (attempts >= 3 || now >= expiresAt) return finishLimitedSource(message, { ...operation, sourceRetry });
   const waiting = await mediaOperations.record({ ...operation, status: "waiting_source", failure, sourceRetry });
   if (waiting.status === "failed") {
-    await mediaOperations.record({ ...waiting, ...closedSourceRetry(waiting) });
+    const request = behaviorContext.getStore()?.mediaRequest;
+    await mediaOperations.record({ ...waiting, ...closedSourceRetry(waiting), ...(request?.messageId ? {errorMessageId: request.messageId} : {}) });
+    if (request) return operationOutcome(waiting);
     await telegram("sendMessage", { ...assembleReplyTarget(message), text: linkNotice(message, failureMessage(waiting.failure, behavior().locale)) });
     return true;
   }
@@ -2479,15 +2660,16 @@ async function waitForInstagram(message, operation, failure, { contacted, starte
 async function resumeDeferredMedia(update) {
   const { message, deferredMedia: marker } = update;
   const operation = (await mediaOperations.read()).find(item => item.id === marker.operationId);
+  if (operation?.duplicateOf && operation.chatId === message.chat.id && operation.topicId === judgeThreadId(message)) return { duplicateOf: operation.duplicateOf };
   if (!operation || operation.sourceRetry?.updateId !== update.update_id ||
       operation.chatId !== message?.chat?.id || operation.topicId !== judgeThreadId(message) ||
       (marker.url && (operation.sourceMessageId !== message.message_id || mediaPublicationKey(operation.url) !== mediaPublicationKey(marker.url)))) return;
-  if (!["waiting_source", "running", "prepared", "uploading"].includes(operation.status)) return;
+  if (!["waiting_source", "running", "prepared", "uploading"].includes(operation.status)) return operationOutcome(operation);
   const receipts = operation.sentMessageIds || [];
   if (allMediaAcknowledged(operation)) {
     await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "done", failure: null });
     if (operation.cacheId) await mediaCache.release(operation.cacheId);
-    return;
+    return operationOutcome({ ...operation, status: "done" });
   }
   // Repeating an edit of our acknowledged video reply cannot create another
   // message. Every other upload without all receipts may already be visible.
@@ -2498,20 +2680,21 @@ async function resumeDeferredMedia(update) {
   const expired = Date.now() >= operation.sourceRetry.expiresAt;
   if ((operation.status === "uploading" && !anchored) || operation.observedMessageId || receipts.length || operation.deliveredFileCount ||
       (expired && anchored && operation.videoEditAttempts > 0)) {
-    await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "unknown",
+    const unknown = await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "unknown",
+      errorMessageId: behaviorContext.getStore()?.mediaRequest?.messageId || operation.errorMessageId,
       failure: mediaFailure({ deliveryUnknown: true }, { stage: "upload" }) });
     if (operation.cacheId && operation.observedMessageId) await mediaCache.release(operation.cacheId);
-    return;
+    return operationOutcome(unknown);
   }
   if (!canDownloadMedia(message)) {
-    await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "failed",
+    const denied = await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "failed",
       failure: { code: "DOWNLOAD_DISABLED", stage: "download", retryable: false } });
-    return;
+    return operationOutcome(denied);
   }
   const target = { ...message, message_id: operation.sourceMessageId };
   if (expired) return finishLimitedSource(target, operation);
   if (Date.now() < operation.sourceRetry.retryAt) return deferredMedia(operation);
-  return maybeHandleSocialVideo(target, operation, { anchored });
+  return deliverSocialPublication(target, operation.url, operation, { anchored });
 }
 
 function allMediaAcknowledged(operation) {
@@ -2525,33 +2708,51 @@ async function maybeHandleSocialVideo(message, retry = null, { anchored = false 
   if (!canDownloadMedia(message)) return false;
   if (!["group", "supergroup"].includes(message.chat.type)) return false;
 
-  if (retry) return deferMediaWork(() => deliverSocialPublication(message, retry.url, retry, { anchored }));
-  const { urls, outsideLinks } = messageSocialLinks(message);
-  if (!urls.length || !addressedMediaDownload(outsideLinks, botInfo?.username)) return false;
+  const { urls, outsideLinks } = retry ? { urls: [retry.url] } : messageSocialLinks(message);
+  if (!urls.length || (!retry && !addressedMediaDownload(outsideLinks, botInfo?.username))) return false;
+  await openRequestStatus(message, urls, retry);
+  return startMediaRequest(message, urls, retry, anchored);
+}
+
+function startMediaRequest(message, urls, retry, anchored = false) {
   return deferMediaWork(async () => {
-    if (urls.length === 1) return deliverSocialPublication(message, urls[0]);
-    const items = urls.map((url, index) => ({ url, number: index + 1 }));
+    if (urls.length === 1) return finishRequestStatus(message, await deliverSocialPublication(message, urls[0], retry, { anchored }));
+    const numbers = messageSocialLinks(message).numbers;
+    const items = urls.map((url, index) => ({ url, number: numbers?.[index] ?? index + 1 }));
     const updateId = behaviorContext.getStore()?.durableUpdateId;
     if (Number.isSafeInteger(updateId)) await updateInbox.saveMediaBatch(updateId, items);
-    return runMediaBatch(message, items);
+    return finishRequestStatus(message, await runMediaBatch(message, items));
   });
 }
 
+async function recordMediaAdmissionFailure(message, url, retry, request, failure) {
+  if (retry?.id) {
+    await mediaOperations.linkRetryNotice(retry.id, message.message_id, request.messageId);
+  } else {
+    await mediaOperations.record({ chatId:message.chat.id, topicId:judgeThreadId(message), userId:message.from.id,
+      sourceMessageId:retry?.sourceMessageId || message.message_id, url, status:"failed", failure,
+      lastRequest:{messageId:message.message_id, sender:displayName(message.from)}, errorMessageId:request.messageId });
+  }
+  return { mediaFailure:failure };
+}
+
 async function deliverSocialPublication(message, url, retry = null, { anchored = false } = {}) {
-  if (!canDownloadMedia(message) || !["group", "supergroup"].includes(message.chat?.type)) return false;
+  if (!canDownloadMedia(message) || !["group", "supergroup"].includes(message.chat?.type)) return { mediaFailure: { code: "DOWNLOAD_DISABLED" } };
   const messageText = extractMessageText(message);
   const provider = socialVideoProviderForUrl(url);
 
   if (retry?.id) retry = (await mediaOperations.read()).find(operation => operation.id === retry.id) || retry;
   const recovered = retry ? (retry.lastRequest?.messageId === message.message_id ? retry : null)
     : await mediaOperations.forSourceMessage(message, judgeThreadId(message), url);
+  if (!retry && recovered && mediaPublicationKey(recovered.url) !== mediaPublicationKey(url)) return { duplicateOf: recovered.id };
   const existing = retry || recovered;
   const updateId = behaviorContext.getStore()?.durableUpdateId;
-  if (recovered && ["failed", "unknown", "done"].includes(recovered.status)) return true;
+  const request = behaviorContext.getStore()?.mediaRequest;
+  if (recovered && ["failed", "unknown", "done"].includes(recovered.status)) return operationOutcome(recovered);
   if (recovered && allMediaAcknowledged(recovered)) {
     await mediaOperations.record({ ...recovered, ...closedSourceRetry(recovered), status: "done", failure: null });
     if (recovered.cacheId) await mediaCache.release(recovered.cacheId);
-    return true;
+    return operationOutcome({ ...recovered, status: "done" });
   }
   if (provider === "instagram") {
     const pending = existing?.sourceRetry && ["waiting_source", "running", "prepared", "uploading"].includes(existing.status)
@@ -2564,11 +2765,16 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
     }
   }
   if (existing?.observedMessageId) {
+    if (request) return { mediaFailure: { code: "ALREADY_VISIBLE", messageId: existing.observedMessageId } };
     await reportVisibleVideo(message, existing.observedMessageId);
     return true;
   }
   const wait = instagramRetryWait(retry);
   if (wait > 0) {
+    if (request) {
+      if (request.messageId) await mediaOperations.linkRetryNotice(retry.id, message.message_id, request.messageId);
+      return { mediaFailure: { ...retry.failure, code:"RATE_LIMIT" } };
+    }
     const notice = await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage({
       ...retry.failure, code: "RATE_LIMIT", retryAfterSeconds: wait,
     }, behavior().locale) });
@@ -2579,9 +2785,9 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
   if (recovered && ["uploading", "unknown"].includes(recovered.status) &&
       !(recovered.videoReplyId && (recovered.videoEditAttempts < 2 || recovered.deliveredFileCount === 1))) {
     const failure = mediaFailure(Object.assign(new Error("Upload confirmation was interrupted"), { deliveryUnknown: true }), { stage: "upload" });
-    const notice = await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage(failure, behavior().locale) });
+    const notice = request ? {message_id:request.messageId} : await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage(failure, behavior().locale) });
     await mediaOperations.record({ ...recovered, status: "unknown", failure, errorMessageId: notice?.message_id || null });
-    return true;
+    return { mediaFailure: failure };
   }
   retry ||= recovered || null;
 
@@ -2599,6 +2805,7 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
       await mediaOperations.record({ ...retry, ...closedSourceRetry(retry), status: "failed",
         failure: { code: "ADMIN_REQUIRED", stage: "download", retryable: false } });
     }
+    if (request) return recordMediaAdmissionFailure(message, url, retry, request, { code:"ADMIN_REQUIRED", stage:"download", retryable:false });
     await telegram("sendMessage", { ...assembleReplyTarget(message), text: say(behavior().locale,
       "Make me an administrator of this group to download media.", "Для скачивания медиа назначь меня администратором этой группы.", "Для завантаження медіа признач мене адміністратором цієї групи.") });
     return true;
@@ -2610,6 +2817,7 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
       return waitForInstagram(message, retry, { code: budget.reason, retryable: true, stage: "download",
         retryAfterSeconds: budget.retryAfterSeconds }, { contacted: false, startedAt: Date.now() });
     }
+    if (request) return recordMediaAdmissionFailure(message, url, retry, request, { code:budget.reason, stage:"download", retryable:true });
     await telegram("sendMessage", {
       chat_id: message.chat.id,
       text: failureMessage({code:"RATE_LIMIT", retryAfterSeconds:budget.retryAfterSeconds}, behavior().locale),
@@ -2648,10 +2856,14 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
     clearInterval(progress);
     socialVideoBudget.complete(budget.reservation, { success: false });
     if (retry?.sourceRetry && retry.sourceRetry.updateId === updateId) throw error;
+    if (request) return { mediaFailure: { code:"SERVICE_ERROR", stage:"download", retryable:true } };
     await telegram("sendMessage", { ...assembleReplyTarget(message), text: failureMessage({code:"SERVICE_ERROR"}, behavior().locale) });
     return true;
   }
   try {
+    const photoLinks = provider === "tiktok" && message._mediaLinkNumber
+      ? messageSocialLinks(message).urls.map(mediaReference).filter(ref => ref?.kind === "photo") : [];
+    let initialPhoto;
     let cached = await mediaCache.forDelivery({ chatId: message.chat.id, topicId: judgeThreadId(message), botId: botInfo.id,
       ...(retry?.cacheId ? { entryId: retry.cacheId } : { messageId: retry?.sourceMessageId, sourceUrl: url }) });
     if (cached) {
@@ -2659,6 +2871,16 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
         assertVerifiedMediaSource(cached.source, cached.source.requested.url);
         cached.source = verifiedMediaSource(url, { provider: cached.source.provider, resolvedUrl: cached.source.resolved.url,
           id: cached.source.resolved.id, owner: cached.source.resolved.owner, kind: cached.source.resolved.kind });
+        const photo = requestedTikTokPhoto(photoLinks, cached.source.resolved);
+        if (cached.complete && photo && !isTikTokPhotoSet(cached.source, cached.files)) {
+          initialPhoto = photo.url;
+          cached = await mediaCache.forDelivery({ chatId: message.chat.id, topicId: judgeThreadId(message), botId: botInfo.id, sourceUrl: photo.url });
+          if (cached?.complete) {
+            const album = assertVerifiedMediaSource(cached.source, cached.source.requested.url);
+            if (!isTikTokPhotoSet(album, cached.files) || !requestedTikTokPhoto([photo], album.resolved)) throw sourceIdentityError();
+            cached.source = verifiedMediaSource(url, { provider: album.provider, resolvedUrl: photo.url, id: album.resolved.id, owner: album.resolved.owner });
+          }
+        }
       }
       catch { cached = null; }
     }
@@ -2672,11 +2894,27 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
       throw Object.assign(new Error("Prepared media for the remaining files has expired"), { code: "MEDIA_RETRY_CACHE_MISSING" });
     }
     const downloadStarted = Date.now();
-    const result = cached?.complete ? { files: cached.files, title: cached.files[0]?.title, source: cached.source } : await downloadBudgetedMedia(url, budget.reservation, message._mediaDeadline);
+    const onResolved = async (resolvedUrl, { photoAttempt = false } = {}) => {
+      const target = mediaReference(resolvedUrl), photo = requestedTikTokPhoto(photoLinks, target);
+      const duplicate = await mediaOperations.coalesceResolvedLink(operation.id, resolvedUrl, {
+        requirePhotos: Boolean(photo), photoRoute: photoAttempt || target.kind !== "photo" ? photo : null });
+      return duplicate || (photo && target.kind !== "photo" ? { photoUrl: photo.url } : null);
+    };
+    const result = cached?.complete ? { files: cached.files, title: cached.files[0]?.title, source: cached.source } :
+      await downloadBudgetedMedia(url, budget.reservation, message._mediaDeadline, { onResolved, photoLinks, initialPhoto });
+    if (result.duplicateOf) {
+      socialVideoBudget.complete(budget.reservation, { success: false });
+      return result;
+    }
     tempDir = result.tempDir;
     const source = assertVerifiedMediaSource(result.source, url);
     operation = await mediaOperations.record({ ...operation, source, downloader: source.provider,
-      attempts: result.previousFailure ? [{ downloader: result.previousFailure.downloader || "yt-dlp", failure: mediaFailure(result.previousFailure, { stage: "download" }) }, { downloader: source.provider, status: "verified" }] : operation.attempts || [{ downloader: source.provider, status: "verified" }] });
+      attempts: result.previousFailure ? [{ downloader: result.previousFailure.downloader || "yt-dlp", failure: mediaFailure(result.previousFailure, { stage: "download" }) }, { downloader: source.provider, status: "verified" }] : operation.attempts || [{ downloader: source.provider, status: "verified" }] },
+      { claimPublication: true });
+    if (operation.duplicateOf) {
+      socialVideoBudget.complete(budget.reservation, { success: false });
+      return operation;
+    }
     const downloadedFiles = result.files || [
       {
         filePath: result.filePath,
@@ -2718,13 +2956,14 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
       operation = { ...operation, sentMessageIds, deliveredFileCount: startIndex + fileCount };
       try { operation = await mediaOperations.record(operation); }
       catch (error) { throw Object.assign(error, { deliveryUnknown: true }); }
-      if (preparedCache) await mediaCache.bind(preparedCache.id, ids, { startIndex, items, botId: botInfo.id, sourceMessageId: operation.videoReplyId ? operation.sourceMessageId : message.message_id })
+      const repliedTo = operation.videoReplyId ? operation.videoReplySourceId || operation.sourceMessageId : message.message_id;
+      if (preparedCache) await mediaCache.bind(preparedCache.id, ids, { startIndex, items, botId: botInfo.id, sourceMessageId:repliedTo })
         .catch(error => logError("media_cache_failed", error, messageLogMeta(message)));
       for (const [index, item] of items.entries()) await rememberMessage({ ...item, date: item.date || Math.floor(Date.now() / 1000), chat: item.chat || message.chat,
         caption: item.caption || (startIndex + index === 0 ? caption : ""),
         from: { ...(item.from || botInfo), is_bot: true }, _sourceUrl: url, _mediaSource: source,
         _mediaSelection: { index: startIndex + index, total: mediaFiles.length },
-        reply_to_message: { message_id: operation.videoReplyId ? operation.sourceMessageId : message.message_id }, message_thread_id: judgeThreadId(message),
+        reply_to_message: { message_id:repliedTo }, message_thread_id: judgeThreadId(message),
         is_topic_message: Boolean(message.chat.is_forum || message.is_topic_message) })
         .catch(error => logError("outgoing_history_failed", error, messageLogMeta(message)));
     };
@@ -2736,10 +2975,10 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
         const anchor = await telegram("sendMessage", {
           ...assembleReplyTarget(message), reply_to_message_id: operation.sourceMessageId,
           text: say(behavior().locale, "Sending…", "Отправляю…", "Надсилаю…"),
-        }, { retry: false, deadline: message._mediaDeadline });
-        if (!Number.isSafeInteger(anchor?.message_id) || anchor.message_id <= 0 ||
-            (anchor.chat && anchor.chat.id !== message.chat.id)) throw new Error("Missing video reply target");
-        operation = await mediaOperations.record({ ...operation, videoReplyId: anchor.message_id, videoEditAttempts: 0, videoEditPending: false });
+        }, { retry:false, record:false, deadline:message._mediaDeadline });
+        if (!matchingMediaReply(anchor, message.chat.id, judgeThreadId(message), operation.sourceMessageId, true)) throw new Error("Missing video reply target");
+        operation = await mediaOperations.record({ ...operation, videoReplyId:anchor.message_id, videoReplySourceId:operation.sourceMessageId,
+          videoEditAttempts:0, videoEditPending:false });
       }
       // A new explicit request gets a fresh budget on the SAME message.
       let attempts = anchored || operation.videoEditRequestId === message.message_id ? operation.videoEditAttempts || 0 : 0;
@@ -2755,7 +2994,7 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
         if (operation.observedMessageId) return null;
         let edited;
         try {
-          edited = await editTelegramVideo(message, operation.videoReplyId, mediaFiles[0], caption);
+          edited = await editTelegramVideo(message, operation, mediaFiles[0], caption);
         } catch (error) {
           if (!error.deliveryUnknown) {
             // Telegram can report an identical edit without returning a file_id.
@@ -2780,11 +3019,15 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
       throw unconfirmedUpload(new Error("Video edit receipt unavailable"), "editMessageMedia");
     };
     const deliverRemaining = async () => {
+      const singleVideo = !operation.deliveredFileCount && mediaFiles.length === 1 && mediaFiles[0].mediaKind === "video";
+      if (singleVideo && !operation.videoReplyId && request?.total === 1 && request.messageId) {
+        operation = { ...operation, videoReplyId:request.messageId, videoReplySourceId:request.originalId, videoEditAttempts:0, videoEditPending:false };
+      }
       operation = await mediaOperations.record({ ...operation, status: "uploading" }, { beginUpload: true });
       if (operation.observedMessageId) return null;
       const delivered = operation.deliveredFileCount || 0;
       const remaining = mediaFiles.slice(delivered);
-      if (!delivered && mediaFiles.length === 1 && mediaFiles[0].mediaKind === "video") return deliverVideoReply();
+      if (singleVideo && (!request || operation.videoReplyId)) return deliverVideoReply();
       return remaining.length ? sendTelegramSocialMedia(message, remaining, delivered ? "" : caption, recordSent) : [];
     };
     let sent;
@@ -2800,7 +3043,8 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
       if (mediaFiles.slice(delivered).some(file => !file.filePath)) {
         if (anchored) throw error;
         stage = "download";
-        const fresh = await downloadBudgetedMedia(url, budget.reservation, message._mediaDeadline);
+        const fresh = await downloadBudgetedMedia(url, budget.reservation, message._mediaDeadline, {
+          photoLinks, initialPhoto: source.resolved.kind === "photo" && isTikTokPhotoSet(source, mediaFiles) ? source.resolved.url : undefined });
         try {
           const freshSource = assertVerifiedMediaSource(fresh.source, url);
           const candidates = fresh.files || [{ ...fresh, mediaKind: fresh.mediaKind }];
@@ -2829,6 +3073,8 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
       if (preparedCache && operation.observedMessageId) await mediaCache.release(preparedCache.id)
         .catch(error => logError("media_cache_failed", error, messageLogMeta(message)));
       socialVideoBudget.complete(budget.reservation, { success: false });
+      if (request && operation.observedMessageId) return operation.observedMessageId === request.messageId
+        ? { mediaReplyId: request.messageId } : { mediaFailure: { code:"ALREADY_VISIBLE", messageId:operation.observedMessageId } };
       if (!operation.videoReplyId || operation.videoReplyId !== operation.observedMessageId) await reportVisibleVideo(message, operation.observedMessageId);
       return true;
     }
@@ -2851,6 +3097,7 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
     }
     logInfo("social_media_sent", messageLogMeta(message, { source: new URL(url).hostname, provider, files: mediaFiles.length }));
     recordFeatureHealth(message, "download", true);
+    return operationOutcome({ ...operation, status:"done" });
   } catch (error) {
     recordFeatureHealth(message, "download", false);
     socialVideoBudget.complete(budget.reservation, { success: false });
@@ -2873,7 +3120,7 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
     }
     const description = linkNotice(message, failureMessage(failure, behavior().locale));
     // Never turn a possibly delivered video back into an error message.
-    const notice = operation?.videoReplyId && !operation.videoEditPending && !error.deliveryUnknown
+    const notice = request ? {message_id: request.messageId} : operation?.videoReplyId && !operation.videoEditPending && !error.deliveryUnknown
       ? await telegram("editMessageText", { chat_id: message.chat.id, message_id: operation.videoReplyId, text: description }).catch(() => {})
       : await telegram("sendMessage", { ...assembleReplyTarget(message), text: description }).catch(() => {});
     const sourceError = [error, ...(error.attempts || []).map(attempt => attempt.error)].find(error => error.sourceCheck && !error.fallbackDisabled);
@@ -2881,6 +3128,7 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
       source: sourceError ? { version: 1, requested: mediaReference(url), ...sourceError.sourceCheck } : operation.source,
       downloader: sourceError?.downloader || error.downloader || operation.downloader,
       errorMessageId: notice?.message_id || null }).catch(error => logError("media_journal_failed", error, messageLogMeta(message)));
+    return { mediaFailure: failure };
   } finally {
     clearInterval(progress);
     if (tempDir) {
@@ -2923,13 +3171,60 @@ async function downloadSocialVideo(url, options) {
   return socialDownloader.download(url, options);
 }
 
-async function downloadBudgetedMedia(url, reservation, deadline) {
+async function downloadBudgetedMedia(url, reservation, deadline, { onResolved, photoLinks = [], initialPhoto } = {}) {
   const allowance = socialVideoBudget.reserveSource(reservation);
   if (!allowance.allowed) throw Object.assign(new Error("Fresh source download allowance unavailable"), {
     code: "MEDIA_SOURCE_QUOTA", budgetReason: allowance.reason, retryAfterSeconds: allowance.retryAfterSeconds });
   let result;
   try {
-    result = await downloadSocialVideo(url, { deadline });
+    // A preferred representation uses the same bounded download phase as
+    // its short link, even when native metadata supplies the ID late.
+    deadline = Math.min(deadline || Infinity, Date.now() + 90000);
+    if (initialPhoto) {
+      const duplicate = await onResolved?.(initialPhoto, { photoAttempt: true });
+      if (duplicate?.duplicateOf) return duplicate;
+      result = { photoUrl: initialPhoto };
+    } else result = await downloadSocialVideo(url, { deadline, onResolved });
+    if (result.duplicateOf) {
+      // The bounded short-link resolution still contacted the source.
+      socialVideoBudget.completeSource(reservation, { success: true });
+      return result;
+    }
+    let selected = result.photoUrl;
+    if (!selected) {
+      const checked = assertVerifiedMediaSource(result.source, url);
+      const requested = requestedTikTokPhoto(photoLinks, checked.resolved);
+      if (requested || mediaReference(url)?.kind === "photo") {
+        if (isTikTokPhotoSet(checked, result.files || [result])) {
+          if (requested) result.source = verifiedMediaSource(url, { provider: checked.provider,
+            resolvedUrl: requested.url, id: checked.resolved.id, owner: checked.resolved.owner });
+        } else if (mediaReference(url)?.kind === "photo" || checked.resolved.kind === "photo") {
+          if (requested && mediaReference(url)?.kind !== "photo") await onResolved?.(requested.url, { photoAttempt: true });
+          throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", checked.provider);
+        } else {
+          const duplicate = await onResolved?.(requested.url, { photoAttempt: true });
+          if (duplicate?.duplicateOf) {
+            if (result.tempDir) await fs.promises.rm(result.tempDir, { recursive: true, force: true });
+            socialVideoBudget.completeSource(reservation, { success: true });
+            return duplicate;
+          }
+          selected = requested.url;
+        }
+      }
+    }
+    if (selected) {
+      const target = mediaReference(selected);
+      if (target?.kind !== "photo" || (selected !== initialPhoto && !requestedTikTokPhoto(photoLinks, target))) {
+        throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "tiktok-api");
+      }
+      if (result.tempDir) await fs.promises.rm(result.tempDir, { recursive: true, force: true });
+      result = await downloadSocialVideo(selected, { deadline });
+      const album = assertVerifiedMediaSource(result.source, selected);
+      if (!isTikTokPhotoSet(album, result.files || [result])) {
+        throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", album.provider);
+      }
+      result.source = verifiedMediaSource(url, { provider: album.provider, resolvedUrl: selected, id: album.resolved.id, owner: album.resolved.owner });
+    }
     const source = assertVerifiedMediaSource(result.source, url);
     const files = result.files || [{ ...result }];
     await identifyMediaItems(files, source);
@@ -3185,10 +3480,10 @@ async function findDownloadedSocialVideo(tempDir) {
   return files[0] || null;
 }
 
-async function editTelegramVideo(message, targetId, file, caption) {
+async function editTelegramVideo(message, operation, file, caption) {
   const form = new FormData();
   form.set("chat_id", String(message.chat.id));
-  form.set("message_id", String(targetId));
+  form.set("message_id", String(operation.videoReplyId));
   const media = { type: "video", media: file.telegramFileId || "attach://video", caption, supports_streaming: true };
   for (const key of ["width", "height", "duration"]) {
     if (Number.isFinite(file[key]) && file[key] > 0) media[key] = Math.round(file[key]);
@@ -3197,7 +3492,8 @@ async function editTelegramVideo(message, targetId, file, caption) {
   if (!file.telegramFileId) form.set("video", await fs.openAsBlob(file.filePath, { type: "video/mp4" }), path.basename(file.filePath));
   return telegramMultipart("editMessageMedia", form, { diagnosticId: message._mediaOperationId,
     // A gateway may consume 120 seconds after the complete body is written.
-    deadline: Math.min(message._mediaDeadline, Date.now() + 130000), expectedVideoReply: targetId });
+    deadline: Math.min(message._mediaDeadline, Date.now() + 130000),
+    expectedVideoReply:{ id:operation.videoReplyId, topicId:judgeThreadId(message), sourceId:operation.videoReplySourceId || operation.sourceMessageId } });
 }
 
 async function sendTelegramSocialMedia(message, mediaFiles, caption, onSent = async () => {}) {
@@ -4062,7 +4358,6 @@ async function performMessageAction(message, question, decision, context) {
     if (!url || !socialVideoProviderForUrl(url)) return "У цьому повідомленні не знайшов підтримуваного посилання для завантаження.";
     if (operation?.failure && !canRetryMediaOperation(operation)) return failureMessage(operation.failure, behavior().locale);
     if(!canDownloadMedia(message))return "Завантаження медіа зараз вимкнено в налаштуваннях бота.";
-    if(!await isBotAdminInChat(message.chat.id))return "Для завантаження медіа боту потрібні права адміністратора цієї групи.";
     const handled=await maybeHandleSocialVideo(message, operation || {url,sourceMessageId:target.messageId});
     if (handled?.mediaWork) return handled;
     return handled ? null : "Не вдалося запустити завантаження за цим запитом.";
@@ -4566,6 +4861,7 @@ async function telegramMultipart(method, form, options = {}) {
     } catch (error) { throw unconfirmedUpload(error, method); }
     if (!response.ok || body?.ok !== true) {
       const error = telegramApiError(method, response, body || {});
+      if ((options.expectedVideoReply || method === "sendVideo") && !telegramStatusRejection(error, method)) throw unconfirmedUpload(error, method);
       if (response.status >= 500 || (response.ok && (body?.ok !== false || !body.error_code))) throw unconfirmedUpload(error, method);
       throw error;
     }
@@ -4576,8 +4872,9 @@ async function telegramMultipart(method, form, options = {}) {
       throw unconfirmedUpload(new Error("Telegram returned no delivery receipt"), method);
     }
     if (options.expectedAttachments) {
-      const chatId = Number(form.get("chat_id")), topic = form.get("message_thread_id");
-      if (!results.every((item, index) => matchingTelegramAttachment(item, options.expectedAttachments[index], chatId, topic))) {
+      const chatId = Number(form.get("chat_id")), topicId = Number(form.get("message_thread_id")) || null;
+      const sourceId = Number(form.get("reply_to_message_id"));
+      if (!results.every((item, index) => matchingMediaReply(item, chatId, topicId, sourceId, true) && hasTelegramAttachment(item, options.expectedAttachments[index]))) {
         throw unconfirmedUpload(new Error("Missing matching Telegram attachment receipt"), method);
       }
       // Social-media history and bindings are written after recordSent also
@@ -4586,7 +4883,8 @@ async function telegramMultipart(method, form, options = {}) {
     }
     if (options.expectedVideoReply) {
       const edited = body.result;
-      if (edited?.message_id !== options.expectedVideoReply || edited.chat?.id !== Number(form.get("chat_id")) || !edited.video?.file_id) {
+      const {id,topicId,sourceId} = options.expectedVideoReply;
+      if (edited?.message_id !== id || !matchingMediaReply(edited, Number(form.get("chat_id")), topicId, sourceId) || !hasTelegramAttachment(edited, "video")) {
         throw unconfirmedUpload(new Error("Missing matching edited video receipt"), method);
       }
       return edited; // recordSent persists the original reply target and verified media identity.
@@ -4609,8 +4907,17 @@ function unconfirmedUpload(error, method) {
   });
 }
 
-function matchingTelegramAttachment(item, kind, chatId, topic) {
-  if (item.chat?.id !== chatId || (topic === null ? judgeThreadId(item) !== null : item.message_thread_id !== Number(topic))) return false;
+function matchingMediaReply(item, chatId, topicId, sourceId, requireTopic = false) {
+  if (!Number.isSafeInteger(item?.message_id) || item.message_id <= 0 || item.message_id === sourceId || item.chat?.id !== chatId) return false;
+  const parent = item.reply_to_message;
+  if (parent && (parent.message_id !== sourceId || (parent.chat?.id !== undefined && parent.chat.id !== chatId))) return false;
+  if (topicId === null) return judgeThreadId(item) === null && judgeThreadId(parent) === null;
+  if (parent?.message_thread_id !== undefined && parent.message_thread_id !== topicId) return false;
+  if (item.chat.is_forum === false || item.is_topic_message === false) return false;
+  return item.message_thread_id === topicId || (!requireTopic && item.message_thread_id === undefined);
+}
+
+function hasTelegramAttachment(item, kind) {
   const attachment = kind === "photo" ? (Array.isArray(item.photo) && item.photo.at(-1)) : item[kind];
   return typeof attachment?.file_id === "string" && Boolean(attachment.file_id.trim());
 }

@@ -42,3 +42,13 @@ test('short/share links retain their own request and require a resolved platform
   assert.throws(()=>assertVerifiedMediaSource(source,'https://www.threads.com/share/different/'),{code:'MEDIA_SOURCE_UNVERIFIED'});
   for(const url of ['http://www.instagram.com/reel/a/','https://instagram.com.evil.test/reel/a/','https://u:p@www.instagram.com/reel/a/','https://www.instagram.com:8443/reel/a/'])assert.equal(mediaReference(url),null);
 });
+
+test("opaque share queries remain separate until their real target is known", async () => {
+  const { mediaPublicationKey } = await import("../src/media-source.js");
+  const a = "https://www.threads.com/share/?target=one", b = "https://www.threads.com/share/?target=two";
+  const canonical = "https://www.threads.com/@u/post/abc/";
+  const source = verifiedMediaSource(a, { provider: "threads-page", resolvedUrl: canonical, id: "abc", owner: "u" });
+  assert.notEqual(mediaPublicationKey(a), mediaPublicationKey(b));
+  assert.equal(mediaPublicationKey(canonical + "?tracking=a"), mediaPublicationKey(canonical + "?tracking=b"));
+  assert.throws(() => assertVerifiedMediaSource(source, b), { code: "MEDIA_SOURCE_UNVERIFIED" });
+});

@@ -231,7 +231,13 @@ with matching identity and ownership. For source updates, pin the revision, back
 up private state, rebuild, run the non-polling full check, then recreate only that
 instance. Source merge is not an installed runtime upgrade.
 
-A single linked video updates one acknowledged bot reply. If Telegram loses the
-edit receipt, the bot can retry the same file on that same message once. Albums
-keep their existing batch receipts. Group failure messages are short; stages,
-provider errors and operation identifiers remain in the private journal.
+The bot immediately acknowledges an accepted group media request with one
+silent status. Ukrainian, Russian and English profiles use their configured
+language, including regional variants. A profile that follows the sender uses
+its fallback language for these notices. Other custom locales use English.
+A single linked video
+can replace the status. If Telegram loses confirmation of that edit, the bot can
+retry the same edit on the same message once. With other attachments, the status
+is removed on success or updated with the combined reasons for any failed links.
+Different links to the same verified post produce one delivery within a request.
+The private journal retains diagnostic details and receipts for album batches.

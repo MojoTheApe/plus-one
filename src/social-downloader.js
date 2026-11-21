@@ -67,6 +67,10 @@ async function downloadWithinDeadline(url, deps, options = {}) {
   let result, completed = false;
   try {
     const resolvedUrl = await resolveSocialMediaUrl(url, scoped);
+    if (resolvedUrl !== url && options.onResolved) {
+      const duplicate = await options.onResolved(resolvedUrl);
+      if (duplicate?.duplicateOf || duplicate?.photoUrl) return duplicate;
+    }
     result = await downloadSocialVideo(resolvedUrl, scoped);
     if (resolvedUrl !== url) {
       const native = assertVerifiedMediaSource(result.source, resolvedUrl);

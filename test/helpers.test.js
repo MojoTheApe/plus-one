@@ -429,3 +429,13 @@ test("formatDurationSeconds keeps compact day hour minute output", () => {
   assert.equal(formatDurationSeconds(3600), "1h 0m");
   assert.equal(formatDurationSeconds(90061), "1d 1h 1m");
 });
+
+test("a TikTok album keeps its first occurrence, author and original message positions", () => {
+  const video = "https://www.tiktok.com/@a/video/123/", album = "https://www.tiktok.com/@a/photo/123/";
+  const other = "https://www.tiktok.com/@b/photo/123/", later = "https://www.instagram.com/p/later/";
+  for (const [first, second] of [[video, album], [album, video]]) {
+    assert.deepEqual(socialMessageLinks([first, other, second, later].join(" ")), {
+      urls: [album, other, later], numbers: [1, 2, 4], outsideLinks: "",
+    });
+  }
+});

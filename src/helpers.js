@@ -374,20 +374,30 @@ export function socialMessageLinks(text, entities = []) {
     if (!ranges.some(item => item.start < end && start < item.end)) ranges.push({ start, end, raw });
   }
   const urls = new Map();
-  let outsideLinks = "", position = 0;
+  const numbers = [];
+  let outsideLinks = "", position = 0, number = 0;
   for (const { start, end, raw } of ranges.sort((a, b) => a.start - b.start)) {
     if (typeof raw !== "string" || start < position) continue;
     let url;
     try { url = new URL(/^[\w.-]+\//u.test(raw) ? "https://" + raw : raw); } catch { continue; }
     if (!["http:", "https:"].includes(url.protocol)) continue;
     url.protocol = "https:";
-    if (!mediaReference(url.href)) continue;
+    const ref = mediaReference(url.href);
+    if (!ref) continue;
+    number++;
     const key = mediaPublicationKey(url.href);
-    if (!urls.has(key)) urls.set(key, url.href);
+    if (!urls.has(key)) {
+      urls.set(key, url.href);
+      numbers.push(number);
+    } else if (ref.platform === "tiktok" && ref.kind === "photo" && mediaReference(urls.get(key)).kind === "video") {
+      // Replace a rendering at the publication's first position in the message.
+      urls.set(key, url.href);
+    }
     outsideLinks += text.slice(position, start) + " ";
     position = end;
   }
-  return { urls: [...urls.values()], outsideLinks: (outsideLinks + text.slice(position)).trim() };
+  return { urls: [...urls.values()], outsideLinks: (outsideLinks + text.slice(position)).trim(),
+    ...(numbers.some((value, index) => value !== index + 1) ? { numbers } : {}) };
 }
 
 export function addressedMediaDownload(outsideLinks, username) {
