@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { assertVerifiedMediaSource, mediaPublicationKey, mediaReference } from "./media-source.js";
+import { assertVerifiedMediaSource, isTikTokPhotoSet, mediaPublicationKey, mediaReference } from "./media-source.js";
 import { assertSameMediaItems, hasMediaItemIdentity, maxPublicationItems } from "./media-items.js";
 
 const safeId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -304,8 +304,7 @@ function retainMediaBindings(bindings) {
 function reusablePublication(entry, sourceUrl) {
   // TikTok shares a native ID between /video and /photo permalinks. A
   // rendered slideshow from the video path cannot supply the original slides.
-  if (mediaReference(sourceUrl)?.kind === "photo" && (entry.source?.provider !== "tiktok-api" ||
-      !entry.manifest?.length || !entry.manifest.every(item => item.mediaKind === "image"))) return false;
+  if (mediaReference(sourceUrl)?.kind === "photo" && !isTikTokPhotoSet(entry.source, entry.manifest)) return false;
   if (entry.orderedMediaVersion === 1) return true;
   // Before ordered selection, a cached prefix, duplicate collapse or video
   // poster could look complete. Exact message/recovery lookups retain it.

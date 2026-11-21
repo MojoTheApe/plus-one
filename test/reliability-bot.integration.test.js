@@ -2121,7 +2121,7 @@ for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'inter
         t.after(() => { Date.now = now; });
         return new Response('',{status:504});
       }
-      if (outcome === 'unchanged' && targets.length === 2) return Response.json({ok:false,description:'Bad Request: message is not modified'},{status:400});
+      if (outcome === 'unchanged' && targets.length === 2) return Response.json({ok:false,error_code:400,description:'Bad Request: message is not modified'},{status:400});
       if (['lost-first-receipt','unchanged'].includes(outcome) && targets.length === 1) return new Response('', {status:504});
       return Response.json({ok:true,result:{message_id:['wrong-receipts','interrupted'].includes(outcome)?target+1:target,
         chat:{id:-123}, video:{file_id:'known-video'}}});
@@ -2163,11 +2163,91 @@ for (const outcome of ['acknowledged', 'lost-first-receipt', 'unchanged', 'inter
       f.setUpload(async (method,form) => {
         assert.equal(method,'editMessageMedia');
         assert.equal(Number(form.get('message_id')),targets[0]);
-        return Response.json({ok:true,result:{message_id:targets[0],chat:{id:-123},video:{file_id:'recovered'}}});
+        return Response.json({ok:true,result:{message_id:targets[0],chat:{id:-123},reply_to_message:{message_id:500},video:{file_id:'recovered'}}});
       });
       await f.handle({message_id:1500,text:'повтори',reply_to_message:{message_id:op.errorMessageId,from:{id:77,is_bot:true},text:'Telegram'}});
       assert.equal((await journal.read())[0].status,'done');
       assert.equal(f.calls.filter(call=>call.payload.text===mediaPreparingText('uk')).length,2);
+    }
+  });
+}
+
+for (const method of ['editMessageMedia','sendVideo']) {
+  for (const issue of ['blank video file_id','explicit wrong topic','explicit wrong parent']) {
+    test(method + ' rejects a single video receipt with ' + issue, async t => {
+      const f = await fixture(t), original = instagramUpdate(508,'https://www.instagram.com/reel/scope/');
+      const filePath = path.join(f.root,'scope.mp4');
+      execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','color=s=48x32:r=5','-t','0.4','-c:v','libx264','-threads','1',filePath]);
+      f.setDownloader(async url => ({source:nativeExtractorSource(url,{extractor_key:'Instagram',id:'scope'}),files:[{filePath,mediaKind:'video',mimeType:'video/mp4'}]}));
+      if (method === 'sendVideo') f.setStatus(async actual => { assert.equal(actual,'sendMessage'); throw new Error('no status receipt'); });
+      const targets = [];
+      f.setUpload(async (actual,form) => {
+        assert.equal(actual,method);
+        const target = Number(form.get('message_id')) || 1900; targets.push(target);
+        return Response.json({ok:true,result:{message_id:target,chat:{id:-123},message_thread_id:issue === 'explicit wrong topic' ? 91 : 9,
+          reply_to_message:{message_id:issue === 'explicit wrong parent' ? 509 : 508},video:{file_id:issue === 'blank video file_id' ? '  ' : 'video'}}});
+      });
+      await f.queue(original);
+      const [op] = await new MediaOperations(path.join(f.root,'runtime/media.json')).read();
+      assert.equal(op.status,'unknown'); assert.equal(op.failure.code,'UPLOAD_UNKNOWN');
+      assert.deepEqual(targets,method === 'sendVideo' ? [1900] : [op.videoReplyId,op.videoReplyId]);
+      assert.deepEqual(op.sentMessageIds || [],[]);
+      const cached = (await new MediaCache(path.join(f.root,'runtime/media-cache')).read()).entries.find(entry => entry.id === op.cacheId);
+      assert.deepEqual(cached.receipts,[]); assert.deepEqual(cached.bindings,[]);
+      const history = await new ConversationStore(path.join(f.root,'runtime/conversations')).read(-123);
+      assert.ok(!history.some(item => item.messageId === targets[0] && item.mediaType === 'video'));
+    });
+  }
+}
+
+test('a newly created video status on manual retry belongs to that request even when the saved source is older', async t => {
+  const f = await fixture(t), url = 'https://www.instagram.com/reel/retry/';
+  const filePath = path.join(f.root,'retry.mp4');
+  execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','color=s=48x32:r=5','-t','0.4','-c:v','libx264','-threads','1',filePath]);
+  f.setDownloader(async () => { throw new Error('timeout'); });
+  await f.handle({message_id:510,text:url});
+  const journal = new MediaOperations(path.join(f.root,'runtime/media.json'));
+  const [failed] = await journal.read();
+  f.setMediaNow(() => Date.now()+31000);
+  f.setDownloader(async url => ({source:nativeExtractorSource(url,{extractor_key:'Instagram',id:'retry'}),files:[{filePath,mediaKind:'video',mimeType:'video/mp4'}]}));
+  f.setUpload(async (method,form) => {
+    assert.equal(method,'editMessageMedia');
+    return Response.json({ok:true,result:{chat:{id:-123},message_id:Number(form.get('message_id')),
+      reply_to_message:{message_id:511},video:{file_id:'retry-clip'}}});
+  });
+  await f.handle({message_id:511,text:'повтори',reply_to_message:{message_id:failed.errorMessageId,from:{id:77,is_bot:true}}});
+  const [done] = await journal.read();
+  assert.equal(done.status,'done'); assert.equal(done.sourceMessageId,510);
+  assert.equal(done.videoReplySourceId,511); assert.deepEqual(done.sentMessageIds,[done.videoReplyId]);
+});
+
+for (const method of ['sendMessage','editMessageText']) {
+  test('a final ' + method + ' receipt naming another original is never bound to the operation or outgoing history', async t => {
+    const f = await fixture(t), original = instagramUpdate(512);
+    let now = Date.now(); t.mock.method(Date,'now',() => now);
+    f.setDownloader(async () => { throw new Error('source timeout'); });
+    let wrongId;
+    f.setStatus(async (actual,payload) => {
+      if (payload.text === mediaPreparingText('uk')) {
+        if (method === 'sendMessage') return Response.json({ok:false,error_code:400},{status:400});
+        return;
+      }
+      assert.equal(actual,method); wrongId = payload.message_id || 1988;
+      return Response.json({ok:true,result:{message_id:wrongId,chat:{id:-123},message_thread_id:9,
+        reply_to_message:{message_id:777},text:payload.text}});
+    });
+    const pending = await f.queue(original);
+    const history = new ConversationStore(path.join(f.root,'runtime/conversations'));
+    assert.ok(!(await history.read(-123)).some(item => item.messageId === wrongId && item.isBot));
+    const [op] = await new MediaOperations(path.join(f.root,'runtime/media.json')).read();
+    if (method === 'sendMessage') {
+      assert.deepEqual(pending,[]);
+      assert.ok(!op.referenceMessageIds.includes(wrongId));
+    } else {
+      assert.equal(pending[0].mediaRequest.messageId,wrongId);
+      f.setStatus(() => undefined); now = pending[0].mediaRequest.finishRetryAt;
+      await f.queue(original);
+      assert.ok((await history.read(-123)).some(item => item.messageId === wrongId && item.isBot));
     }
   });
 }
@@ -2345,6 +2425,21 @@ test('an unconfirmed status creation never suppresses media or creates another s
   assert.equal(f.calls.filter(c => c.method === 'sendMessage').length,1);
   assert.equal(f.calls.filter(c => c.method === 'sendPhoto').length,1);
   assert.deepEqual(await f.pending(),[]);
+});
+
+test('an error summary numbers links by their position in the original message even after a duplicate', async t => {
+  const f = await fixture(t);
+  const first = 'https://www.instagram.com/p/first/';
+  const third = 'https://www.instagram.com/p/third/';
+  const downloaded = [];
+  f.setDownloader(async url => {
+    downloaded.push(url);
+    throw Object.assign(new Error('private post'), {code:'AUTH_REQUIRED'});
+  });
+  await f.queue(instagramUpdate(566, [first, first, third].join(' ')));
+  assert.deepEqual(downloaded, [first, third]);
+  assert.deepEqual(f.calls.filter(call => call.method === 'editMessageText').map(call => call.payload.text),
+    ['Посилання 1, 3 — Не маю доступу до цих публікацій.']);
 });
 
 test('videos from two publications share one silent text status and upload as separate verified attachments', async t => {
@@ -2729,8 +2824,8 @@ test('history-only media requests resolve hidden links and request the exact pub
 
 for (const invalid of ["duplicate", "missing", "document", "blank file_id", "wrong chat", "wrong topic", "wrong order", "previous chunk"]) {
   test(`Telegram album rejects ${invalid} receipts without binding or resending the uncertain chunk`, async t => {
-    const f = await fixture(t), url = "https://www.tiktok.com/@fixture/photo/123/";
-    const source = verifiedMediaSource(url, { provider: "tiktok-api", id: "123", owner: "fixture" });
+    const f = await fixture(t), url = "https://www.threads.com/@fixture/post/abc/";
+    const source = verifiedMediaSource(url, { provider: "threads-page", id: "abc", owner: "fixture" });
     const photoPath = path.join(f.root, "photo.png");
     await fs.writeFile(photoPath, await fixturePhoto);
     const count = invalid === "previous chunk" ? 12 : 2;
@@ -2820,5 +2915,52 @@ for (const scenario of ["short then full", "full then short", "two opaque links"
       await f.queue({ update_id: 802, message: { ...message, message_id: 502 } });
       assert.equal(uploads, 2, "a new Telegram message can request the verified cached publication");
     }
+  });
+}
+
+for (const order of ["short first", "short last", "native video first", "native photo first", "late identity", "photo unavailable", "cached rendering"]) {
+  test(`explicit TikTok photo slides keep the publication's first position: ${order}`, async t => {
+    const f = await fixture(t), short = "https://vt.tiktok.com/PhotoAlias/";
+    const video = "https://www.tiktok.com/@u/video/123/", album = "https://www.tiktok.com/@u/photo/123/";
+    const other = "https://www.tiktok.com/@u/photo/124/";
+    const photos = path.join(f.root, "slide.png"), film = path.join(f.root, "rendered.mp4");
+    await fs.writeFile(photos, await fixturePhoto);
+    execFileSync("ffmpeg", ["-v","error","-f","lavfi","-i","color=s=32x32:r=5","-t","0.4","-c:v","libx264","-threads","1",film]);
+    const source = (url, route, provider) => verifiedMediaSource(url, { resolvedUrl: route, owner: "u",
+      id: route === other ? "124" : "123", provider });
+    const file = { filePath: photos, mediaKind: "image", mimeType: "image/png" };
+    const rendered = { filePath:film, mediaKind:"video", mimeType:"video/mp4" };
+    if (order === "cached rendering") {
+      const cache = new MediaCache(path.join(f.root, "runtime/media-cache"));
+      await cache.put({ chatId:-123,topicId:9,sourceMessageId:100,sourceUrl:short,source:source(short,video,"yt-dlp"),files:[rendered] });
+    }
+    const fetched = [], uploads = [];
+    f.setDownloader(async (url, options) => {
+      if (url === short && order !== "late identity") {
+        const action = await options.onResolved(video);
+        if (action) return action;
+      }
+      fetched.push(url);
+      if (url === album && order !== "photo unavailable") return { source:source(url,album,"tiktok-api"),files:[file,file] };
+      if (url === other) return { source:source(url,other,"tiktok-api"),files:[file] };
+      return { source:source(url,url === album ? album : video,"yt-dlp"),files:[rendered] };
+    });
+    f.setUpload(async (method, form) => {
+      uploads.push(method);
+      const start = 16000 + 10 * uploads.length;
+      if (method === "sendMediaGroup") {
+        assert.deepEqual(JSON.parse(form.get("media")).map(item=>item.type), ["photo","photo"]);
+        return Response.json({ok:true,result:[photoReceipt(form,start),photoReceipt(form,start+1)]});
+      }
+      assert.equal(method,"sendPhoto");
+      return Response.json({ok:true,result:photoReceipt(form,start)});
+    });
+    const links = order === "short last" ? [album,other,short] : order === "native photo first" ? [album,other,video] :
+      order === "native video first" ? [video,other,album] : [short,other,album];
+    await f.queue({ update_id: 8100, message: { message_id:800,date:Math.floor(Date.now()/1000),chat:{id:-123,type:"supergroup",is_forum:true},
+      message_thread_id:9,is_topic_message:true,from:{id:88},text:links.join(" ") } });
+    assert.deepEqual(uploads, order === "photo unavailable" ? ["sendPhoto"] : ["sendMediaGroup","sendPhoto"]);
+    assert.equal(fetched.filter(url=>url===album).length, 1, "the same photo route is attempted once");
+    assert.equal(fetched.includes(short), order === "late identity", "known destinations require no speculative render download");
   });
 }

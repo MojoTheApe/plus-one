@@ -47,7 +47,18 @@ export function mediaReference(value) {
 export function mediaPublicationKey(value) {
   const reference = mediaReference(value);
   if (!reference?.id) return reference?.url || String(value);
-  return `${reference.platform}:${reference.kind === "story" ? "story" : "post"}:${reference.key}`;
+  return `${reference.platform}:${reference.kind === "story" ? "story" : "post"}:${reference.key}` +
+    (reference.platform === "tiktok" && reference.owner ? `@${reference.owner}` : "");
+}
+
+export function requestedTikTokPhoto(photos, target) {
+  if (target?.platform !== "tiktok" || !target.id || !target.owner) return null;
+  return photos.find(photo => photo.id === target.id && photo.owner === target.owner) || null;
+}
+
+export function isTikTokPhotoSet(source, files) {
+  return source?.provider === "tiktok-api" && Array.isArray(files) && files.length > 0 &&
+    files.every(file => file.mediaKind === "image");
 }
 
 function sameObject(expected, actual) {

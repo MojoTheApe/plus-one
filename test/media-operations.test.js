@@ -235,3 +235,24 @@ test("a bounded redirect before a source failure can be superseded only by the s
   const reentered = await restarted.record({ ...before, status: "uploading" }, { beginUpload: true });
   assert.deepEqual(reentered, { duplicateOf: accepted.id });
 });
+
+test("a video receipt cannot own a later request for original TikTok slides or a different author's permalink", async t => {
+  const { verifiedMediaSource } = await import("../src/media-source.js");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "tiktok-representation-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const journal = new MediaOperations(path.join(root, "journal.json"));
+  const video = "https://www.tiktok.com/@u/video/123/", photo = "https://www.tiktok.com/@u/photo/123/";
+  const otherAuthor = "https://www.tiktok.com/@other/video/123/";
+  const common = { chatId: -1, topicId: 9, sourceMessageId: 41, status: "done" };
+  const preview = await journal.record({ ...common, url: video, source: verifiedMediaSource(video, { id:"123", owner:"u", provider:"yt-dlp" }),
+    mediaItems:[{mediaKind:"video"}] }, {claimPublication:true});
+  const lookup = url => journal.forSourceMessage({chat:{id:-1},message_id:41}, 9, url);
+  assert.equal((await lookup(video)).id, preview.id);
+  assert.equal(await lookup(photo), undefined);
+  assert.equal(await lookup(otherAuthor), undefined);
+  const original = await journal.record({ ...common, url:photo, source:verifiedMediaSource(photo,{id:"123",owner:"u",provider:"tiktok-api"}),
+    mediaItems:[{mediaKind:"image"},{mediaKind:"image"}] }, {claimPublication:true});
+  assert.ok(original.id);
+  assert.notEqual(original.id, preview.id);
+  assert.equal((await lookup(photo)).id, original.id);
+});

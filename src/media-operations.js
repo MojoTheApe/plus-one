@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { assertVerifiedMediaSource, mediaPublicationKey, mediaReference, sourceIdentityError } from "./media-source.js";
+import { assertVerifiedMediaSource, isTikTokPhotoSet, mediaPublicationKey, mediaReference, sourceIdentityError } from "./media-source.js";
 import { conversationThreadId } from "./conversation-store.js";
 import { say } from "./helpers.js";
 
@@ -243,7 +243,7 @@ export class MediaOperations {
       (activeSourceRetry(op) ||
         (updateId >= op.sourceRetry.updateId && updateId <= op.sourceRetry.throughUpdateId)));
   }
-  async coalesceResolvedLink(id, resolvedUrl) {
+  async coalesceResolvedLink(id, resolvedUrl, { requirePhotos = false, photoRoute = null } = {}) {
     return this.change(state => {
       const current = state.operations.find(op => op.id === id);
       const target = mediaReference(resolvedUrl);
@@ -254,12 +254,18 @@ export class MediaOperations {
       // A first-party redirect identifies the link destination even if its
       // media request later fails. It cannot certify bytes or a delivery.
       current.resolvedLink = target.url;
-      return this.coalesceVerifiedTarget(state, current, target) || null;
+      if (photoRoute?.kind === "photo" && photoRoute.owner && target.owner === photoRoute.owner && samePublicationTarget(target, photoRoute)) {
+        // This exact photo route was selected for this sibling. If the source
+        // rejects it, a later identical permalink must not run it again.
+        current.photoRoute = photoRoute.url;
+      }
+      return this.coalesceVerifiedTarget(state, current, target, requirePhotos || target.kind === "photo") || null;
     });
   }
-  coalesceVerifiedTarget(state, entry, target) {
+  coalesceVerifiedTarget(state, entry, target, requirePhotos) {
     if (!Number.isSafeInteger(entry.sourceMessageId)) return false;
-    const owner = state.operations.find(op => siblingOperation(op, entry) && verifiedTargetMatches(op, target));
+    const owner = state.operations.find(op => siblingOperation(op, entry) && verifiedTargetMatches(op, target) &&
+      (!requirePhotos || isTikTokPhotoSet(op.source, op.mediaItems)));
     if (!owner) return false;
     rememberAlias(owner, entry);
     owner.updatedAt = this.now();
@@ -287,7 +293,7 @@ export class MediaOperations {
         if (previous?.source?.status === "verified" && !verifiedTargetMatches(previous, source.resolved)) {
           throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", source.provider);
         }
-        const duplicate = this.coalesceVerifiedTarget(state, entry, source.resolved);
+        const duplicate = this.coalesceVerifiedTarget(state, entry, source.resolved, source.resolved.kind === "photo");
         if (duplicate) return duplicate;
         for (const earlier of all) {
           if (!siblingOperation(earlier, entry) || earlier.source?.status === "verified" ||
@@ -452,7 +458,11 @@ function rememberAlias(owner, sibling) {
 
 function operationMatchesUrl(operation, url) {
   const key = mediaPublicationKey(url);
+  const target = mediaReference(url);
+  if (target?.kind === "photo" && operation.photoRoute && mediaPublicationKey(operation.photoRoute) === key) return true;
+  if (target?.kind === "photo" && mediaReference(operation.url)?.kind !== "photo" && operation.source?.status === "verified" &&
+      !isTikTokPhotoSet(operation.source, operation.mediaItems)) return false;
   return mediaPublicationKey(operation.url) === key ||
     (operation.publicationAliases?.length && operation.publicationAliases.includes(createHash("sha256").update(key).digest("base64url"))) ||
-    verifiedTargetMatches(operation, mediaReference(url));
+    verifiedTargetMatches(operation, target);
 }

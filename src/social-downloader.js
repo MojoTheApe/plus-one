@@ -69,7 +69,7 @@ async function downloadWithinDeadline(url, deps, options = {}) {
     const resolvedUrl = await resolveSocialMediaUrl(url, scoped);
     if (resolvedUrl !== url && options.onResolved) {
       const duplicate = await options.onResolved(resolvedUrl);
-      if (duplicate?.duplicateOf) return duplicate;
+      if (duplicate?.duplicateOf || duplicate?.photoUrl) return duplicate;
     }
     result = await downloadSocialVideo(resolvedUrl, scoped);
     if (resolvedUrl !== url) {
