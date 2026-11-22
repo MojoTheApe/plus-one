@@ -266,7 +266,7 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
   const resolvedUrl = response.url || url;
   if (mediaReference(resolvedUrl)?.platform !== "threads") throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
   if (/\/(?:accounts\/)?login(?:\/|\?|$)/iu.test(new URL(resolvedUrl).pathname)) {
-    throw Object.assign(new Error("Threads redirected to login; authentication required"), { code: "AUTH_REQUIRED" });
+    throw Object.assign(new Error("Threads redirected to login; authentication required"), { code: "AUTH_REQUIRED", sourceAccessDenied: true });
   }
   checkThreadsRegionGate(html, url, resolvedUrl);
   const extracted = extractThreadsPublication(html, resolvedUrl);
@@ -378,19 +378,31 @@ export async function downloadInstagramPost(url, tempDir, deps) {
   }
   const files = [];
   const itemIds = new Set();
-  let bytes = 0;
   for (const [index, item] of manifest.items.entries()) {
     if (item.index !== index || typeof item.mediaId !== "string" || !/^\d+$/u.test(item.mediaId) || itemIds.has(item.mediaId) ||
         !["image", "video"].includes(item.kind) || !isInstagramAssetUrl(item.url)) {
       throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "instaloader");
     }
     itemIds.add(item.mediaId);
-    const file = await downloadRemoteMediaFile(item.url, tempDir, `instagram-${index + 1}`, source.resolved.url, item.kind,
-      { ...deps, maxBytes: Math.min(deps.maxBytes, 256 * 1024 * 1024 - bytes) });
+  }
+  let bytes = 0;
+  for (const [index, item] of manifest.items.entries()) {
+    let file;
+    try {
+      file = await downloadRemoteMediaFile(item.url, tempDir, `instagram-${index + 1}`, source.resolved.url, item.kind,
+        { ...deps, maxBytes: Math.min(deps.maxBytes, 256 * 1024 * 1024 - bytes) }, { instagramProvider: "instaloader" });
+    } catch (error) {
+      error.downloader = "instaloader";
+      error.instagramExpectedKind = count === 1 ? item.kind : "album";
+      throw error;
+    }
     bytes += file.size;
     file.title = manifest.title || "Instagram media";
     file.sourceItemId = count === 1 ? `publication:${source.resolved.id}` : `native:${item.mediaId}`;
-    if (item.kind === "video") Object.assign(file, await deps.validateDownloadedVideo(file.filePath, { requireAudio: false }));
+    if (item.kind === "video") {
+      try { Object.assign(file, await deps.validateDownloadedVideo(file.filePath, { requireAudio: false })); }
+      catch (error) { error.instagramAssetInvalid = true; throw error; }
+    }
     files.push(file);
   }
   return { tempDir, files, source, title: manifest.title || "Instagram media" };
@@ -414,14 +426,15 @@ export async function downloadSocialVideo(url, deps) {
       catch (error) {
         const failure = mediaFailure(error);
         const isPost = mediaReference(url)?.kind === "post";
-        const denied = [401, 403, 404, 410, 451].includes(failure.status) || error.code === "AGE_RESTRICTED" ||
+        const staleAsset = error.instagramAssetFailure === true && [403, 404].includes(failure.status);
+        const denied = (!staleAsset && [401, 403, 404, 410, 451].includes(failure.status)) || error.code === "AGE_RESTRICTED" ||
           ["PrivateProfileNotFollowedException", "InstagramPageGate"].includes(error.adapterErrorType);
-        if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error.code) ||
-            deps.signal?.aborted || failure.code === "RATE_LIMIT" || denied) throw error;
+        if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH", "MEDIA_IMAGE_INVALID", "MEDIA_VIDEO_INVALID"].includes(error.code) ||
+            error.instagramAssetInvalid || error.instagramExpectedKind === "album" || deps.signal?.aborted || failure.code === "RATE_LIMIT" || denied) throw error;
         // A generic adapter login/unavailable result retains the prior native video path.
         // Only an ordinary source failure opens the additional photo extraction path.
-        const nativeDeps = isPost && !["SERVICE_ERROR", "TIMEOUT", "NO_MEDIA"].includes(failure.code)
-          ? { ...deps, allowNativePhoto: false } : deps;
+        const nativeDeps = { ...deps, instagramExpectedKind: error.instagramExpectedKind };
+        if (isPost && !staleAsset && !["SERVICE_ERROR", "TIMEOUT", "NO_MEDIA"].includes(failure.code)) nativeDeps.allowNativePhoto = false;
         try { return { ...await downloadSocialVideoWithYtDlp(url, tempDir, nativeDeps), previousFailure: error }; }
         catch (native) { throw socialDownloadFailure(error, native, "yt-dlp"); }
       }
@@ -538,6 +551,9 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
     error.actualDurationSeconds = duration;
     throw error;
   }
+  if (deps.instagramExpectedKind && deps.instagramExpectedKind !== (info.instagram_single_photo ? "image" : "video")) {
+    throw sourceIdentityError("MEDIA_SOURCE_MISMATCH", "yt-dlp");
+  }
   if (info.instagram_single_photo) {
     const photo = info.instagram_single_photo;
     const ref = mediaReference(url);
@@ -547,7 +563,7 @@ export async function downloadSocialVideoWithYtDlp(url, tempDir, deps) {
       throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "yt-dlp");
     }
     const source = nativeExtractorSource(url, info);
-    const file = await downloadRemoteMediaFile(photo.url, tempDir, "instagram-photo", source.resolved.url, "image", deps, { strictImage: true });
+    const file = await downloadRemoteMediaFile(photo.url, tempDir, "instagram-photo", source.resolved.url, "image", deps, { instagramProvider: "yt-dlp" });
     file.sourceItemId = `publication:${source.resolved.id}`;
     return { tempDir, source, files: [file], title: info.title || "Instagram photo", ...(previousFailure ? { previousFailure } : {}) };
   }
@@ -676,29 +692,62 @@ export async function downloadRemoteBinaryFile(url, filePath, { accept = "*/*", 
   await writeLimitedResponseFile(response, filePath, deps);
 }
 
-export async function downloadRemoteMediaFile(url, tempDir, baseName, referer, forcedMediaKind, deps, { strictImage = false } = {}) {
-  const response = await fetchWithTimeout(
-    url,
-    {
-      ...(strictImage ? { redirect: "manual" } : {}),
-      headers: {
-        accept: "video/mp4,video/*,image/*,*/*",
-        referer,
-        "user-agent": "Mozilla/5.0 TelegramSocialVideoBot/1.0",
-      },
-    },
-    deps.httpTimeoutMs,
-    deps.fetch,
-  );
-  if (strictImage && response.status >= 300 && response.status < 400) {
+async function fetchInstagramAsset(url, options, { httpTimeoutMs = 30000, fetch: fetchImpl = fetch, signal }, provider) {
+  const seen = new Set();
+  const timeout = AbortSignal.timeout(httpTimeoutMs);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  while (isInstagramAssetUrl(url) && !seen.has(url) && seen.size < 5) {
+    seen.add(url);
+    const response = await fetchImpl(url, { ...options, signal: requestSignal, redirect: "manual" });
+    if (response.status < 300 || response.status >= 400) return response;
     await response.body?.cancel?.();
-    throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "yt-dlp");
+    const location = response.headers.get("location");
+    if (![301, 302, 303, 307, 308].includes(response.status) || !location) break;
+    try { url = new URL(location, url).href; } catch { break; }
   }
-  if (!response.ok) throw httpFailure("remote media download failed", response.status, response.headers);
-  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-  if (strictImage && !/^image\/(?:jpeg|png|webp|avif)(?:;|$)/u.test(contentType)) {
+  throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", provider);
+}
+
+function instagramFileMime(header) {
+  if (header.subarray(0, 3).toString("hex") === "ffd8ff") return "image/jpeg";
+  if (header.subarray(0, 8).toString("hex") === "89504e470d0a1a0a") return "image/png";
+  const tag = (start, end) => header.toString("latin1", start, end);
+  if (tag(0, 4) === "RIFF" && tag(8, 12) === "WEBP") return "image/webp";
+  if (/^GIF8[79]a$/u.test(tag(0, 6))) return "image/gif";
+  if (header.subarray(0, 4).toString("hex") === "1a45dfa3") return "video/webm";
+  if (header.length < 16 || tag(4, 8) !== "ftyp") return "";
+  const boxSize = header.readUInt32BE();
+  if (boxSize < 16 || boxSize > header.length || boxSize % 4) return "";
+  const brands = [tag(8, 12)];
+  for (let start = 16; start < boxSize; start += 4) brands.push(tag(start, start + 4));
+  if (brands.some(brand => ["avif", "avis"].includes(brand))) return "image/avif";
+  if (brands.some(brand => ["heic", "heix", "hevc", "hevx", "mif1", "msf1"].includes(brand))) return "image/heif";
+  if (brands.includes("qt  ")) return "video/quicktime";
+  if (brands.some(brand => /^(?:iso[m2-9]|mp4[12]|avc1|dash|M4V )$/u.test(brand))) return "video/mp4";
+  return "";
+}
+
+function instagramTypeError(kind, provider) {
+  return Object.assign(new Error(`Instagram ${kind} has an unexpected media type`), {
+    code: kind === "image" ? "MEDIA_IMAGE_INVALID" : "MEDIA_VIDEO_INVALID", downloader: provider,
+  });
+}
+
+export async function downloadRemoteMediaFile(url, tempDir, baseName, referer, forcedMediaKind, deps, { instagramProvider } = {}) {
+  const options = { headers: { accept: "video/mp4,video/*,image/*,*/*", referer, "user-agent": "Mozilla/5.0 TelegramSocialVideoBot/1.0" } };
+  const response = instagramProvider ? await fetchInstagramAsset(url, options, deps, instagramProvider)
+    : await fetchWithTimeout(url, options, deps.httpTimeoutMs, deps.fetch);
+  if (!response.ok) {
     await response.body?.cancel?.();
-    throw Object.assign(new Error("Instagram photo returned a different media type"), { code: "MEDIA_IMAGE_INVALID" });
+    const error = httpFailure("remote media download failed", response.status, response.headers);
+    if (instagramProvider) Object.assign(error, { instagramAssetFailure: true, downloader: instagramProvider });
+    throw error;
+  }
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase().split(";")[0].trim();
+  const genericType = !contentType || ["application/octet-stream", "binary/octet-stream"].includes(contentType);
+  if (instagramProvider && !genericType && !contentType.startsWith(forcedMediaKind + "/")) {
+    await response.body?.cancel?.();
+    throw instagramTypeError(forcedMediaKind, instagramProvider);
   }
   if (contentType.startsWith("text/html")) throw new Error("remote media returned HTML instead of a file");
   const mediaKind = forcedMediaKind || inferRemoteMediaKind(url, contentType);
@@ -710,10 +759,22 @@ export async function downloadRemoteMediaFile(url, tempDir, baseName, referer, f
     throw new Error("remote media exceeds configured file limit");
   }
 
-  const mimeType = normalizeMediaMimeType(contentType, mediaKind);
+  let mimeType = normalizeMediaMimeType(contentType, mediaKind);
   const extension = mediaExtensionForMimeType(mimeType) || extensionFromUrl(url) || (mediaKind === "image" ? "jpg" : "mp4");
-  const filePath = path.join(tempDir, `${baseName}.${extension}`);
-  const downloaded = await writeLimitedResponseFile(response, filePath, deps);
+  let filePath = path.join(tempDir, `${baseName}.${extension}`);
+  const downloaded = await writeLimitedResponseFile(response, filePath, deps, Boolean(instagramProvider));
+  if (instagramProvider) {
+    const actual = instagramFileMime(downloaded.header);
+    const aliases = { "image/jpg": "image/jpeg", "image/heic": "image/heif", "video/x-m4v": "video/mp4" };
+    if (!actual.startsWith(mediaKind + "/") || (!genericType && (aliases[contentType] || contentType) !== actual)) {
+      await deps.fs.promises.rm(filePath, { force: true });
+      throw instagramTypeError(mediaKind, instagramProvider);
+    }
+    mimeType = actual;
+    const actualPath = path.join(tempDir, `${baseName}.${mediaExtensionForMimeType(actual) || actual.split("/")[1]}`);
+    if (actualPath !== filePath) await deps.fs.promises.rename(filePath, actualPath);
+    filePath = actualPath;
+  }
   return {
     filePath,
     mediaKind,
@@ -724,8 +785,9 @@ export async function downloadRemoteMediaFile(url, tempDir, baseName, referer, f
   };
 }
 
-async function writeLimitedResponseFile(response, filePath, deps) {
+async function writeLimitedResponseFile(response, filePath, deps, captureHeader = false) {
   let totalBytes = 0;
+  const header = captureHeader ? Buffer.alloc(256) : null;
   const reader = response.body?.getReader();
   if (!reader) throw new Error("remote media response was empty");
   const file = await deps.fs.promises.open(filePath, "wx", 0o600), hash = crypto.createHash("sha256");
@@ -734,6 +796,7 @@ async function writeLimitedResponseFile(response, filePath, deps) {
       const { done, value } = await reader.read();
       if (done) break;
       const chunk = Buffer.from(value);
+      if (header && totalBytes < header.length) chunk.copy(header, totalBytes);
       totalBytes += chunk.length;
       if (totalBytes > deps.maxBytes) throw new Error("remote media exceeds configured file limit");
       if (deps.downloadBudget) {
@@ -744,7 +807,7 @@ async function writeLimitedResponseFile(response, filePath, deps) {
       await file.writeFile(chunk);
     }
     if (!totalBytes) throw new Error("remote media response was empty");
-    return { size: totalBytes, hash: hash.digest("hex") };
+    return { size: totalBytes, hash: hash.digest("hex"), header: header?.subarray(0, totalBytes) };
   } catch (error) {
     await reader.cancel?.().catch(() => {});
     await deps.fs.promises.rm(filePath, { force: true }).catch(() => {});

@@ -2389,6 +2389,21 @@ function mimeTypeForPath(filePath) {
   return "application/octet-stream";
 }
 
+// Older extractors used these same failures both for explicit denials and for
+// an unavailable retrieval method. Only the latter can use an existing copy.
+function historicalCacheRetryReason(operation) {
+  const failure = operation?.failure;
+  if (operation?.status !== "failed" || failure?.stage !== "download" || failure.retryable !== false ||
+      !["AUTH_REQUIRED", "UNAVAILABLE"].includes(failure.code) || canRetryMediaOperation(operation) || operation.priorUploadFailure ||
+      operation.observedMessageId || operation.videoReplyId || operation.deliveredFileCount || operation.sentMessageId ||
+      operation.sentMessageIds?.length || operation.staleRejected) return null;
+  const causes = [failure, ...(failure.causes || []), ...(operation.attempts || []).map(attempt => attempt.failure).filter(Boolean)];
+  if (causes.some(cause => cause.sourceAccessDenied || ["InstagramPageGate", "PrivateProfileNotFollowedException"].includes(cause.adapterErrorType) ||
+      ["AGE_RESTRICTED", "REGION_RESTRICTED", "UPLOAD_UNKNOWN"].includes(cause.code) ||
+      (!cause.instagramAssetFailure && [401, 403, 404, 410, 451].includes(cause.status)))) return null;
+  return failure.code;
+}
+
 async function maybeHandleMediaRetry(message) {
   if (groupMode(message.chat.id, "download") === "off") return false;
   const { urls, outsideLinks } = messageSocialLinks(message);
@@ -2412,7 +2427,8 @@ async function maybeHandleMediaRetry(message) {
     await telegram("sendMessage", { chat_id: message.chat.id, text: "Цю спробу вже успішно виконано.", reply_to_message_id: message.message_id }); return true;
   }
   if (!operation.failure) operation.failure = { code: "INTERRUPTED", retryable: true, stage: "download", reason: "Попередню спробу було перервано до завершення." };
-  if (!canRetryMediaOperation(operation) && !(operation.failure.code === "DURATION_LIMIT" && operation.failure.actualDurationSeconds <= socialVideoMaxDurationSeconds)) {
+  if (!canRetryMediaOperation(operation) && !historicalCacheRetryReason(operation) &&
+      !(operation.failure.code === "DURATION_LIMIT" && operation.failure.actualDurationSeconds <= socialVideoMaxDurationSeconds)) {
     await telegram("sendMessage", { chat_id: message.chat.id, text: failureMessage(operation.failure, behavior().locale), disable_notification: true, reply_to_message_id: message.message_id,
       ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}) });
     return true;
@@ -2473,6 +2489,7 @@ async function openRequestStatus(message, urls, retry) {
   }
   const request = { total: urls.length, locale: behavior().locale, failures: [], provider: socialVideoProviderForUrl(urls[0]), urls,
     ...(retry?.id ? { retryOperationId:retry.id } : retry?.sourceMessageId ? { retrySourceId:retry.sourceMessageId } : {}),
+    ...(retry?.cacheOnlyReason ? { cacheOnlyReason:retry.cacheOnlyReason } : {}),
     chatId: message.chat.id, topicId: judgeThreadId(message), originalId: message.message_id,
     messageId: replay && prior.videoReplyId || null };
   context.mediaRequest = request;
@@ -2620,8 +2637,9 @@ function closedSourceRetry(operation) {
 
 async function finishLimitedSource(message, operation) {
   const emptyVideoReply = operation.videoReplyId && operation.videoEditAttempts === 0 && !operation.videoEditPending;
-  const failure = { code: emptyVideoReply ? "TIMEOUT" : "SOURCE_RETRY_EXHAUSTED",
-    stage: emptyVideoReply ? "upload" : "download", retryable: true };
+  let failure = operation.failure;
+  if (emptyVideoReply) failure = { code: "TIMEOUT", stage: "upload", retryable: true };
+  else if (!failure || failure.code === "RATE_LIMIT") failure = { code: "SOURCE_RETRY_EXHAUSTED", stage: "download", retryable: true };
   const request = behaviorContext.getStore()?.mediaRequest;
   await mediaOperations.record({ ...operation, ...closedSourceRetry(operation), status: "failed", failure,
     ...(request?.messageId ? { errorMessageId: request.messageId } : {}) });
@@ -2633,7 +2651,7 @@ async function finishLimitedSource(message, operation) {
   if (emptyVideoReply) {
     await telegram("editMessageText", { chat_id: message.chat.id, message_id: operation.videoReplyId, text });
     if (operation.cacheId) await mediaCache.release(operation.cacheId);
-  } else await telegram("sendMessage", { ...assembleReplyTarget(message), text });
+  } else await telegram("sendMessage", { ...assembleReplyTarget(message), text, disable_notification: true });
   return true;
 }
 
@@ -2649,13 +2667,13 @@ async function waitForMediaSource(message, operation, failure, { contacted, star
   const expiresAt = previous?.expiresAt ?? (startedAt + 30 * 60 * 1000);
   const retryAt = Math.min(expiresAt, now + Math.max(1, failure.retryAfterSeconds || 60) * 1000);
   const sourceRetry = { updateId, attempts, expiresAt, retryAt };
-  if (attempts >= 3 || now >= expiresAt) return finishLimitedSource(message, { ...operation, sourceRetry });
+  if (attempts >= 3 || now >= expiresAt) return finishLimitedSource(message, { ...operation, failure, sourceRetry });
   const waiting = await mediaOperations.record({ ...operation, status: "waiting_source", failure, sourceRetry });
   if (waiting.status === "failed") {
     const request = behaviorContext.getStore()?.mediaRequest;
     await mediaOperations.record({ ...waiting, ...closedSourceRetry(waiting), ...(request?.messageId ? {errorMessageId: request.messageId} : {}) });
     if (request) return operationOutcome(waiting);
-    await telegram("sendMessage", { ...assembleReplyTarget(message), text: linkNotice(message, failureMessage(waiting.failure, behavior().locale)) });
+    await telegram("sendMessage", { ...assembleReplyTarget(message), disable_notification: true, text: linkNotice(message, failureMessage(waiting.failure, behavior().locale)) });
     return true;
   }
   return deferredMedia(waiting);
@@ -2714,6 +2732,8 @@ async function maybeHandleSocialVideo(message, retry = null, { anchored = false 
 
   const { urls, outsideLinks } = retry ? { urls: [retry.url] } : messageSocialLinks(message);
   if (!urls.length || (!retry && !addressedMediaDownload(outsideLinks, botInfo?.username))) return false;
+  const cacheOnlyReason = historicalCacheRetryReason(retry);
+  if (cacheOnlyReason) retry = { ...retry, cacheOnlyReason };
   await openRequestStatus(message, urls, retry);
   return startMediaRequest(message, urls, retry, anchored);
 }
@@ -2745,6 +2765,7 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
   const messageText = extractMessageText(message);
   const provider = socialVideoProviderForUrl(url);
 
+  const requestedCacheOnly = retry?.cacheOnlyReason;
   if (retry?.id) retry = (await mediaOperations.read()).find(operation => operation.id === retry.id) || retry;
   const recovered = retry ? (retry.lastRequest?.messageId === message.message_id ? retry : null)
     : await mediaOperations.forSourceMessage(message, judgeThreadId(message), url);
@@ -2753,6 +2774,10 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
   const updateId = behaviorContext.getStore()?.durableUpdateId;
   const request = behaviorContext.getStore()?.mediaRequest;
   if (recovered && ["failed", "unknown", "done"].includes(recovered.status)) return operationOutcome(recovered);
+  const historicalReason = historicalCacheRetryReason(retry);
+  const cacheOnlyReason = requestedCacheOnly || request?.cacheOnlyReason || retry?.cacheOnlyReason || historicalReason;
+  if (retry?.status === "failed" && retry.failure && !canRetryMediaOperation(retry) && !historicalReason &&
+      !(retry.failure.code === "DURATION_LIMIT" && retry.failure.actualDurationSeconds <= socialVideoMaxDurationSeconds)) return operationOutcome(retry);
   if (recovered && allMediaAcknowledged(recovered)) {
     await mediaOperations.record({ ...recovered, ...closedSourceRetry(recovered), status: "done", failure: null });
     if (recovered.cacheId) await mediaCache.release(recovered.cacheId);
@@ -2781,6 +2806,9 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
     !retry.priorUploadFailure && !retry.videoReplyId && !retry.deliveredFileCount && !retry.sentMessageIds?.length && !retry.staleRejected;
   const savedPublication = sourceOnlyRetry
     ? await mediaCache.forDelivery({ ...cacheScope, sourceUrl: url, verifiedPublication: true }) : null;
+  if (cacheOnlyReason && !savedPublication && (historicalReason || !retry?.cacheOnlyReason)) {
+    return { mediaFailure: historicalReason ? retry.failure : { code:cacheOnlyReason } };
+  }
   const wait = instagramRetryWait(retry);
   if (wait > 0 && !savedPublication) {
     if (request) {
@@ -2858,6 +2886,8 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
   let preparedCache;
   try {
     operation = await mediaOperations.record({ ...(retry || {}), chatId: message.chat.id, threadId: judgeThreadId(message), topicId: judgeThreadId(message),
+      ...(cacheOnlyReason ? { cacheOnlyReason } : {}),
+      ...(cacheOnlyReason && savedPublication ? { cacheId:savedPublication.id } : {}),
       ...(retry?.sourceRetry && retry.sourceRetry.updateId !== updateId ? { sourceRetry: null } : {}),
       userId: message.from.id, sourceMessageId: retry?.sourceMessageId || message.message_id, url, status: "running",
       trigger: retry?.trigger || { messageId: message.message_id, sender: displayName(message.from), kind: retry ? "requested" : "automatic-link", automaticDownloads: canDownloadMedia(message) },
@@ -2876,8 +2906,12 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
     const photoLinks = provider === "tiktok" && message._mediaLinkNumber
       ? messageSocialLinks(message).urls.map(mediaReference).filter(ref => ref?.kind === "photo") : [];
     let initialPhoto;
-    let cached = savedPublication || await mediaCache.forDelivery({ ...cacheScope,
-      ...(retry?.cacheId ? { entryId: retry.cacheId } : { messageId: retry?.sourceMessageId, sourceUrl: url, verifiedPublication: !retry?.sourceMessageId }) });
+    let cached = savedPublication;
+    if (!cached && (!cacheOnlyReason || retry?.cacheId)) {
+      cached = await mediaCache.forDelivery({ ...cacheScope,
+        ...(retry?.cacheId ? { entryId: retry.cacheId } : { messageId: retry?.sourceMessageId, sourceUrl: url, verifiedPublication: !retry?.sourceMessageId }),
+        ...(cacheOnlyReason ? { sourceUrl:url, verifiedPublication:true } : {}) });
+    }
     if (cached) {
       try {
         cached.source = rebindVerifiedMediaSource(cached.source, url);
@@ -2903,6 +2937,7 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
     if (retry?.deliveredFileCount && !cached?.complete && !(recoverRejectedReference && cached)) {
       throw Object.assign(new Error("Prepared media for the remaining files has expired"), { code: "MEDIA_RETRY_CACHE_MISSING" });
     }
+    if (cacheOnlyReason && !cached?.complete) throw Object.assign(new Error("The verified cached publication is unavailable"), {code:cacheOnlyReason});
     const downloadStarted = Date.now();
     const onResolved = async (resolvedUrl, { photoAttempt = false } = {}) => {
       const target = mediaReference(resolvedUrl), photo = requestedTikTokPhoto(photoLinks, target);
@@ -3051,7 +3086,7 @@ async function deliverSocialPublication(message, url, retry = null, { anchored =
       operation = await mediaOperations.record({ ...operation, status: "prepared", failure: null, staleRejected: true });
       await mediaCache.invalidateReceipts(preparedCache.id, mediaFiles.slice(delivered).map((_, index) => delivered + index));
       if (mediaFiles.slice(delivered).some(file => !file.filePath)) {
-        if (anchored) throw error;
+        if (anchored || cacheOnlyReason) throw error;
         stage = "download";
         const fresh = await downloadBudgetedMedia(url, budget.reservation, message._mediaDeadline, {
           photoLinks, initialPhoto: source.resolved.kind === "photo" && isTikTokPhotoSet(source, mediaFiles) ? source.resolved.url : undefined });
@@ -4370,7 +4405,7 @@ async function performMessageAction(message, question, decision, context) {
     const [operation] = matches;
     const url = operation?.url || selectedUrl;
     if (!url || !socialVideoProviderForUrl(url)) return "У цьому повідомленні не знайшов підтримуваного посилання для завантаження.";
-    if (operation?.failure && !canRetryMediaOperation(operation)) return failureMessage(operation.failure, behavior().locale);
+    if (operation?.failure && !canRetryMediaOperation(operation) && !historicalCacheRetryReason(operation)) return failureMessage(operation.failure, behavior().locale);
     if(!canDownloadMedia(message))return "Завантаження медіа зараз вимкнено в налаштуваннях бота.";
     const handled=await maybeHandleSocialVideo(message, operation || {url,sourceMessageId:target.messageId});
     if (handled?.mediaWork) return handled;

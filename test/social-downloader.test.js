@@ -301,7 +301,7 @@ test("Instagram photos and mixed albums preserve native identity and order witho
     items: [{ index: 0, mediaId: "100", kind: "image", url: "https://scontent.example.cdninstagram.com/photo.jpg" },
       { index: 1, mediaId: "101", kind: "video", url: "https://video.example.fbcdn.net/clip.mp4" }] };
   const deps = { ...baseDeps(storage), instagramScript: "/adapter.py", execFileAsync: async () => ({ stdout: JSON.stringify(manifest) }),
-    fetch: async url => { fetched.push(url); return mockResponse({ headers: { "content-type": url.endsWith("jpg") ? "image/jpeg" : "video/mp4" } }); } };
+    fetch: async url => { fetched.push(url); return instagramFileResponse(url.endsWith("jpg") ? "image/jpeg" : "video/mp4"); } };
   const result = await downloadInstagramPost("https://www.instagram.com/p/BA/?igsh=tracking", "/tmp/social", deps);
   assert.equal(result.source.status, "verified"); assert.equal(result.source.provider, "instaloader");
   assert.deepEqual(result.files.map(file => file.mediaKind), ["image", "video"]);
@@ -700,6 +700,12 @@ function mockFs() {
   };
 }
 
+function instagramFileResponse(mime, { declared = mime } = {}) {
+  const signatures = { "image/jpeg": "ffd8ffe000104a464946000101", "video/mp4": "000000186674797069736f6d0000000069736f6d6d703432" };
+  const data = Buffer.from(signatures[mime], "hex");
+  return mockResponse({ headers: { "content-type": declared }, chunks: [data.subarray(0, 2), data.subarray(2)] });
+}
+
 function mockResponse({ ok = true, status = 200, headers = {}, chunks = [Buffer.from("ok")] } = {}) {
   const entries = new Map(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
   let index = 0;
@@ -750,7 +756,7 @@ test('all Instagram post/Reel aliases use the same ordered native adapter and ex
     const result = await downloadSocialVideo(`https://www.instagram.com/${alias}/BA/`, {
       ...baseDeps(fs), instagramSession: session, instagramScript: '/adapter.py',
       execFileAsync: async (_command, args) => { calls++; assert.ok(args.includes('/adapter.py')); assert.equal(args[args.indexOf('--session') + 1], session); return { stdout: JSON.stringify(manifest) }; },
-      fetch: async () => mockResponse({ headers: { 'content-type': 'application/octet-stream' } }),
+      fetch: async target => instagramFileResponse(target.endsWith('jpg') ? 'image/jpeg' : 'video/mp4', { declared: 'application/octet-stream' }),
     });
     assert.equal(calls, 1); assert.equal(result.files.length, 2);
     assert.deepEqual(result.files.map(item => item.sourceItemId), ['native:100', 'native:101']);
@@ -796,7 +802,7 @@ test('a post whose photo adapter failed recovers a native image from the same yt
     fetch: async (target, options) => {
       fetched.push(target);
       assert.equal(options.redirect, 'manual');
-      return mockResponse({ headers: { 'content-type': 'image/jpeg' } });
+      return instagramFileResponse('image/jpeg');
     },
   });
   assert.equal(calls.length, 2);
@@ -856,6 +862,137 @@ test('a restricted post stops on evidenced access denial, while generic adapter 
     if (expectedCalls === 1) await assert.rejects(result);
     else assert.equal((await result).mediaKind, 'video');
     assert.equal(calls, expectedCalls);
+  }
+});
+
+function instagramManifest(kind) {
+  return { id: "BA", publicationId: "64", url: "https://www.instagram.com/p/BA/", count: 1,
+    items: [{ index: 0, mediaId: "64", kind, url: "https://one.cdninstagram.com/original" }] };
+}
+
+test("each Instagram CDN redirect stays on an allowed HTTPS host before contacting it", async () => {
+  const first = "https://one.cdninstagram.com/original", second = "https://one.cdninstagram.com/step";
+  const allowed = "https://two.fbcdn.net/file";
+  for (const kind of ["image", "video"]) {
+    for (const last of [allowed, "https://outside.example/file", "http://two.fbcdn.net/file",
+      "https://user@two.fbcdn.net/file", "https://two.fbcdn.net:444/file", first]) {
+      const visits = [];
+      const result = downloadSocialVideo("https://www.instagram.com/p/BA/", { ...baseDeps(mockFs()), instagramScript: "/adapter.py",
+        execFileAsync: async (_cmd, args) => {
+          assert.ok(args.includes("/adapter.py"), "An unverified redirect must stop all extractors");
+          return { stdout: JSON.stringify(instagramManifest(kind)) };
+        },
+        fetch: async (target, options) => {
+          visits.push(target);
+          assert.equal(options.redirect, "manual");
+          if (target === first || target === second) return new Response(null, { status: 307, headers: { location: target === first ? "/step" : last } });
+          assert.equal(target, allowed);
+          return instagramFileResponse(kind === "image" ? "image/jpeg" : "video/mp4");
+        },
+      });
+      if (last === allowed) {
+        assert.equal((await result).files[0].mediaKind, kind);
+        assert.deepEqual(visits, [first, second, allowed]);
+      } else {
+        await assert.rejects(result, { code: "MEDIA_SOURCE_UNVERIFIED" });
+        assert.deepEqual(visits, [first, second]);
+      }
+    }
+  }
+});
+
+test("Instagram manifest media must match both explicit MIME and body signature, even when generic or mislabelled", async () => {
+  for (const kind of ["image", "video"]) {
+    const expected = kind === "image" ? "image/jpeg" : "video/mp4";
+    const other = kind === "image" ? "video/mp4" : "image/jpeg";
+    for (const [body, declared] of [[expected, other], [other, expected], [other, "application/octet-stream"], [expected, "text/html"]]) {
+      let inspections = 0, requests = 0;
+      await assert.rejects(downloadSocialVideo("https://www.instagram.com/p/BA/", { ...baseDeps(mockFs()), instagramScript: "/adapter.py",
+        execFileAsync: async () => { inspections++; return { stdout: JSON.stringify(instagramManifest(kind)) }; },
+        fetch: async () => { requests++; return instagramFileResponse(body, { declared }); },
+      }), error => error.code === (kind === "image" ? "MEDIA_IMAGE_INVALID" : "MEDIA_VIDEO_INVALID") && mediaFailure(error).code === "FORMAT");
+      assert.equal(inspections, 1); assert.equal(requests, 1);
+    }
+  }
+});
+
+test("a generic Instagram CDN response keeps the real image format and exact bytes", async t => {
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "instagram-cdn-type-"));
+  t.after(() => fs.promises.rm(directory, { recursive: true, force: true }));
+  const png = await fs.promises.readFile(new URL("../test-support/media-photo.png", import.meta.url));
+  const manifest = instagramManifest("image");
+  manifest.items[0].url += ".mp4";
+  const result = await downloadInstagramPost(manifest.url, directory, { ...baseDeps(fs), instagramScript: "/adapter.py",
+    execFileAsync: async () => ({ stdout: JSON.stringify(manifest) }),
+    fetch: async () => mockResponse({ headers: { "content-type": "application/octet-stream" }, chunks: [png.subarray(0, 1), png.subarray(1)] }),
+  });
+  const [file] = result.files;
+  assert.equal(file.mimeType, "image/png"); assert.equal(path.extname(file.filePath), ".png");
+  assert.deepEqual(await fs.promises.readFile(file.filePath), png);
+  assert.deepEqual(await fs.promises.readdir(directory), [path.basename(file.filePath)]);
+});
+
+test("an expired verified Instagram CDN URL recovers only the original single image or video, never an album fragment", async () => {
+  const newAsset = "https://two.fbcdn.net/new-image";
+  for (const status of [403, 404, 429]) {
+    for (const [expected, alternate] of [["image", "image"], ["video", "video"], ["image", "video"], ["video", "image"], ["album", "video"]]) {
+      const manifest = instagramManifest(expected === "album" ? "image" : expected);
+      if (expected === "album") {
+        manifest.items.push({ index: 1, mediaId: "65", kind: "video", url: "https://two.fbcdn.net/second" });
+        manifest.count++;
+      }
+      let inspections = 0, secondaryDownloads = 0;
+      const url = expected === "video" ? "https://www.instagram.com/reel/BA/" : manifest.url;
+      const native = { extractor_key: "Instagram", id: "BA", duration: 1, ...(alternate === "image" ? {
+        _type: "playlist", entries: [], instagram_single_photo: { publication_id: "64", url: newAsset } } : {}) };
+      const delivery = downloadSocialVideo(url, { ...baseDeps(mockFs()), instagramScript: "/adapter.py",
+        execFileAsync: async (_cmd, args) => {
+          if (args.includes("/adapter.py")) return { stdout: JSON.stringify(manifest) };
+          if (args.includes("--dump-single-json")) { inspections++; return { stdout: JSON.stringify(native) }; }
+          assert.ok(args.includes("--load-info-json")); secondaryDownloads++; return { stdout: "" };
+        },
+        fetch: async target => {
+          if (target === manifest.items[0].url) return new Response(null, { status, headers: { "retry-after": "45" } });
+          assert.equal(target, newAsset); secondaryDownloads++; return instagramFileResponse("image/jpeg");
+        },
+        findDownloadedVideo: async () => ({ filePath: "/tmp/social/native.mp4", size: 10 }),
+      });
+      if (status === 429 || expected === "album") {
+        await assert.rejects(delivery, error => error.status === status && error.instagramAssetFailure === true &&
+          (status !== 429 || (error.retryAfterSeconds === 45 && mediaFailure(error).code === "RATE_LIMIT")));
+        assert.equal(inspections, 0); assert.equal(secondaryDownloads, 0);
+      } else if (expected !== alternate) {
+        await assert.rejects(delivery, error => error.attempts?.at(-1).error.code === "MEDIA_SOURCE_MISMATCH");
+        assert.equal(inspections, 1); assert.equal(secondaryDownloads, 0);
+      } else {
+        const result = await delivery;
+        assert.equal((result.files?.[0] || result).mediaKind, expected);
+        assert.equal(result.source.resolved.id, "BA");
+        assert.equal(result.previousFailure.instagramAssetFailure, true);
+        assert.equal(inspections, 1); assert.equal(secondaryDownloads, 1);
+      }
+    }
+  }
+});
+
+test("an expired Instagram CDN asset followed by a confirmed native throttle retains the actual retry window", async () => {
+  for (const status of [403, 404]) {
+    const manifest = instagramManifest("video");
+    let inspections = 0, fetches = 0;
+    await assert.rejects(downloadSocialVideo(manifest.url, { ...baseDeps(mockFs()), instagramScript: "/adapter.py",
+      execFileAsync: async (_cmd, args) => {
+        if (args.includes("/adapter.py")) return { stdout: JSON.stringify(manifest) };
+        assert.ok(args.includes("--dump-single-json")); inspections++;
+        throw Object.assign(new Error("HTTP 429"), { status: 429, retryAfterSeconds: 84 });
+      },
+      fetch: async () => { fetches++; return new Response(null, { status }); },
+    }), error => {
+      const failure = mediaFailure(error);
+      assert.equal(failure.code, "RATE_LIMIT"); assert.equal(failure.confirmedRateLimit, true); assert.equal(failure.retryAfterSeconds, 84);
+      assert.deepEqual(failure.causes.map(cause => cause.provider), ["instaloader", "yt-dlp"]);
+      assert.equal(failure.causes[0].instagramAssetFailure, true); return true;
+    });
+    assert.equal(inspections, 1); assert.equal(fetches, 1);
   }
 });
 

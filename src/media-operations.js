@@ -8,8 +8,12 @@ import { say } from "./helpers.js";
 const durationText = n => { const seconds = Math.ceil(n); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; };
 const activeSourceRetry = op => !op?.duplicateOf && op?.sourceRetry && ["waiting_source", "running", "prepared", "uploading"].includes(op.status);
 function limitedInstagramFallback(causes) {
-  if (causes?.length === 2 && causes[0].provider === "instaloader" && causes[0].code === "AUTH_REQUIRED" &&
-      causes[1].provider === "yt-dlp" && causes[1].code === "RATE_LIMIT" && causes[1].retryable && !causes[1].fallbackDisabled) return causes[1];
+  if (causes?.length !== 2) return;
+  const [primary, fallback] = causes;
+  if (primary.provider !== "instaloader" || fallback.provider !== "yt-dlp" ||
+      fallback.code !== "RATE_LIMIT" || !fallback.retryable || fallback.fallbackDisabled) return;
+  if (primary.code === "AUTH_REQUIRED" ||
+      (primary.instagramAssetFailure && [403, 404].includes(primary.status) && fallback.confirmedRateLimit)) return fallback;
 }
 
 export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes = 48 * 1024 * 1024, stage = "download" } = {}) {
@@ -106,6 +110,9 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
     reason = "Точну причину поки не визначено. Діагностику збережено для перевірки; спробуй інше публічне посилання або надішли файл.";
   }
   return { code, retryable, reason, stage, status: status || null,
+    ...(error?.instagramAssetFailure === true ? { instagramAssetFailure: true } : {}),
+    ...(stage === "download" && (error?.sourceAccessDenied === true ||
+      ["InstagramPageGate", "PrivateProfileNotFollowedException"].includes(error?.adapterErrorType)) ? { sourceAccessDenied: true } : {}),
     ...(stage === "upload" && ["sendPhoto", "sendVideo", "sendMediaGroup", "sendDocument", "editMessageMedia"].includes(error?.method) &&
       Number.isInteger(status) && status >= 400 && status < 500 && status !== 429 && error.telegramErrorCode === status
       ? { telegramRejected: true } : {}),
@@ -122,9 +129,9 @@ export function failureMessage(failure, locale = "uk") {
   const wait = Math.ceil(failure.retryAfterSeconds || 0);
   switch (failure.code) {
     case "SOURCE_RETRY_EXHAUSTED":
-      return text("Instagram kept limiting requests. I couldn’t retrieve this post.", "Instagram продолжает ограничивать запросы. Не удалось получить эту публикацию.", "Instagram продовжує обмежувати запити. Не вдалося отримати цю публікацію.");
+      return text("The service kept limiting downloads.", "Сервис продолжает ограничивать скачивание.", "Сервіс продовжує обмежувати завантаження.");
     case "SOURCE_RETRY_CAPACITY":
-      return text("The Instagram download queue is full. This post couldn’t be queued.", "Очередь загрузок из Instagram заполнена. Эту публикацию не удалось поставить в очередь.", "Черга завантажень з Instagram заповнена. Цю публікацію не вдалося додати до черги.");
+      return text("The download queue is full.", "Очередь загрузок заполнена.", "Черга завантажень заповнена.");
     case "GROUP_RATE_LIMIT": case "URL_BACKOFF": case "RATE_LIMIT": case "IN_PROGRESS": case "CAPACITY": case "FAILURE_COOLDOWN":
       return wait > 0
         ? text(`Try again in ${wait} s.`, `Повтори через ${wait} с.`, `Повтори через ${wait} с.`)
