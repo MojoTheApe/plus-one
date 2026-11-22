@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+test('public Instagram pages return only the requested native post or its explicit restriction', () => {
+  const result = spawnSync('python3', ['-B', path.resolve('test/instagram-public-page-fixture.py')], { encoding:'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Verified public Instagram page routing/);
+});
+
 test('the Instagram adapter binds native numeric identity and preserves ordered photo/video children and the selection cap', () => {
   const program = `
 import importlib.util,sys,json

@@ -7,6 +7,30 @@ import { MediaOperations, mediaFailure, isMediaRetryText, canRetryMediaOperation
 import { nativeExtractorSource } from "../src/media-source.js";
 import { socialDownloadFailure } from "../src/social-downloader.js";
 
+test("stored download failures distinguish confirmed access restrictions from incomplete source responses", () => {
+  const reason = { code: "UNAVAILABLE", adapterErrorType: "InstagramPageGate" };
+  assert.equal(mediaFailure(reason).sourceAccessDenied, true);
+  assert.equal(mediaFailure({ code: "AUTH_REQUIRED", adapterErrorType: "PrivateProfileNotFollowedException" }).sourceAccessDenied, true);
+  assert.equal(mediaFailure({ code: "AUTH_REQUIRED", sourceAccessDenied: true }).sourceAccessDenied, true);
+  assert.equal(mediaFailure({ code: "AUTH_REQUIRED" }).sourceAccessDenied, undefined);
+  assert.equal(mediaFailure({ code: "UNAVAILABLE", status: 403 }).sourceAccessDenied, undefined);
+  assert.equal(mediaFailure({ status: 403, instagramAssetFailure: true }).instagramAssetFailure, true);
+  const combined = mediaFailure({attempts: [{provider: "instaloader", error: reason}]});
+  assert.equal(combined.causes[0].sourceAccessDenied, true);
+});
+
+test("a confirmed source limit after an expired Instagram file pauses further source requests", () => {
+  for (const status of [403, 404]) {
+    const stale = {status, instagramAssetFailure: true, downloader: "instaloader"};
+    const failure = mediaFailure(socialDownloadFailure(stale, {status: 429, retryAfterSeconds: 85}, "yt-dlp"));
+    assert.equal(failure.code, "RATE_LIMIT");
+    assert.equal(failure.confirmedRateLimit, true);
+    assert.equal(failure.retryAfterSeconds, 85);
+    const unconfirmed = mediaFailure(socialDownloadFailure(stale, {code: "RATE_LIMIT"}, "yt-dlp"));
+    assert.equal(unconfirmed.code, "UNAVAILABLE");
+  }
+});
+
 test("canonical retry fast path leaves clearly Russian requests to the language gate", () => {
   for (const value of ["повтори", "спробуй ще раз", "retry", "@ExampleBot повторити будь ласка"]) assert.equal(isMediaRetryText(value, "ExampleBot"), true);
   for (const value of ["попробуй еще раз", "повтори пожалуйста", "Я хотів розповісти, що він сказав retry"]) assert.equal(isMediaRetryText(value, "ExampleBot"), false);

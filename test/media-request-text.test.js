@@ -41,3 +41,27 @@ test("many failed links produce one concise readable explanation", () => {
   assert.match(text, /1, 2, 3, 4, 5, 6 \(\+104\)/);
   assert.doesNotMatch(text, /\n/);
 });
+
+test("only confirmed content restrictions give region and age reasons in all bot languages", () => {
+  const byRegion = mediaFailure({code:"REGION_RESTRICTED"});
+  const byAge = mediaFailure({attempts:[
+    {provider:"instaloader", error:{code:"AUTH_REQUIRED"}}, {provider:"instagram-embed", error:{code:"AGE_RESTRICTED"}},
+  ]});
+  const unknown = mediaFailure({code:"THREADS_RENDER_UNAVAILABLE"});
+  for (const failure of [byRegion, byAge]) assert.equal(failure.retryable, false);
+  assert.equal(byAge.causes[1].code, "AGE_RESTRICTED");
+  assert.equal(unknown.code, "SOURCE_CONTENT_UNAVAILABLE");
+  assert.equal(mediaFailure({status:429,code:"REGION_RESTRICTED"}).code, "RATE_LIMIT");
+  assert.notEqual(mediaFailure({message:"Content is unavailable to certain audiences"}).code, "REGION_RESTRICTED");
+  const failures = [{number:1,provider:"threads",failure:byRegion}, {number:2,provider:"instagram",failure:byAge},
+    {number:3,provider:"threads",failure:unknown}];
+  const expected = {
+    en:["Threads restricted access in the bot’s region.","Instagram restricted access by age.","Threads didn’t show the post."],
+    ru:["Threads ограничил доступ в регионе бота.","Instagram ограничил доступ по возрасту.","Threads не показал публикацию."],
+    uk:["Threads обмежив доступ у регіоні бота.","Instagram обмежив доступ за віком.","Threads не показав публікацію."],
+  };
+  for (const [locale, reasons] of Object.entries(expected)) {
+    assert.deepEqual(mediaRequestFailureText(failures, locale, 3).split("\n").map(line => line.split(" — ")[1]), reasons);
+  }
+  assert.equal(mediaRequestFailureText([failures[2], {...failures[2],number:4}], "uk", 4), "Посилання 3, 4 — Threads не показав публікації.");
+});

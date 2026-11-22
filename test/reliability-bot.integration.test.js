@@ -361,6 +361,115 @@ test('one story cannot send three unverified images or cache them as its verifie
   assert.equal(operation.deliveredFileCount,undefined);
 });
 
+for (const semantic of [false, true]) test(`historical access failures can use only a scoped, complete verified copy on ${semantic ? 'semantic' : 'canonical'} retry`, async t => {
+  const f = await fixture(t);
+  const cache = new MediaCache(path.join(f.root, 'runtime/media-cache'));
+  const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  let downloads = 0, target;
+  f.setDownloader(async () => { downloads++; throw new Error('historical access retry contacted the source'); });
+  f.setAnswer(async () => ({text:JSON.stringify({action:'download', language:'uk', targetMessageId:target}), searchStatus:{succeeded:false}}));
+  const cases = [
+    ['complete', {code:semantic ? 'UNAVAILABLE' : 'AUTH_REQUIRED'}, true],
+    ['missing', {code:'AUTH_REQUIRED'}, false],
+    ['other-topic', {code:'UNAVAILABLE'}, false],
+    ['other-chat', {code:'UNAVAILABLE'}, false],
+    ['other-bot', {code:'UNAVAILABLE'}, false],
+    ['partial', {code:'UNAVAILABLE'}, false],
+    ['unverified', {code:'UNAVAILABLE'}, false],
+    ['explicit', {code:'AUTH_REQUIRED', causes:[{code:'UNAVAILABLE', status:403}]}, false],
+    ['age', {code:'AGE_RESTRICTED'}, false],
+    ['region', {code:'REGION_RESTRICTED'}, false],
+    ['gate', {code:'UNAVAILABLE', sourceAccessDenied:true}, false],
+    ['unknown-upload', {code:'AUTH_REQUIRED'}, false],
+  ];
+  for (const [index, [name, reason, shouldSend]] of cases.entries()) {
+    target = 500 + index;
+    const url = 'https://www.instagram.com/p/fixture' + index + '/';
+    const source = nativeExtractorSource(url, {extractor_key:'Instagram',id:'fixture'+index});
+    const filePath = path.join(f.root, index+'.png');
+    await fs.writeFile(filePath, await photoBytes(index));
+    if (name !== 'missing') {
+      const files=[{filePath,sourceItemId:'publication:fixture'+index,mediaKind:'image',mimeType:'image/png'}];
+      if (name === 'partial') files.push({...files[0],sourceItemId:'second',filePath:path.join(f.root,'missing.png')});
+      const entry = await cache.put({chatId:name === 'other-chat' ? -456 : -123,topicId:name === 'other-topic' ? 10 : 9,
+        sourceMessageId:100+index, sourceUrl:url, source:name === 'unverified' ? null : source, files});
+      if (name === 'other-bot') {
+        await cache.bind(entry.id,[3001],{items:[{message_id:3001,photo:[{file_id:'foreign-bot-file'}]}],botId:99});
+        await fs.unlink(entry.files[0].filePath);
+      }
+    }
+    await journal.record({id:'case-'+index, chatId:-123, topicId:9, userId:88, sourceMessageId:target, errorMessageId:700+index,
+      url, status:'failed', ...(name === 'unknown-upload' ? {priorUploadFailure:{code:'UPLOAD_UNKNOWN'}} : {}),
+      failure:{stage:'download',retryable:false,...reason}});
+    await f.handle({ message_id:target, text:'звичайна репліка' });
+    const before = f.calls.filter(c=>c.method==='sendPhoto').length;
+    await f.handle({ message_id:1500+index, text:semantic ? '@ReliabilityTestBot спробуй отримати це фото ще раз' : 'повтори',
+      reply_to_message:{message_id:target,from:{id:88},text:url} });
+    assert.equal(downloads, 0, name);
+    const sent = f.calls.filter(c=>c.method==='sendPhoto').slice(before);
+    assert.equal(sent.length, Number(shouldSend), name);
+    if (shouldSend) assert.deepEqual(Buffer.from(await sent[0].payload.photo.arrayBuffer()), await photoBytes(index));
+    const op = (await journal.read()).find(o=>o.id==='case-'+index);
+    assert.equal(op.status, shouldSend ? 'done' : 'failed', name);
+  }
+});
+
+test('a rejected receipt on a cache-only retry never fetches the historical source, including after restart', async t => {
+  const f = await fixture(t), url = 'https://www.instagram.com/p/saved/';
+  const cache = new MediaCache(path.join(f.root, 'runtime/media-cache'));
+  const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  const filePath = path.join(f.root,'saved.png'); await fs.writeFile(filePath, await photoBytes());
+  const source = nativeExtractorSource(url,{extractor_key:'Instagram',id:'saved'});
+  const entry = await cache.put({chatId:-123,topicId:9,sourceMessageId:400,sourceUrl:url,source,
+    files:[{filePath,sourceItemId:'publication:saved',mediaKind:'image',mimeType:'image/png'}]});
+  await cache.bind(entry.id,[3001],{items:[{message_id:3001,photo:[{file_id:'expired'}]}],botId:77});
+  await fs.unlink(entry.files[0].filePath);
+  await journal.record({id:'original',chatId:-123,topicId:9,userId:88,sourceMessageId:500,errorMessageId:510,url,
+    status:'failed',failure:{code:'UNAVAILABLE',retryable:false,stage:'download'}});
+  let fetches=0, sends=0;
+  const noSource=async()=>{fetches++;throw new Error('must not contact source');};
+  f.setDownloader(noSource);
+  f.setUpload(async(method,form)=>{
+    assert.equal(method,'sendPhoto'); assert.equal(form.get('photo'),'expired'); sends++;
+    return Response.json({ok:false,description:'wrong file identifier',error_code:400},{status:400});
+  });
+  await f.handle({message_id:1500,text:'повтори',reply_to_message:{message_id:510,from:{id:77,is_bot:true}}});
+  const [failed]=await journal.read();
+  assert.equal(failed.status,'failed'); assert.equal(failed.cacheOnlyReason,'UNAVAILABLE');
+  assert.equal(sends,1); assert.equal(fetches,0);
+  await f.restart(); f.setDownloader(noSource);
+  await f.handle({message_id:1501,text:'повтори',reply_to_message:{message_id:failed.errorMessageId,from:{id:77,is_bot:true}}});
+  assert.equal(fetches,0);
+  assert.equal(f.calls.filter(c=>c.method==='sendPhoto').length,1);
+});
+
+test('an admitted historical retry keeps its cache-only intent when the journal changes before delivery or restart', async t => {
+  const f = await fixture(t), journal = new MediaOperations(path.join(f.root,'runtime/media.json'));
+  const url='https://www.instagram.com/p/fixture/';
+  const op=await journal.record({chatId:-123,topicId:9,userId:88,sourceMessageId:500,errorMessageId:510,url,
+    status:'failed',failure:{code:'AUTH_REQUIRED',stage:'download',retryable:false}});
+  const original={update_id:1500,message:{...instagramUpdate(1500).message,text:'повтори',
+    reply_to_message:{message_id:510,from:{id:77,is_bot:true}}}};
+  let snapshot, fetches=0;
+  const noSource=async()=>{fetches++;throw new Error('source contacted');};
+  f.setDownloader(noSource);
+  f.setStatus(async (method,payload)=>{
+    if (method === 'sendMessage' && payload.text === mediaPreparingText('uk')) {
+      [snapshot]=await f.pending();
+      await journal.record({...op, failure:{code:'TIMEOUT',stage:'download',retryable:true}});
+    }
+  });
+  await f.queue(original);
+  assert.equal(snapshot?.mediaRequest?.cacheOnlyReason,'AUTH_REQUIRED');
+  assert.equal(fetches,0);
+  await fs.writeFile(path.join(f.root,'runtime/inbox.json'),JSON.stringify({version:1,offset:1500,pending:[snapshot]}));
+  await f.restart(); f.setDownloader(noSource);
+  await f.queue(original);
+  assert.deepEqual(await f.pending(),[]);
+  assert.equal(fetches,0);
+  assert.equal(f.calls.filter(c=>c.method==='sendPhoto').length,0);
+});
+
 for (const semantic of [false, true]) test(`a legacy masked rate limit supports ${semantic ? 'semantic' : 'canonical'} explicit retry through fresh verified retrieval`, async t => {
   const f = await fixture(t); let downloads = 0;
   const url = 'https://www.instagram.com/reel/recovery/';
@@ -2964,3 +3073,90 @@ for (const order of ["short first", "short last", "native video first", "native 
     assert.equal(fetched.includes(short), order === "late identity", "known destinations require no speculative render download");
   });
 }
+
+test('an Instagram retry during a source pause uses the complete verified copy saved for another message', async t => {
+  const f = await fixture(t);
+  const url = 'https://www.instagram.com/p/recovery/';
+  const source = nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'recovery' });
+  const filePath = path.join(f.root, 'saved.png');
+  await fs.writeFile(filePath, await photoBytes());
+  const cache = new MediaCache(path.join(f.root, 'runtime/media-cache'));
+  const copy = { chatId: -123, topicId: 9, sourceMessageId: 499, sourceUrl: url, source,
+    files: [{ filePath, mediaKind: 'image', mimeType: 'image/png', sourceItemId: 'publication:recovery' }] };
+  await cache.put(copy);
+  // A newer record without verified provenance must not hide the older complete copy.
+  await cache.put({ ...copy, sourceMessageId: 498, source: null });
+  const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  const operation = await journal.record({ chatId: -123, topicId: 9, userId: 88, sourceMessageId: 500, errorMessageId: 600,
+    url: 'https://www.instagram.com/reel/recovery/', status: 'failed', failure: { code: 'RATE_LIMIT', stage: 'download',
+      retryable: true, retryAfterSeconds: 180, causes: [
+        { provider: 'instaloader', code: 'AUTH_REQUIRED' }, { provider: 'yt-dlp', code: 'RATE_LIMIT', retryable: true },
+      ] } });
+  let requests = 0;
+  f.setDownloader(async () => { requests++; throw new Error('Unexpected source download'); });
+  await f.handle({ message_id: 1500, text: 'повтори', reply_to_message: { message_id: 600, from: { id: 77, is_bot: true }, text: 'Previous failure' } });
+  const saved = (await journal.read()).find(row => row.id === operation.id);
+  assert.equal(requests, 0);
+  assert.equal(saved.status, 'done');
+  assert.equal(saved.deliveryRoute, 'prepared-cache');
+  assert.equal(f.calls.filter(call => call.method === 'sendPhoto').length, 1);
+});
+
+test('Threads reports the final service failure after exhausting retries on the same quiet status', async t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const f = await fixture(t);
+  const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  let attempts = 0;
+  f.setDownloader(async () => {
+    attempts++;
+    if (attempts === 1) throw Object.assign(new Error('HTTP 429'), {status: 429, retryAfterSeconds: 65});
+    throw Object.assign(new Error('Service unavailable'), {status: 503});
+  });
+  await f.queue(instagramUpdate(9301, 'https://www.threads.com/@source/post/temporarilydown/'));
+  for (let i = 0; i < 2; i++) {
+    const [waiting] = await journal.read();
+    assert.equal(waiting.status, 'waiting_source');
+    now = waiting.sourceRetry.retryAt + 1;
+    await f.queue((await f.pending())[0]);
+  }
+  const [operation] = await journal.read();
+  assert.equal(attempts, 3);
+  assert.equal(operation.status, 'failed');
+  assert.equal(operation.failure.code, 'SERVICE_ERROR');
+  assert.equal(f.calls.filter(call => call.method === 'sendMessage').length, 1);
+  assert.equal(f.calls.filter(call => call.method === 'editMessageText').length, 1);
+});
+
+test('Threads quietly resumes after a real source limit and a transient response using the same status', async t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const f = await fixture(t);
+  const url = 'https://www.threads.com/@source/post/resume/';
+  const original = instagramUpdate(9300, url);
+  const filePath = path.join(f.root, 'threads.png');
+  await fs.writeFile(filePath, await photoBytes());
+  let requests = 0;
+  f.setDownloader(async () => {
+    requests++;
+    if (requests === 1) throw Object.assign(new Error('HTTP 429'), { status: 429, retryAfterSeconds: 65 });
+    if (requests === 2) throw Object.assign(new Error('Service unavailable'), { status: 503 });
+    return { source: verifiedMediaSource(url, { provider: 'threads-page', id: 'resume', owner: 'source' }),
+      files: [{ filePath, mediaKind: 'image', mimeType: 'image/png', sourceItemId: 'publication:resume' }] };
+  });
+  const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  await f.queue(original);
+  for (let attempts = 1; attempts <= 2; attempts++) {
+    const [waiting] = await journal.read();
+    assert.equal(waiting.status, 'waiting_source');
+    assert.equal(waiting.sourceRetry.attempts, attempts);
+    assert.ok(waiting.sourceRetry.retryAt > now);
+    now = waiting.sourceRetry.retryAt + 1;
+    await f.queue((await f.pending())[0]);
+  }
+  assert.equal(requests, 3);
+  assert.equal((await journal.read())[0].status, 'done');
+  assert.equal(f.calls.filter(call => call.method === 'sendMessage').length, 1);
+  assert.equal(f.calls.filter(call => call.method === 'editMessageText').length, 0);
+  assert.equal(f.calls.filter(call => call.method === 'sendPhoto').length, 1);
+});

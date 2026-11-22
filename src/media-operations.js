@@ -8,8 +8,12 @@ import { say } from "./helpers.js";
 const durationText = n => { const seconds = Math.ceil(n); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; };
 const activeSourceRetry = op => !op?.duplicateOf && op?.sourceRetry && ["waiting_source", "running", "prepared", "uploading"].includes(op.status);
 function limitedInstagramFallback(causes) {
-  if (causes?.length === 2 && causes[0].provider === "instaloader" && causes[0].code === "AUTH_REQUIRED" &&
-      causes[1].provider === "yt-dlp" && causes[1].code === "RATE_LIMIT" && causes[1].retryable && !causes[1].fallbackDisabled) return causes[1];
+  if (causes?.length !== 2) return;
+  const [primary, fallback] = causes;
+  if (primary.provider !== "instaloader" || fallback.provider !== "yt-dlp" ||
+      fallback.code !== "RATE_LIMIT" || !fallback.retryable || fallback.fallbackDisabled) return;
+  if (primary.code === "AUTH_REQUIRED" ||
+      (primary.instagramAssetFailure && [403, 404].includes(primary.status) && fallback.confirmedRateLimit)) return fallback;
 }
 
 export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes = 48 * 1024 * 1024, stage = "download" } = {}) {
@@ -31,7 +35,7 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
   if (error?.code === "MEDIA_CACHE_CAPACITY") return { code: "CACHE_BUSY", retryable: true, stage: "prepare", status: null,
     reason: "Місце для підготовлених файлів зайняте незавершеними надсиланнями. Цю публікацію ще не надіслано; повтори пізніше." };
   if (error?.code === "THREADS_RENDER_UNAVAILABLE") return { code: "SOURCE_CONTENT_UNAVAILABLE", retryable: true, stage: "download", status: null,
-    reason: "Threads повернув сторінку без самого вмісту публікації, тому отримати файл цим способом зараз не вдалося. Це не помилка формату відео. Можна надіслати сам файл або іншу доступну копію." };
+    reason: failureMessage({ code: "SOURCE_CONTENT_UNAVAILABLE" }) };
   if(error?.code === 'SOCIAL_DOWNLOAD_TIMEOUT') return {
     code:'TIMEOUT',retryable:true,stage,status:null,reason:'Вичерпано час цієї спроби; роботу зупинено. Можна повторити пізніше.',
     ...(Number.isFinite(error.elapsedSeconds)?{elapsedSeconds:error.elapsedSeconds}:{}),
@@ -42,7 +46,8 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
       ...mediaFailure(attempt.error, { maxDurationSeconds, maxUploadBytes, stage }) }));
     // Prefer the first useful cause, rather than the last, often empty, fallback.
     const available = causes.filter(cause => !cause.fallbackDisabled);
-    const selected = limitedInstagramFallback(available) || available.find(cause => ["SOURCE_MISMATCH", "SOURCE_UNVERIFIED"].includes(cause.code)) ||
+    const selected = limitedInstagramFallback(available) || available.find(cause => ["AGE_RESTRICTED", "REGION_RESTRICTED"].includes(cause.code)) ||
+      available.find(cause => ["SOURCE_MISMATCH", "SOURCE_UNVERIFIED"].includes(cause.code)) ||
       available.find(cause => !["UNKNOWN", "NO_MEDIA"].includes(cause.code)) || available[0] || causes[0];
     const { provider, ...failure } = selected;
     return { ...failure, causes, ...(Number.isFinite(error.retryAfterSeconds) ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
@@ -75,6 +80,8 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
     code = "RATE_LIMIT"; retryable = true;
     reason = "Сервіс тимчасово обмежив кількість запитів. Спробуй ще раз пізніше.";
     if (Number.isFinite(error.retryAfterSeconds) && error.retryAfterSeconds > 0) reason += ` Наступна спроба — приблизно через ${Math.ceil(error.retryAfterSeconds)} с.`;
+  } else if (stage === "download" && ["AGE_RESTRICTED", "REGION_RESTRICTED"].includes(error?.code)) {
+    code = error.code; reason = failureMessage({ code });
   } else if (error?.code === "SERVICE_ERROR" || (status >= 500 && status <= 599)) {
     code = "SERVICE_ERROR"; retryable = true;
     reason = "Сервіс завантаження або Telegram повернув тимчасову мережеву помилку. Можна повторити спробу.";
@@ -103,6 +110,9 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
     reason = "Точну причину поки не визначено. Діагностику збережено для перевірки; спробуй інше публічне посилання або надішли файл.";
   }
   return { code, retryable, reason, stage, status: status || null,
+    ...(error?.instagramAssetFailure === true ? { instagramAssetFailure: true } : {}),
+    ...(stage === "download" && (error?.sourceAccessDenied === true ||
+      ["InstagramPageGate", "PrivateProfileNotFollowedException"].includes(error?.adapterErrorType)) ? { sourceAccessDenied: true } : {}),
     ...(stage === "upload" && ["sendPhoto", "sendVideo", "sendMediaGroup", "sendDocument", "editMessageMedia"].includes(error?.method) &&
       Number.isInteger(status) && status >= 400 && status < 500 && status !== 429 && error.telegramErrorCode === status
       ? { telegramRejected: true } : {}),
@@ -119,9 +129,9 @@ export function failureMessage(failure, locale = "uk") {
   const wait = Math.ceil(failure.retryAfterSeconds || 0);
   switch (failure.code) {
     case "SOURCE_RETRY_EXHAUSTED":
-      return text("Instagram kept limiting requests. I couldn’t retrieve this post.", "Instagram продолжает ограничивать запросы. Не удалось получить эту публикацию.", "Instagram продовжує обмежувати запити. Не вдалося отримати цю публікацію.");
+      return text("The service kept limiting downloads.", "Сервис продолжает ограничивать скачивание.", "Сервіс продовжує обмежувати завантаження.");
     case "SOURCE_RETRY_CAPACITY":
-      return text("The Instagram download queue is full. This post couldn’t be queued.", "Очередь загрузок из Instagram заполнена. Эту публикацию не удалось поставить в очередь.", "Черга завантажень з Instagram заповнена. Цю публікацію не вдалося додати до черги.");
+      return text("The download queue is full.", "Очередь загрузок заполнена.", "Черга завантажень заповнена.");
     case "GROUP_RATE_LIMIT": case "URL_BACKOFF": case "RATE_LIMIT": case "IN_PROGRESS": case "CAPACITY": case "FAILURE_COOLDOWN":
       return wait > 0
         ? text(`Try again in ${wait} s.`, `Повтори через ${wait} с.`, `Повтори через ${wait} с.`)
@@ -150,7 +160,13 @@ export function failureMessage(failure, locale = "uk") {
       return text("The remaining files expired. Attach them separately.", "Копия оставшихся файлов истекла. Пришли их отдельно.", "Копія решти файлів застаріла. Надішли їх окремо.");
     case "FORMAT": case "METADATA":
       return text("Couldn’t prepare this file. Attach the original.", "Не удалось подготовить файл. Пришли оригинал.", "Не вдалося підготувати файл. Надішли оригінал.");
-    case "NO_MEDIA": case "UNAVAILABLE": case "UNSUPPORTED": case "SOURCE_CONTENT_UNAVAILABLE":
+    case "AGE_RESTRICTED":
+      return text("Instagram restricted access by age.", "Instagram ограничил доступ по возрасту.", "Instagram обмежив доступ за віком.");
+    case "REGION_RESTRICTED":
+      return text("Threads restricted access in the bot’s region.", "Threads ограничил доступ в регионе бота.", "Threads обмежив доступ у регіоні бота.");
+    case "SOURCE_CONTENT_UNAVAILABLE":
+      return text("Threads didn’t show the post.", "Threads не показал публикацию.", "Threads не показав публікацію.");
+    case "NO_MEDIA": case "UNAVAILABLE": case "UNSUPPORTED":
       return text("Couldn’t get the file from this link. Attach it here.", "Не удалось получить файл по ссылке. Пришли его сюда.", "Не вдалося отримати файл за посиланням. Надішли його сюди.");
     default:
       return text("Couldn’t send the file. Try again later.", "Не удалось отправить файл. Повтори позже.", "Не вдалося надіслати файл. Повтори пізніше.");

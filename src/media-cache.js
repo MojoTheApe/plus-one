@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { assertVerifiedMediaSource, isTikTokPhotoSet, mediaPublicationKey, mediaReference } from "./media-source.js";
+import { assertVerifiedMediaSource, isTikTokPhotoSet, mediaPublicationKey, mediaReference, rebindVerifiedMediaSource } from "./media-source.js";
 import { assertSameMediaItems, hasMediaItemIdentity, maxPublicationItems } from "./media-items.js";
 
 const safeId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -118,24 +118,35 @@ export class MediaCache {
     });
   }
 
-  async forDelivery({ chatId, topicId = null, messageId, entryId, sourceUrl, botId }) {
+  async forDelivery({ chatId, topicId = null, messageId, entryId, sourceUrl, botId, verifiedPublication = false }) {
     return this.lock(async () => {
       const state = await this.read();
       await this.trim(state);
-      const key = sourceUrl && mediaPublicationKey(sourceUrl);
-      const entry = state.entries.slice().reverse().find(item => String(item.chatId) === String(chatId) && item.topicId === topicId &&
-        (entryId ? item.id === entryId : messageId ? item.sourceMessageId === messageId : !item.pending && key && reusablePublication(item, sourceUrl)) &&
-        (!key || [item.sourceUrl, item.source?.requested?.url, item.source?.resolved?.url].some(value => value && mediaPublicationKey(value) === key)));
       await this.write(state);
-      if (!entry) return null;
-      const manifest = entry.manifest?.length === entry.sourceFileCount ? entry.manifest : entry.files;
-      const files = manifest.map(item => {
-        const local = entry.files.find(file => file.index === item.index);
-        const receipt = entry.receipts?.find(value => value.index === item.index && value.botId === botId);
-        return { ...item, ...(local ? { ...local, filePath: path.join(this.directory, entry.id, local.name) } : {}),
-          ...(receipt ? { telegramFileId: receipt.fileId } : {}) };
-      });
-      return { ...this.expose(entry), files, complete: files.length === entry.sourceFileCount && files.every(file => file.filePath || file.telegramFileId) };
+      const key = sourceUrl && mediaPublicationKey(sourceUrl);
+      for (const entry of state.entries.slice().reverse()) {
+        if (String(entry.chatId) !== String(chatId) || entry.topicId !== topicId) continue;
+        if (key && ![entry.sourceUrl, entry.source?.requested?.url, entry.source?.resolved?.url].some(url => url && mediaPublicationKey(url) === key)) continue;
+        if (entryId && entry.id !== entryId) continue;
+        if (!entryId && messageId && entry.sourceMessageId !== messageId) continue;
+        if (!entryId && !messageId && (entry.pending || !key || !reusablePublication(entry, sourceUrl))) continue;
+        let source = entry.source;
+        if (verifiedPublication) {
+          // With an opaque share URL only the verified request can bind it to a native post.
+          if (!mediaReference(sourceUrl)?.id && mediaPublicationKey(source?.requested?.url) !== key) continue;
+          try { source = rebindVerifiedMediaSource(source, sourceUrl); } catch { continue; }
+        }
+        const manifest = entry.manifest?.length === entry.sourceFileCount ? entry.manifest : entry.files;
+        const files = manifest.map(item => {
+          const local = entry.files.find(file => file.index === item.index);
+          const receipt = entry.receipts?.find(value => value.index === item.index && value.botId === botId);
+          return { ...item, ...(local ? { ...local, filePath: path.join(this.directory, entry.id, local.name) } : {}),
+            ...(receipt ? { telegramFileId: receipt.fileId } : {}) };
+        });
+        const complete = files.length > 0 && files.length === entry.sourceFileCount && files.every(file => file.filePath || file.telegramFileId);
+        if (complete || !verifiedPublication) return { ...this.expose(entry), source, files, complete };
+      }
+      return null;
     });
   }
 

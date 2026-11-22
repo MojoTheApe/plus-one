@@ -96,6 +96,12 @@ export function assertVerifiedMediaSource(source, requestUrl) {
   return checked;
 }
 
+export function rebindVerifiedMediaSource(source, requestUrl) {
+  const checked = assertVerifiedMediaSource(source, source?.requested?.url);
+  return verifiedMediaSource(requestUrl, { provider: checked.provider, resolvedUrl: checked.resolved.url,
+    id: checked.resolved.id, owner: checked.resolved.owner, kind: checked.resolved.kind });
+}
+
 export function nativeExtractorSource(url, info) {
   const requested = mediaReference(url);
   const key = String(info.extractor_key || info.extractor || "").toLowerCase();

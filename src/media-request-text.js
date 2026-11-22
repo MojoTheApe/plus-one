@@ -32,6 +32,9 @@ function requestReason({ provider, failure }, locale, multipleFailures, grouped 
     case "AUTH_REQUIRED":
       if (grouped) return t("I don’t have access to these posts.", "У меня нет доступа к этим публикациям.", "Не маю доступу до цих публікацій.");
       return t("I don’t have access to this post.", "У меня нет доступа к этой публикации.", "Не маю доступу до цієї публікації.");
+    case "SOURCE_CONTENT_UNAVAILABLE":
+      if (grouped) return t("Threads didn’t show the posts.", "Threads не показал публикации.", "Threads не показав публікації.");
+      return failureMessage(failure, locale);
     case "DOWNLOAD_DISABLED":
       return t("Media downloads are turned off for this group.", "В этой группе скачивание медиа отключено.", "У цій групі завантаження медіа вимкнено.");
     case "ALREADY_VISIBLE":

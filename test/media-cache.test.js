@@ -276,3 +276,22 @@ test("TikTok video and photo aliases with the same ID cannot reuse a rendered cl
   assert.ok((await cache.forDelivery({ chatId: 1, sourceUrl: video })).complete);
   assert.equal(await cache.forDelivery({ chatId: 1, sourceUrl: photo }), null);
 });
+
+test('cross-message reuse binds an opaque share to the verified request and original topic', async t => {
+  const { verifiedMediaSource } = await import('../src/media-source.js');
+  const directory = await temporaryDirectory(t), filePath = path.join(directory, 'photo.jpg');
+  await fs.writeFile(filePath, 'fixture');
+  const cache = new MediaCache(path.join(directory, 'cache'));
+  const share = 'https://www.threads.com/share/example/';
+  const other = 'https://www.threads.com/share/other/';
+  const post = 'https://www.threads.com/@example/post/ABC/';
+  const record = { chatId: 1, topicId: 2, sourceMessageId: 20, sourceUrl: share,
+    files: [{ filePath, mediaKind: 'image' }] };
+  const scope = { chatId: 1, topicId: 2, sourceUrl: share, verifiedPublication: true };
+  const from = url => verifiedMediaSource(url, { provider: 'threads-page', resolvedUrl: post, id: 'ABC', owner: 'example' });
+  await cache.put({ ...record, source: from(other) });
+  assert.equal(await cache.forDelivery(scope), null);
+  await cache.put({ ...record, source: from(share) });
+  assert.equal((await cache.forDelivery(scope)).complete, true);
+  assert.equal(await cache.forDelivery({ ...scope, topicId: 3 }), null);
+});
