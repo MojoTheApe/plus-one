@@ -268,6 +268,7 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
   if (/\/(?:accounts\/)?login(?:\/|\?|$)/iu.test(new URL(resolvedUrl).pathname)) {
     throw Object.assign(new Error("Threads redirected to login; authentication required"), { code: "AUTH_REQUIRED" });
   }
+  checkThreadsRegionGate(html, url, resolvedUrl);
   const extracted = extractThreadsPublication(html, resolvedUrl);
   if (!extracted.items.length) {
     if (/"status"\s*:\s*"fail_ssr_disabled"/u.test(html)) {
@@ -276,6 +277,7 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
     if (!extracted.post && ["og:image", "twitter:image", "og:video", "og:video:url", "twitter:player:stream"].some(key => extractHtmlMetaContent(html, key))) {
       throw sourceIdentityError("MEDIA_SOURCE_UNVERIFIED", "threads-page");
     }
+    if (!extracted.post) throw Object.assign(new Error("Threads did not return the post"), { code: "THREADS_RENDER_UNAVAILABLE" });
     const error = new Error("Threads fetch returned no media");
     error.code = "THREADS_MEDIA_NOT_FOUND";
     throw error;
@@ -305,6 +307,38 @@ export async function downloadThreadsFromPage(url, tempDir, deps) {
     files,
     title: extracted.caption || (files.length > 1 ? "Threads media" : files[0].title.replace(/^Instagram/, "Threads")),
   };
+}
+
+// Threads can serve its region gate with HTTP 200 and fail_ssr_disabled.
+// Module preloads, translated strings and other posts on the page do not
+// identify the active application route or the publication it belongs to.
+function checkThreadsRegionGate(html, url, resolvedUrl) {
+  if (!html.includes("BarcelonaGeoBlockRoute")) return;
+  const requested = mediaReference(url), resolved = mediaReference(resolvedUrl);
+  // Each server initializer is [module, method, dependencies, arguments].
+  const callArguments = (calls, module, method) => Array.isArray(calls)
+    ? calls.filter(call => call?.[0] === module && call[1] === method && Array.isArray(call[3])).flatMap(call => call[3]) : [];
+  for (const script of html.matchAll(/<script\b[^>]*\stype=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/giu)) {
+    if (!script[1].includes("BarcelonaGeoBlockRoute")) continue;
+    let bootstrap;
+    try { bootstrap = JSON.parse(script[1]); } catch { continue; }
+    for (const batch of callArguments(bootstrap?.require, "ScheduledServerJS", "handle")) {
+      for (const init of callArguments(batch?.__bbox?.require, "CometPlatformRootClient", "initialize")) {
+        const route = init?.initialRouteInfo?.route;
+        if (route?.canonicalRouteName !== "comet.barcelonawebloggedout.BarcelonaGeoBlockRoute" ||
+            route.rootView?.resource?.__dr !== "BarcelonaGeoBlockedErrorRoot.react") continue;
+        const pk = route.rootView.props?.mediaPk;
+        const bound = typeof route.url === "string" && URL.canParse(route.url, resolvedUrl)
+          ? mediaReference(new URL(route.url, resolvedUrl)) : null;
+        if (bound?.platform === "threads" && resolved?.id && resolved.id === bound.id && resolved.owner === bound.owner &&
+            (!requested?.id || (requested.id === bound.id && requested.owner === bound.owner)) &&
+            typeof pk === "string" && /^[1-9]\d{0,24}$/u.test(pk) && instagramMediaCode(pk) === bound.id) {
+          throw Object.assign(new Error("Threads restricted this post in the bot's region"), { code: "REGION_RESTRICTED" });
+        }
+        throw Object.assign(new Error("Threads did not identify the post on its access screen"), { code: "THREADS_RENDER_UNAVAILABLE" });
+      }
+    }
+  }
 }
 
 export async function downloadInstagramWithSnapinsta(url, tempDir, deps) {
@@ -380,9 +414,10 @@ export async function downloadSocialVideo(url, deps) {
       catch (error) {
         const failure = mediaFailure(error);
         const isPost = mediaReference(url)?.kind === "post";
-        const deniedPost = isPost && ([401, 403].includes(failure.status) || error.adapterErrorType === "PrivateProfileNotFollowedException");
+        const denied = [401, 403, 404, 410, 451].includes(failure.status) || error.code === "AGE_RESTRICTED" ||
+          ["PrivateProfileNotFollowedException", "InstagramPageGate"].includes(error.adapterErrorType);
         if (["MEDIA_SOURCE_UNVERIFIED", "MEDIA_SOURCE_MISMATCH"].includes(error.code) ||
-            deps.signal?.aborted || failure.code === "RATE_LIMIT" || deniedPost) throw error;
+            deps.signal?.aborted || failure.code === "RATE_LIMIT" || denied) throw error;
         // A generic adapter login/unavailable result retains the prior native video path.
         // Only an ordinary source failure opens the additional photo extraction path.
         const nativeDeps = isPost && !["SERVICE_ERROR", "TIMEOUT", "NO_MEDIA"].includes(failure.code)

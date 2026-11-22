@@ -2964,3 +2964,64 @@ for (const order of ["short first", "short last", "native video first", "native 
     assert.equal(fetched.includes(short), order === "late identity", "known destinations require no speculative render download");
   });
 }
+
+test('an Instagram retry during a source pause uses the complete verified copy saved for another message', async t => {
+  const f = await fixture(t);
+  const url = 'https://www.instagram.com/p/recovery/';
+  const source = nativeExtractorSource(url, { extractor_key: 'Instagram', id: 'recovery' });
+  const filePath = path.join(f.root, 'saved.png');
+  await fs.writeFile(filePath, await photoBytes());
+  const cache = new MediaCache(path.join(f.root, 'runtime/media-cache'));
+  const copy = { chatId: -123, topicId: 9, sourceMessageId: 499, sourceUrl: url, source,
+    files: [{ filePath, mediaKind: 'image', mimeType: 'image/png', sourceItemId: 'publication:recovery' }] };
+  await cache.put(copy);
+  // A newer record without verified provenance must not hide the older complete copy.
+  await cache.put({ ...copy, sourceMessageId: 498, source: null });
+  const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  const operation = await journal.record({ chatId: -123, topicId: 9, userId: 88, sourceMessageId: 500, errorMessageId: 600,
+    url: 'https://www.instagram.com/reel/recovery/', status: 'failed', failure: { code: 'RATE_LIMIT', stage: 'download',
+      retryable: true, retryAfterSeconds: 180, causes: [
+        { provider: 'instaloader', code: 'AUTH_REQUIRED' }, { provider: 'yt-dlp', code: 'RATE_LIMIT', retryable: true },
+      ] } });
+  let requests = 0;
+  f.setDownloader(async () => { requests++; throw new Error('Unexpected source download'); });
+  await f.handle({ message_id: 1500, text: 'повтори', reply_to_message: { message_id: 600, from: { id: 77, is_bot: true }, text: 'Previous failure' } });
+  const saved = (await journal.read()).find(row => row.id === operation.id);
+  assert.equal(requests, 0);
+  assert.equal(saved.status, 'done');
+  assert.equal(saved.deliveryRoute, 'prepared-cache');
+  assert.equal(f.calls.filter(call => call.method === 'sendPhoto').length, 1);
+});
+
+test('Threads quietly resumes after a real source limit and a transient response using the same status', async t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const f = await fixture(t);
+  const url = 'https://www.threads.com/@source/post/resume/';
+  const original = instagramUpdate(9300, url);
+  const filePath = path.join(f.root, 'threads.png');
+  await fs.writeFile(filePath, await photoBytes());
+  let requests = 0;
+  f.setDownloader(async () => {
+    requests++;
+    if (requests === 1) throw Object.assign(new Error('HTTP 429'), { status: 429, retryAfterSeconds: 65 });
+    if (requests === 2) throw Object.assign(new Error('Service unavailable'), { status: 503 });
+    return { source: verifiedMediaSource(url, { provider: 'threads-page', id: 'resume', owner: 'source' }),
+      files: [{ filePath, mediaKind: 'image', mimeType: 'image/png', sourceItemId: 'publication:resume' }] };
+  });
+  const journal = new MediaOperations(path.join(f.root, 'runtime/media.json'));
+  await f.queue(original);
+  for (let attempts = 1; attempts <= 2; attempts++) {
+    const [waiting] = await journal.read();
+    assert.equal(waiting.status, 'waiting_source');
+    assert.equal(waiting.sourceRetry.attempts, attempts);
+    assert.ok(waiting.sourceRetry.retryAt > now);
+    now = waiting.sourceRetry.retryAt + 1;
+    await f.queue((await f.pending())[0]);
+  }
+  assert.equal(requests, 3);
+  assert.equal((await journal.read())[0].status, 'done');
+  assert.equal(f.calls.filter(call => call.method === 'sendMessage').length, 1);
+  assert.equal(f.calls.filter(call => call.method === 'editMessageText').length, 0);
+  assert.equal(f.calls.filter(call => call.method === 'sendPhoto').length, 1);
+});

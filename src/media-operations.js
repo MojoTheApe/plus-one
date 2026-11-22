@@ -31,7 +31,7 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
   if (error?.code === "MEDIA_CACHE_CAPACITY") return { code: "CACHE_BUSY", retryable: true, stage: "prepare", status: null,
     reason: "Місце для підготовлених файлів зайняте незавершеними надсиланнями. Цю публікацію ще не надіслано; повтори пізніше." };
   if (error?.code === "THREADS_RENDER_UNAVAILABLE") return { code: "SOURCE_CONTENT_UNAVAILABLE", retryable: true, stage: "download", status: null,
-    reason: "Threads повернув сторінку без самого вмісту публікації, тому отримати файл цим способом зараз не вдалося. Це не помилка формату відео. Можна надіслати сам файл або іншу доступну копію." };
+    reason: failureMessage({ code: "SOURCE_CONTENT_UNAVAILABLE" }) };
   if(error?.code === 'SOCIAL_DOWNLOAD_TIMEOUT') return {
     code:'TIMEOUT',retryable:true,stage,status:null,reason:'Вичерпано час цієї спроби; роботу зупинено. Можна повторити пізніше.',
     ...(Number.isFinite(error.elapsedSeconds)?{elapsedSeconds:error.elapsedSeconds}:{}),
@@ -42,7 +42,8 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
       ...mediaFailure(attempt.error, { maxDurationSeconds, maxUploadBytes, stage }) }));
     // Prefer the first useful cause, rather than the last, often empty, fallback.
     const available = causes.filter(cause => !cause.fallbackDisabled);
-    const selected = limitedInstagramFallback(available) || available.find(cause => ["SOURCE_MISMATCH", "SOURCE_UNVERIFIED"].includes(cause.code)) ||
+    const selected = limitedInstagramFallback(available) || available.find(cause => ["AGE_RESTRICTED", "REGION_RESTRICTED"].includes(cause.code)) ||
+      available.find(cause => ["SOURCE_MISMATCH", "SOURCE_UNVERIFIED"].includes(cause.code)) ||
       available.find(cause => !["UNKNOWN", "NO_MEDIA"].includes(cause.code)) || available[0] || causes[0];
     const { provider, ...failure } = selected;
     return { ...failure, causes, ...(Number.isFinite(error.retryAfterSeconds) ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
@@ -75,6 +76,8 @@ export function mediaFailure(error, { maxDurationSeconds = 300, maxUploadBytes =
     code = "RATE_LIMIT"; retryable = true;
     reason = "Сервіс тимчасово обмежив кількість запитів. Спробуй ще раз пізніше.";
     if (Number.isFinite(error.retryAfterSeconds) && error.retryAfterSeconds > 0) reason += ` Наступна спроба — приблизно через ${Math.ceil(error.retryAfterSeconds)} с.`;
+  } else if (stage === "download" && ["AGE_RESTRICTED", "REGION_RESTRICTED"].includes(error?.code)) {
+    code = error.code; reason = failureMessage({ code });
   } else if (error?.code === "SERVICE_ERROR" || (status >= 500 && status <= 599)) {
     code = "SERVICE_ERROR"; retryable = true;
     reason = "Сервіс завантаження або Telegram повернув тимчасову мережеву помилку. Можна повторити спробу.";
@@ -150,7 +153,13 @@ export function failureMessage(failure, locale = "uk") {
       return text("The remaining files expired. Attach them separately.", "Копия оставшихся файлов истекла. Пришли их отдельно.", "Копія решти файлів застаріла. Надішли їх окремо.");
     case "FORMAT": case "METADATA":
       return text("Couldn’t prepare this file. Attach the original.", "Не удалось подготовить файл. Пришли оригинал.", "Не вдалося підготувати файл. Надішли оригінал.");
-    case "NO_MEDIA": case "UNAVAILABLE": case "UNSUPPORTED": case "SOURCE_CONTENT_UNAVAILABLE":
+    case "AGE_RESTRICTED":
+      return text("Instagram restricted access by age.", "Instagram ограничил доступ по возрасту.", "Instagram обмежив доступ за віком.");
+    case "REGION_RESTRICTED":
+      return text("Threads restricted access in the bot’s region.", "Threads ограничил доступ в регионе бота.", "Threads обмежив доступ у регіоні бота.");
+    case "SOURCE_CONTENT_UNAVAILABLE":
+      return text("Threads didn’t show the post.", "Threads не показал публикацию.", "Threads не показав публікацію.");
+    case "NO_MEDIA": case "UNAVAILABLE": case "UNSUPPORTED":
       return text("Couldn’t get the file from this link. Attach it here.", "Не удалось получить файл по ссылке. Пришли его сюда.", "Не вдалося отримати файл за посиланням. Надішли його сюди.");
     default:
       return text("Couldn’t send the file. Try again later.", "Не удалось отправить файл. Повтори позже.", "Не вдалося надіслати файл. Повтори пізніше.");

@@ -114,6 +114,44 @@ test('a Threads page with disabled server content reports its actual restriction
   });
   assert.equal(extractorCalls,0);assert.equal(result.title,'Actual page result');
 });
+
+test('Threads binds its active regional gate to the redirected post, ahead of previews and shell status', async () => {
+  const direct = 'https://www.threads.com/@person/post/BA';
+  const share = 'https://www.threads.com/share/abc';
+  const route = { canonicalRouteName: 'comet.barcelonawebloggedout.BarcelonaGeoBlockRoute', url: '/@person/post/BA?xmt=x',
+    rootView: {resource:{__dr:'BarcelonaGeoBlockedErrorRoot.react'}, props:{mediaPk:'64', geoBlockRuleType:null}} };
+  function app(active, extra = {}) {
+    const init = ['CometPlatformRootClient', 'initialize', ['BarcelonaLoggedOutCometRootConfig'], [{initialRouteInfo:{route:active}}]];
+    const loader = ['ScheduledServerJS', 'handle', [], [{__bbox:{require:[init]}}]];
+    return '<script type="application/json" data-sjs>' + JSON.stringify({require:[loader],...extra}) + '</script>';
+  }
+  const shell = '<script type="application/json">{"status":"fail_ssr_disabled"}</script>';
+  const preview = '<meta property="og:url" content="' + direct + '"><meta property="og:video" content="https://scontent.example.fbcdn.net/v.mp4">';
+  const cases = [
+    [share, shell + app(route) + preview, 'REGION_RESTRICTED'],
+    [direct, app(route), 'REGION_RESTRICTED'],
+    ['https://www.threads.com/@other/post/BA', shell + app(route), 'THREADS_RENDER_UNAVAILABLE'],
+    [direct, shell + app({...route, url:'/@other/post/BA'}), 'THREADS_RENDER_UNAVAILABLE'],
+    [direct, shell + app({...route, rootView:{...route.rootView, props:{mediaPk:'65'}}}), 'THREADS_RENDER_UNAVAILABLE'],
+    [direct, shell + app({...route, rootView:{...route.rootView, props:{mediaPk:64}}}), 'THREADS_RENDER_UNAVAILABLE'],
+    [direct, shell + app({canonicalRouteName:'post'}, {recommendations:[route]}), 'THREADS_RENDER_UNAVAILABLE'],
+    [direct, '<script type="application/json">' + JSON.stringify({data:{code:'BA',media_type:19,
+      user:{username:'person'}, caption:{text:JSON.stringify(route)}}}) + '</script>', 'THREADS_MEDIA_NOT_FOUND'],
+    [direct, '<p>This content isn’t available to everyone. BarcelonaGeoBlockRoute</p>', 'THREADS_RENDER_UNAVAILABLE'],
+  ];
+  for (const [request, html, code] of cases) {
+    let calls = 0;
+    await assert.rejects(downloadThreadsFromPage(request, '/tmp/threads', { ...baseDeps(mockFs()),
+      fetch: async () => {
+        assert.equal(++calls, 1);
+        const page = new Response(html);
+        Object.defineProperty(page, 'url', {value:direct});
+        return page;
+      },
+    }), {code});
+    assert.equal(calls, 1);
+  }
+});
 test('the primary downloader accepts a valid video without an audio track',async()=>{
   const result=await downloadSocialVideoWithYtDlp('https://www.instagram.com/reel/silent','/tmp/social',{
     ...baseDeps(mockFs()),execFileAsync:async(_file,args)=>({stdout:args.includes('--dump-single-json')?JSON.stringify({extractor_key:'Instagram',id:'silent',channel:'fixture',duration:1}):''}),
@@ -443,7 +481,7 @@ test("downloadThreadsFromPage rejects empty media responses", async () => {
       ...baseDeps(mockFs()),
       fetch: async () => mockTextResponse("<html></html>"),
     }),
-    /returned no media/,
+    {code:"THREADS_RENDER_UNAVAILABLE"},
   );
 });
 
@@ -794,6 +832,9 @@ test('the native photo path rejects a foreign post, an ambiguous collection, an 
 test('a restricted post stops on evidenced access denial, while generic adapter failures retain the native video route', async () => {
   for (const [error, expectedCalls, plugin] of [
     [{ code: 'RATE_LIMIT', status: 429 }, 1, false],
+    [{ code: 'AGE_RESTRICTED' }, 1, false],
+    [{ code: 'AUTH_REQUIRED', adapterErrorType: 'InstagramPageGate' }, 1, false],
+    [{ code: 'UNAVAILABLE', status: 404 }, 1, false],
     [{ code: 'AUTH_REQUIRED', status: 401 }, 1, false],
     [{ code: 'UNAVAILABLE', status: 403 }, 1, false],
     [{ code: 'AUTH_REQUIRED', adapterErrorType: 'PrivateProfileNotFollowedException' }, 1, false],
